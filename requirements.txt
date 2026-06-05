@@ -8,4 +8,3 @@ webrtcvad==2.0.10
 python-dotenv==1.0.1
 setuptools>=68
 wheel>=0.41
-

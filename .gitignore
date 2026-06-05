@@ -1,3 +1,68 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.dll
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Editors/IDEs
+.vscode/
+.idea/
+*.iml
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs & temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Local configuration / secrets
+.env
+.env.*.local
+*.local.json
+
+# Model weights (large files; don't version control)
 models/
+# If you need to keep documentation in models/, whitelist it:
+# !models/README.md
+
+# Generated outputs (images, artifacts)
 outputs/
-.venv
+# If you want to keep sample outputs tracked, whitelist a README:
+# !outputs/README.md
+
+# Static build artifacts (only if you have toolchains that build into static/)
+static/**/dist/
+static/**/build/
+static/**/.cache/
+
+# Test and coverage caches
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.cache/
+
+# Jupyter checkpoints (if notebooks are ever used)
+.ipynb_checkpoints/
+
+# Dependency managers (optional)
+poetry.lock
+Pipfile.lock
+
+# Packaging/build artifacts
+build/
+dist/
+*.egg-info/

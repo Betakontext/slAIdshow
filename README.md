@@ -33,32 +33,58 @@ Hinweis: In der aktuellen Version sind Whisper und ComfyUI noch als Platzhalter 
 
 ---
 
-Für zB. Laptop / Ubuntu / local
+speechtoimage_ai$ tree
+.
+├── app.py
+├── config.py
+├── mic_check_whisper.py
+├── models
+│   └── ggml-base.bin
+├── outputs
+│   └── images
+├── __pycache__
+│   └── app.cpython-312.pyc
+├── README.md
+├── requirements.txt
+├── run.sh
+├── static
+└── utils
+    ├── audio_test.py
+    └── dev_check.py
+
+
+### Installation
+Z.B.: Auf Laptop Thinkpad X260 / Ubuntu / local
 
 BASH
 
 	sudo apt update
 	sudo apt install -y build-essential cmake pkg-config python3-dev \
-						libportaudio2 libasound2-dev
+	libportaudio2 libasound2-dev
 
+#### 1) Projektordner vorbereiten
 
-#### Installation
-
-1) Projektordner vorbereiten
-
-- Lege `app.py` in ein neues Verzeichnis, z. B. `speechtoimage_ai/`
+- Lege alle Dateien asu dem Repo in ein neues Verzeichnis, z. B. `speechtoimage_ai/`
 - Öffne ein Terminal in diesem Verzeichnis
 
-2) Virtuelle Umgebung erstellen und aktivieren
+#### 2) Virtuelle Umgebung erstellen und aktivieren
 
 BASH
 
 	python3 -m venv .venv
 	source .venv/bin/activate
 
-#### Abhängigkeiten installieren
+#### 3) Installation Script starten (optimiert für Thinkpad X260)
 
-requirements.txt:
+BASH
+
+	chmod +x run.sh
+	./run.sh
+
+
+#### Oder Abhängigkeiten installieren / anpassen
+
+Diese findest du in requirements.txt:
 
 	fastapi==0.115.0
 	uvicorn[standard]==0.30.6
@@ -66,30 +92,41 @@ requirements.txt:
 	pydantic>=2,<3
 	numpy==2.0.1
 	sounddevice==0.4.7
-	webrtcvad==2.0.10
 	python-dotenv==1.0.1
 	setuptools>=68
 	wheel>=0.41
 
+Installation:
 
 BASH
 
 	pip install --upgrade pip
 	pip install -r requirements.txt
-	export $(grep -v '^#' .env | xargs -d '\n')
-	pip uninstall -y webrtcvad
 	pip install --no-cache-dir webrtcvad-wheels
 	pip install --no-cache-dir pywhispercpp
 
-Whisper import test:
+Umgebung laden:
+
+BASH
+
+	export $(grep -v '^#' .env | xargs -d '\n')
+
+#### Testen:
+
+Whisper import:
+
+BASH
 
 	python - <<'PY'
 	from pywhispercpp.model import Model as WhisperModel
 	print("pywhispercpp import OK")
 	PY
 
+Falls nichts gefunden wird nochmal:
 
-#### Audio testen (optional, empfohlen)
+	pip uninstall -y pywhispercpp
+	pip install --no-cache-dir pywhispercpp
+
 
 Audiogerät finden:
 
@@ -106,6 +143,8 @@ Z.B: 15 pipewire, ALSA (64 in, 64 out)
 
 Notiere dir entweder den Namen exakt oder den Index (Zahl) um sie in diesem Testskript ggf. anzupassen:
 
+Testskript Lautstärke:
+
 	python - <<'PY'
 	import sounddevice as sd, numpy as np
 	sr=48000; dur=3
@@ -120,24 +159,16 @@ Notiere dir entweder den Namen exakt oder den Index (Zahl) um sie in diesem Test
 	print(f"Peak={peak:.3f}, RMS={rms:.3f}, Samples={audio.shape[0]}")
 	PY
 
-
 -> Wenn das Gerät angeschaltet ist und reagiert ist folgender output zu erwarten:
----
+
 	Nutze Input-Device Index=15. Bitte 3s sprechen…
 	Peak=0.368, RMS=0.052
 
----
-
-
 #### Whisper einbinden (pywhispercpp)
-
-
-
-Whisper Installation (Beispiel):
 
 BASH
 
-	pip install pywhispercpp
+	pip install pywhispercpp # Oben schon geschehen
 
 Lade ein ggml-Modell (z. B. ggml-tiny.bin) in den lokalen models/-Ordner: zB auf einem CPU based Laptop:
 
