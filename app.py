@@ -195,53 +195,6 @@ def seconds_in_buffer(frame_count: int) -> float:
     return (frame_count * FRAME_MS) / 1000.0
 
 # -------------------------------
-# HTTP helpers mit Retry
-# -------------------------------
-
-async def http_post_json(
-    client: httpx.AsyncClient,
-    url: str,
-    payload: dict,
-    *,
-    max_retries: int = 5,
-    base_delay: float = 0.5,
-    timeout: float = 30.0,
-) -> dict:
-    for attempt in range(1, max_retries + 1):
-        try:
-            r = await client.post(url, json=payload, timeout=timeout)
-            r.raise_for_status()
-            return r.json()
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            if attempt == max_retries:
-                raise
-            delay = base_delay * (2 ** (attempt - 1))
-            print(f"[HTTP] POST retry {attempt}/{max_retries} -> wait {delay:.1f}s: {e}")
-            await asyncio.sleep(delay)
-    raise RuntimeError("unreachable")
-
-async def http_get_json(
-    client: httpx.AsyncClient,
-    url: str,
-    *,
-    max_retries: int = 5,
-    base_delay: float = 0.5,
-    timeout: float = 30.0,
-) -> dict:
-    for attempt in range(1, max_retries + 1):
-        try:
-            r = await client.get(url, timeout=timeout)
-            r.raise_for_status()
-            return r.json()
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            if attempt == max_retries:
-                raise
-            delay = base_delay * (2 ** (attempt - 1))
-            print(f"[HTTP] GET retry {attempt}/{max_retries} -> wait {delay:.1f}s: {e}")
-            await asyncio.sleep(delay)
-    raise RuntimeError("unreachable")
-
-# -------------------------------
 # Whisper (pywhispercpp)
 # -------------------------------
 
@@ -411,50 +364,47 @@ async def sse_stream() -> AsyncGenerator[bytes, None]:
             STATE.listeners.remove(q)
 
 # -------------------------------
-# Audio-/Transkriptionsschleife
+# Audio-/Transkriptionsschleife mit Callback→Polling-Fallback
 # -------------------------------
 
-def _open_input_stream_with_fallback(
-    desired_sr: int, frame_ms: int, prefer: Optional[str | int]
-):
-    """
-    Öffnet einen InputStream mit robuster Geräte-/SR-Wahl.
-    1) Bestimme finalen Geräteindex (Name→Index).
-    2) Versuche SR-Kandidaten.
-    3) Setze blocksize passend zu frame_ms.
-    """
+def _device_name_override_for_alsa(idx: int, name: str) -> Optional[str]:
+    # Wenn Index 0 ein klassisches ALSA "hw:0,0" ist, können wir explizit diesen String nutzen.
+    if "ALC293" in name and "(hw:0,0)" in name:
+        return "hw:0,0"
+    return None
+
+def _open_input_stream(desired_sr: int, frame_ms: int, prefer: Optional[str | int]):
     dev_idx, dev_info = pick_input_device_index(prefer)
     dev_name = dev_info.get("name", f"idx:{dev_idx}")
 
-    sr_candidates: list[int] = []
-    for sr in (desired_sr, 48000, 44100, 32000, 16000):
-        if sr not in sr_candidates:
-            sr_candidates.append(sr)
+    # Falls möglich, direkten ALSA-String setzen (stabiler bei manchen Setups)
+    dev_param: int | str = dev_idx
+    alsa_name = _device_name_override_for_alsa(dev_idx, dev_name)
+    if alsa_name:
+        dev_param = alsa_name
 
-    last_err: Optional[Exception] = None
-    for sr in sr_candidates:
+    for sr in [desired_sr, 48000, 44100, 32000, 16000]:
         frame_samples = int(sr * frame_ms / 1000)
         try:
             stream = sd.InputStream(
                 samplerate=sr,
                 channels=1,
                 dtype="float32",
-                device=dev_idx,
+                device=dev_param,         # Index oder "hw:0,0"
                 blocksize=frame_samples,
-                callback=None,
+                callback=None,            # setzen wir später
                 latency="low",
             )
-            print(f"[AUDIO] open OK: device_idx={dev_idx}, name={dev_name!r}, samplerate={sr}, blocksize={frame_samples}")
-            return stream, sr, frame_samples, dev_idx, dev_name
+            print(f"[AUDIO] open OK: device={dev_param!r}, name={dev_name!r}, samplerate={sr}, blocksize={frame_samples}")
+            return stream, sr, frame_samples, dev_idx, dev_name, dev_param
         except Exception as e:
-            print(f"[AUDIO] open FAIL: device_idx={dev_idx}, name={dev_name!r}, samplerate={sr}: {e}")
-            last_err = e
+            print(f"[AUDIO] open FAIL: device={dev_param!r}, name={dev_name!r}, samplerate={sr}: {e}")
             continue
-    raise RuntimeError(f"No supported samplerate for device_idx={dev_idx} ({dev_name!r}). Last error: {last_err}")
+    raise RuntimeError(f"No supported samplerate for device={dev_param!r} ({dev_name!r}).")
 
 async def audio_transcription_loop() -> None:
     try:
-        stream, actual_sr, frame_samples, dev_idx, dev_name = _open_input_stream_with_fallback(
+        stream, actual_sr, frame_samples, dev_idx, dev_name, dev_param = _open_input_stream(
             SAMPLE_RATE_ENV, FRAME_MS, AUDIO_DEVICE_PREF
         )
     except Exception as e:
@@ -468,8 +418,6 @@ async def audio_transcription_loop() -> None:
     vad = webrtcvad.Vad(VAD_AGGR) if (WEBRTCVAD_AVAILABLE and not DISABLE_VAD) else None
 
     audio_frames: List[np.ndarray] = []
-    in_speech = False
-    silence_ms = 0
     last_snapshot = time.time()
     last_tick = time.time()
     first_snapshot_sec = min(1.0, SNAPSHOT_SEC)
@@ -482,103 +430,104 @@ async def audio_transcription_loop() -> None:
 
     stream.callback = sd_callback
 
-    # Explizit das Input-Device setzen – identisch zu deinem Testskript
+    # Defaults explizit wie im Selftest
     try:
-        sd.default.device = (dev_idx, None)
+        sd.default.device = (dev_param, None)  # Input erzwingen (Index oder "hw:0,0")
         sd.default.samplerate = actual_sr
         sd.default.channels = 1
     except Exception as e:
         print(f"[AUDIO] could not set sd.default.*: {e}")
 
-    print(f"[CFG] device_pref={AUDIO_DEVICE_PREF!r}, device_used=idx:{dev_idx} name:{dev_name!r}, desired_sr={SAMPLE_RATE_ENV}, actual_sr={actual_sr}, frame_ms={FRAME_MS}, snapshot_sec={SNAPSHOT_SEC}, disable_vad={DISABLE_VAD}, vad_mode={'webrtc' if vad else ('off' if DISABLE_VAD else 'rms')}")
+    print(f"[CFG] device_pref={AUDIO_DEVICE_PREF!r}, device_used idx:{dev_idx} name:{dev_name!r}, param={dev_param!r}, desired_sr={SAMPLE_RATE_ENV}, actual_sr={actual_sr}, frame_ms={FRAME_MS}, snapshot_sec={SNAPSHOT_SEC}, disable_vad={DISABLE_VAD}")
 
     await broadcast("status", f"recording_start sr={actual_sr}")
     await broadcast("status", f"device_used idx={dev_idx} name={dev_name}")
     await broadcast("status", "tick warmup")
 
-    with stream:
-        # Priming: bis zu 500 ms auf erste Frames warten
-        priming_deadline = time.time() + 0.5
+    # Explizit starten (nicht nur über 'with stream:')
+    stream.start()
+
+    # Priming: warte auf erste Frames
+    try:
+        priming_deadline = time.time() + 0.6
         while time.time() < priming_deadline and not audio_frames:
             await asyncio.sleep(FRAME_MS / 1000.0)
-        if not audio_frames:
-            await broadcast("status", "audio_no_frames(check_input_device_or_permissions)")
-            print("[AUDIO] no frames received after priming; check device selection/permissions.")
-            return
+    except asyncio.CancelledError:
+        stream.stop(); stream.close()
+        await broadcast("status", "recording_stop")
+        return
 
-        try:
-            while STATE.running:
-                await asyncio.sleep(FRAME_MS / 1000.0)
+    use_polling = False
+    if not audio_frames:
+        # Fallback: Polling (synchrones read), behält async Struktur per sleep
+        use_polling = True
+        print("[AUDIO] callback produced no frames; switching to polling read() loop")
 
-                now = time.time()
-                if now - last_tick >= 1.0:
-                    last_tick = now
-                    buf_sec = seconds_in_buffer(len(STATE.transcript_buffer))
-                    await broadcast("status", f"tick frames={total_frames} buf_frames={len(STATE.transcript_buffer)} (~{buf_sec:.1f}s) sr={actual_sr}")
+    try:
+        while STATE.running:
+            await asyncio.sleep(FRAME_MS / 1000.0)
 
-                if not audio_frames:
+            now = time.time()
+            if now - last_tick >= 1.0:
+                last_tick = now
+                buf_sec = seconds_in_buffer(len(STATE.transcript_buffer))
+                await broadcast("status", f"tick frames={total_frames} buf_frames={len(STATE.transcript_buffer)} (~{buf_sec:.1f}s) sr={actual_sr}")
+
+            # Daten holen: Callback-Queue oder direktes read
+            if use_polling:
+                try:
+                    data, ov = stream.read(frame_samples)
+                    frame = data[:, 0].copy()
+                    audio_frames.append(frame)
+                except Exception as e:
+                    await broadcast("status", f"audio_read_error: {e}")
                     continue
 
-                frame = audio_frames.pop(0)
-                total_frames += 1
-                if len(frame) != frame_samples:
-                    if len(frame) < frame_samples:
-                        frame = np.pad(frame, (0, frame_samples - len(frame)))
-                    else:
-                        frame = frame[:frame_samples]
-                frame = np.clip(frame, -1.0, 1.0)
+            if not audio_frames:
+                continue
 
-                # VAD
-                if DISABLE_VAD:
-                    is_speech = True
-                elif vad is not None:
-                    frame_int16 = to_int16(frame)
-                    is_speech = vad.is_speech(frame_int16.tobytes(), actual_sr)
+            frame = audio_frames.pop(0)
+            total_frames += 1
+            if len(frame) != frame_samples:
+                if len(frame) < frame_samples:
+                    frame = np.pad(frame, (0, frame_samples - len(frame)))
                 else:
-                    is_speech = rms_vad(frame, rms_threshold=RMS_VAD_THRESHOLD)
+                    frame = frame[:frame_samples]
+            frame = np.clip(frame, -1.0, 1.0)
 
-                # Buffer für Snapshot
-                STATE.transcript_buffer.append(frame.tobytes())
-                max_buf_frames = int((12_000 / FRAME_MS))
-                if len(STATE.transcript_buffer) > max_buf_frames:
-                    STATE.transcript_buffer = STATE.transcript_buffer[-max_buf_frames:]
+            # Puffer für Snapshot
+            STATE.transcript_buffer.append(frame.tobytes())
+            max_buf_frames = int((12_000 / FRAME_MS))
+            if len(STATE.transcript_buffer) > max_buf_frames:
+                STATE.transcript_buffer = STATE.transcript_buffer[-max_buf_frames:]
 
-                if is_speech:
-                    in_speech = True
-                    silence_ms = 0
+            # Snapshot: Transkription (alle SNAPSHOT_SEC, erstes Mal schneller)
+            interval = first_snapshot_sec if not first_done else SNAPSHOT_SEC
+            if now - last_snapshot >= interval:
+                last_snapshot = now
+                first_done = True
+                seg = np.frombuffer(b"".join(STATE.transcript_buffer), dtype=np.float32)
+                if seg.size == 0 or float(np.max(np.abs(seg))) < 0.01:
+                    await broadcast("status", "whisper_empty(low_level_or_no_audio)")
+                    continue
+                txt = transcribe_chunk_with_whisper(seg, actual_sr)
+                if txt:
+                    print(f"[WHISPER] text: {txt}")
+                    await broadcast("transcript", txt)
+                    asyncio.create_task(run_llm_and_optionally_image(txt))
                 else:
-                    if in_speech:
-                        silence_ms += FRAME_MS
-                        if silence_ms >= MAX_SILENCE_MS:
-                            in_speech = False
+                    await broadcast("status", "whisper_empty(no_text)")
 
-                # Snapshot: Transkription
-                interval = first_snapshot_sec if not first_done else SNAPSHOT_SEC
-                if now - last_snapshot >= interval:
-                    last_snapshot = now
-                    first_done = True
-                    seg = np.frombuffer(b"".join(STATE.transcript_buffer), dtype=np.float32)
-                    if seg.size == 0:
-                        await broadcast("status", "whisper_empty(no_audio)")
-                        continue
-                    seg16 = resample_to_16k(seg, actual_sr)
-                    if seg16.size == 0 or float(np.max(np.abs(seg16))) < 0.01:
-                        await broadcast("status", "whisper_empty(low_level)")
-                        continue
-                    txt = transcribe_chunk_with_whisper(seg16, 16000)
-                    if txt:
-                        print(f"[WHISPER] text: {txt}")
-                        await broadcast("transcript", txt)
-                        asyncio.create_task(run_llm_and_optionally_image(txt))
-                    else:
-                        await broadcast("status", "whisper_empty(no_text)")
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            await broadcast("status", f"error_audio: {e}")
-            raise
-        finally:
-            await broadcast("status", "recording_stop")
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        await broadcast("status", f"error_audio: {e}")
+        raise
+    finally:
+        with contextlib.suppress(Exception):
+            stream.stop()
+            stream.close()
+        await broadcast("status", "recording_stop")
 
 # -------------------------------
 # LLM + Bild (optional)
@@ -767,7 +716,12 @@ async def selftest_audio():
         sr = SAMPLE_RATE_ENV
         ch = 1
         dur = 3.0
-        sd.default.device = (idx, None)
+        # Explizit ALSA-String verwenden, wenn möglich
+        dev_param: int | str = idx
+        alsa_name = "hw:0,0" if "(hw:0,0)" in (dev.get("name") or "") else None
+        if alsa_name:
+            dev_param = alsa_name
+        sd.default.device = (dev_param, None)
         rec = sd.rec(int(dur*sr), samplerate=sr, channels=ch, dtype='float32')
         sd.wait()
         x = rec[:,0]
