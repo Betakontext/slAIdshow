@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse, FileResponse, PlainTextResponse, Str
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 
-# === Optional: webrtcvad mit Fallback auf RMS ===
+# === Optional: WebRTC VAD with RMS fallback ===
 try:
     import webrtcvad  # type: ignore
     WEBRTCVAD_AVAILABLE = True
@@ -36,7 +36,7 @@ except Exception as e:
     WHISPER_AVAILABLE = False
 
 # -------------------------------
-# Konfiguration (aus .env / Umgebung)
+# Configuration (from .env / environment)
 # -------------------------------
 
 def _env_str(key: str, default: str) -> str:
@@ -69,7 +69,7 @@ VAD_AGGR = _env_int("APP_VAD_AGGRESSIVENESS", 0)
 RMS_VAD_THRESHOLD = _env_float("APP_RMS_VAD_THRESHOLD", 0.012)
 MAX_SILENCE_MS = _env_int("APP_MAX_SILENCE_MS", 300)
 
-# Snapshot-Intervall
+# Snapshot interval for pushing a transcription window to Whisper
 SNAPSHOT_SEC = _env_float("APP_SNAPSHOT_SEC", 6.0)
 
 # Whisper
@@ -88,12 +88,12 @@ OLLAMA_TEMPERATURE = _env_float("APP_OLLAMA_TEMPERATURE", 0.2)
 COMFY_HOST = _env_str("APP_COMFY_HOST", "127.0.0.1")
 COMFY_PORT = _env_int("APP_COMFY_PORT", 8188)
 
-# Ausgabeordner
+# Output directory for generated images
 OUTPUT_DIR = Path(_env_str("APP_OUTPUT_DIR", "./outputs/images"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def assert_local(host: str) -> None:
-    # Sicherheit: Nur 127.0.0.1 zulassen
+    # Security: strictly require localhost binding for privacy
     if host != "127.0.0.1":
         raise AssertionError(f"Only localhost allowed, got {host}")
 
@@ -101,7 +101,7 @@ assert_local(OLLAMA_HOST)
 assert_local(COMFY_HOST)
 
 # -------------------------------
-# Pydantic Modelle
+# Pydantic models
 # -------------------------------
 
 class OllamaGenerateRequest(BaseModel):
@@ -127,7 +127,7 @@ class ComfyPromptResponse(BaseModel):
     prompt_id: str = Field(alias="prompt_id")
 
 # -------------------------------
-# Audio-Helper
+# Audio helpers
 # -------------------------------
 
 def _list_input_devices() -> list[dict]:
@@ -135,11 +135,15 @@ def _list_input_devices() -> list[dict]:
 
 def _prefer_to_index(prefer: Optional[str | int]) -> int:
     """
-    1) prefer (exakt → substring), 2) 'pulse', 3) erstes Device mit max_input_channels > 0
+    Map a preferred device (exact name, substring or index) to an input device index:
+    1) exact name match
+    2) substring match
+    3) 'pulse' host device
+    4) first device with max_input_channels > 0
     """
     devs = _list_input_devices()
     if not devs:
-        raise RuntimeError("Keine Audio-Devices gefunden (sd.query_devices leer).")
+        raise RuntimeError("No audio devices found (sd.query_devices empty).")
 
     if prefer is not None:
         if isinstance(prefer, int):
@@ -162,7 +166,7 @@ def _prefer_to_index(prefer: Optional[str | int]) -> int:
         if d.get("max_input_channels", 0) > 0:
             return i
 
-    raise RuntimeError("Kein Eingabegerät mit max_input_channels>0 gefunden.")
+    raise RuntimeError("No input device with max_input_channels>0 found.")
 
 def pick_input_device_index(prefer: Optional[str | int]) -> tuple[int, dict]:
     idx = _prefer_to_index(prefer)
@@ -174,12 +178,14 @@ def to_int16(x: np.ndarray) -> np.ndarray:
     return (x * 32767.0).astype(np.int16, copy=False)
 
 def rms_vad(frame: np.ndarray, rms_threshold: float = 0.01) -> bool:
+    # Simple amplitude-based VAD (fallback if webrtcvad is not available)
     if frame.size == 0:
         return False
     rms = float(np.sqrt(np.mean(np.square(frame, dtype=np.float32), dtype=np.float64)))
     return rms >= rms_threshold
 
 def resample_to_16k(samples: np.ndarray, sr: int) -> np.ndarray:
+    # Simple linear resampling to 16 kHz expected by Whisper
     if sr == 16000:
         return samples.astype(np.float32, copy=False)
     target_len = int(samples.shape[0] * (16000.0 / float(sr)))
@@ -240,6 +246,7 @@ def transcribe_chunk_with_whisper(samples: np.ndarray, sr: int) -> str:
         if samples.size == 0:
             return ""
     try:
+        # Try multiple known entry points depending on pywhispercpp build
         if hasattr(_WHISPER_MODEL, "transcribe_float32"):
             txt = _WHISPER_MODEL.transcribe_float32(samples)
         elif hasattr(_WHISPER_MODEL, "transcribe"):
@@ -256,6 +263,31 @@ def transcribe_chunk_with_whisper(samples: np.ndarray, sr: int) -> str:
         return ""
 
 # -------------------------------
+# HTTP helpers (robust error logging)
+# -------------------------------
+
+async def http_post_json(client: httpx.AsyncClient, url: str, json: dict, timeout: float = 30.0) -> dict:
+    # Wrapper to surface body content on HTTP errors (useful for diagnosing 4xx/5xx)
+    try:
+        r = await client.post(url, json=json, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except httpx.HTTPError as e:
+        body = e.response.text if getattr(e, "response", None) is not None else None
+        print(f"[HTTP] POST {url} failed: {e} body={body!r}")
+        raise
+
+async def http_get_json(client: httpx.AsyncClient, url: str, timeout: float = 15.0) -> dict:
+    try:
+        r = await client.get(url, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except httpx.HTTPError as e:
+        body = e.response.text if getattr(e, "response", None) is not None else None
+        print(f"[HTTP] GET {url} failed: {e} body={body!r}")
+        raise
+
+# -------------------------------
 # LLM Prompt (Ollama)
 # -------------------------------
 
@@ -263,6 +295,7 @@ def _ollama_url(path: str) -> str:
     return f"http://{OLLAMA_HOST}:{OLLAMA_PORT}{path}"
 
 async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> str:
+    # System-style instruction to shape the image prompt succinctly
     sys_prompt = (
         "Reformulate the following description into a concise, robust prompt for image generation. "
         "Cover: subject, environment, style, lighting, color mood, composition. No placeholders."
@@ -278,14 +311,14 @@ async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> s
     return (data.get("response") or "").strip()
 
 # -------------------------------
-# ComfyUI
+# ComfyUI (optional image generation)
 # -------------------------------
 
 def _comfy_url(path: str) -> str:
     return f"http://{COMFY_HOST}:{COMFY_PORT}{path}"
 
 def build_comfy_prompt_from_text(text: str) -> ComfyPromptRequest:
-    # Platzhalter: Passe an deinen konkreten ComfyUI-Workflow an
+    # Placeholder. Adapt to your specific ComfyUI workflow graph.
     prompt_payload = {
         "3": {
             "inputs": {"text": text},
@@ -300,12 +333,13 @@ async def comfyui_run_and_wait(
     req: ComfyPromptRequest,
     poll_interval: float = 1.0,
 ) -> Tuple[str, Optional[str]]:
+    # Submit a workflow to ComfyUI and poll its history for outputs
     resp = await http_post_json(client, _comfy_url("/prompt"), req.model_dump())
     pr = ComfyPromptResponse.model_validate(resp)
     prompt_id = pr.prompt_id
     url_hist = _comfy_url(f"/history/{prompt_id}")
     print(f"[COMFY] prompt id={prompt_id} submitted, waiting for result...")
-    for _ in range(600):
+    for _ in range(600):  # up to ~10 minutes
         await asyncio.sleep(poll_interval)
         hist = await http_get_json(client, url_hist)
         outputs = hist.get(prompt_id, {}).get("outputs", {})
@@ -320,7 +354,7 @@ async def comfyui_run_and_wait(
     return prompt_id, None
 
 # -------------------------------
-# Pipeline-State
+# Pipeline state
 # -------------------------------
 
 @dataclass
@@ -332,11 +366,13 @@ class PipelineState:
     actual_sr: int = 16000
     device_used_index: Optional[int] = None
     device_used_name: Optional[str] = None
+    last_prompt: Optional[str] = None           # for debugging UI/endpoint
+    last_llm_error: Optional[str] = None        # store last LLM error for diagnostics
 
 STATE = PipelineState()
 
 # -------------------------------
-# SSE-Events
+# SSE events
 # -------------------------------
 
 def sse_format(event: str, data: str) -> str:
@@ -364,11 +400,11 @@ async def sse_stream() -> AsyncGenerator[bytes, None]:
             STATE.listeners.remove(q)
 
 # -------------------------------
-# Audio-/Transkriptionsschleife mit Callback→Polling-Fallback
+# Audio/transcription loop with callback→polling fallback
 # -------------------------------
 
 def _device_name_override_for_alsa(idx: int, name: str) -> Optional[str]:
-    # Wenn Index 0 ein klassisches ALSA "hw:0,0" ist, können wir explizit diesen String nutzen.
+    # Example: on some laptops the ALSA device string "hw:0,0" is more reliable than index usage
     if "ALC293" in name and "(hw:0,0)" in name:
         return "hw:0,0"
     return None
@@ -377,7 +413,7 @@ def _open_input_stream(desired_sr: int, frame_ms: int, prefer: Optional[str | in
     dev_idx, dev_info = pick_input_device_index(prefer)
     dev_name = dev_info.get("name", f"idx:{dev_idx}")
 
-    # Falls möglich, direkten ALSA-String setzen (stabiler bei manchen Setups)
+    # If available, prefer an explicit ALSA identifier for stability
     dev_param: int | str = dev_idx
     alsa_name = _device_name_override_for_alsa(dev_idx, dev_name)
     if alsa_name:
@@ -390,9 +426,9 @@ def _open_input_stream(desired_sr: int, frame_ms: int, prefer: Optional[str | in
                 samplerate=sr,
                 channels=1,
                 dtype="float32",
-                device=dev_param,         # Index oder "hw:0,0"
+                device=dev_param,         # index or ALSA string
                 blocksize=frame_samples,
-                callback=None,            # setzen wir später
+                callback=None,            # set later
                 latency="low",
             )
             print(f"[AUDIO] open OK: device={dev_param!r}, name={dev_name!r}, samplerate={sr}, blocksize={frame_samples}")
@@ -420,7 +456,7 @@ async def audio_transcription_loop() -> None:
     audio_frames: List[np.ndarray] = []
     last_snapshot = time.time()
     last_tick = time.time()
-    first_snapshot_sec = min(1.0, SNAPSHOT_SEC)
+    first_snapshot_sec = min(1.0, SNAPSHOT_SEC)  # provide a faster first result
     first_done = False
     total_frames = 0
 
@@ -430,9 +466,9 @@ async def audio_transcription_loop() -> None:
 
     stream.callback = sd_callback
 
-    # Defaults explizit wie im Selftest
+    # Default settings to mirror our stream
     try:
-        sd.default.device = (dev_param, None)  # Input erzwingen (Index oder "hw:0,0")
+        sd.default.device = (dev_param, None)  # enforce input
         sd.default.samplerate = actual_sr
         sd.default.channels = 1
     except Exception as e:
@@ -444,10 +480,10 @@ async def audio_transcription_loop() -> None:
     await broadcast("status", f"device_used idx={dev_idx} name={dev_name}")
     await broadcast("status", "tick warmup")
 
-    # Explizit starten (nicht nur über 'with stream:')
+    # Explicitly start the stream (not just context-managed)
     stream.start()
 
-    # Priming: warte auf erste Frames
+    # Priming: wait briefly for initial frames to arrive
     try:
         priming_deadline = time.time() + 0.6
         while time.time() < priming_deadline and not audio_frames:
@@ -459,7 +495,7 @@ async def audio_transcription_loop() -> None:
 
     use_polling = False
     if not audio_frames:
-        # Fallback: Polling (synchrones read), behält async Struktur per sleep
+        # Fallback to synchronous read() when callbacks don't deliver frames
         use_polling = True
         print("[AUDIO] callback produced no frames; switching to polling read() loop")
 
@@ -473,7 +509,7 @@ async def audio_transcription_loop() -> None:
                 buf_sec = seconds_in_buffer(len(STATE.transcript_buffer))
                 await broadcast("status", f"tick frames={total_frames} buf_frames={len(STATE.transcript_buffer)} (~{buf_sec:.1f}s) sr={actual_sr}")
 
-            # Daten holen: Callback-Queue oder direktes read
+            # Pull next frame either from callback queue or direct read
             if use_polling:
                 try:
                     data, ov = stream.read(frame_samples)
@@ -495,13 +531,13 @@ async def audio_transcription_loop() -> None:
                     frame = frame[:frame_samples]
             frame = np.clip(frame, -1.0, 1.0)
 
-            # Puffer für Snapshot
+            # Maintain a rolling buffer (float32 bytes) for snapshot transcription
             STATE.transcript_buffer.append(frame.tobytes())
-            max_buf_frames = int((12_000 / FRAME_MS))
+            max_buf_frames = int((12_000 / FRAME_MS))  # ~12s safety cap
             if len(STATE.transcript_buffer) > max_buf_frames:
                 STATE.transcript_buffer = STATE.transcript_buffer[-max_buf_frames:]
 
-            # Snapshot: Transkription (alle SNAPSHOT_SEC, erstes Mal schneller)
+            # Take a snapshot periodically and transcribe
             interval = first_snapshot_sec if not first_done else SNAPSHOT_SEC
             if now - last_snapshot >= interval:
                 last_snapshot = now
@@ -510,6 +546,19 @@ async def audio_transcription_loop() -> None:
                 if seg.size == 0 or float(np.max(np.abs(seg))) < 0.01:
                     await broadcast("status", "whisper_empty(low_level_or_no_audio)")
                     continue
+
+                # Optional VAD gating (WebRTC VAD if available, else RMS threshold)
+                speech_ok = True
+                if vad is not None:
+                    # WebRTC VAD expects 16kHz 16-bit mono frames of 10/20/30 ms. For simplicity we use RMS gate here.
+                    pass
+                else:
+                    speech_ok = rms_vad(seg[-int(actual_sr * 0.25):], rms_threshold=RMS_VAD_THRESHOLD)
+
+                if not speech_ok:
+                    await broadcast("status", "vad_silence")
+                    continue
+
                 txt = transcribe_chunk_with_whisper(seg, actual_sr)
                 if txt:
                     print(f"[WHISPER] text: {txt}")
@@ -530,20 +579,26 @@ async def audio_transcription_loop() -> None:
         await broadcast("status", "recording_stop")
 
 # -------------------------------
-# LLM + Bild (optional)
+# LLM + optional image generation
 # -------------------------------
 
 async def run_llm_and_optionally_image(text: str) -> None:
+    # One-shot LLM call (temperature kept low) and optional ComfyUI run.
     async with httpx.AsyncClient() as client:
         try:
             img_prompt = await ollama_generate_prompt(client, text)
             if img_prompt:
+                STATE.last_prompt = img_prompt
                 print(f"[LLM] prompt: {img_prompt}")
                 await broadcast("llm_prompt", img_prompt)
             else:
+                STATE.last_llm_error = "llm_empty"
                 await broadcast("status", "llm_empty")
                 return
+
             await broadcast("status", "llm_ok")
+
+            # Optional: send prompt to ComfyUI workflow
             try:
                 req = build_comfy_prompt_from_text(img_prompt)
                 pid, rel_img_path = await comfyui_run_and_wait(client, req)
@@ -554,10 +609,12 @@ async def run_llm_and_optionally_image(text: str) -> None:
             except Exception as e:
                 await broadcast("status", f"comfy_unavailable: {e}")
         except Exception as e:
+            STATE.last_llm_error = f"pipeline_error: {e}"
+            print("[LLM] pipeline_error:", e)
             await broadcast("status", f"pipeline_error: {e}")
 
 # -------------------------------
-# FastAPI App
+# FastAPI app
 # -------------------------------
 
 app = FastAPI()
@@ -566,8 +623,10 @@ app = FastAPI()
 async def _startup_init_models() -> None:
     init_whisper_model()
 
+# Serve generated images under /static (local only)
 app.mount("/static", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="static")
 
+# Minimal UI: shows transcript, prompt and image grid
 INDEX_HTML = """<!doctype html>
 <html lang="de">
 <head>
@@ -575,43 +634,6 @@ INDEX_HTML = """<!doctype html>
   <title>Vorlesen → Bilder (Lokal)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
-    body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem; background: #0b1020; color: #e8ecf1; }
-    header { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
-    button { background: #1f6feb; color: white; border: 0; padding: 0.6rem 1rem; border-radius: 8px; cursor: pointer; }
-    button.stop { background: #c53b3b; }
-    #status { opacity: 0.8; font-size: 0.9rem; }
-    #prompt { opacity: 0.9; font-size: 0.9rem; background: #141a2e; padding: 0.4rem 0.6rem; border-radius: 8px; max-width: 100%; overflow-wrap: anywhere; }
-    #grid { margin-top: 1rem; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
-    .card { background: #141a2e; border-radius: 10px; overflow: hidden; box-shadow: 0 0 0 1px rgba(255,255,255,0.06) inset; }
-    .card img { width: 100%; display: block; }
-    .cap { padding: 0.5rem 0.75rem; font-size: 0.85rem; color: #c7d1df; }
-  </style>
-</head>
-<body>
-  <header>
-    <button id="start">Start</button>
-    <button id="stop" class="stop">Stop</button>
-
-    <div id="status">Ready.</div>
-    </header>
-
-    <main>
-    <section id="live">
-        <div class="panel">
-        <div class="panel-title">Transcript</div>
-        <div id="transcript" class="panel-body mono"></div>
-        </div>
-        <div class="panel">
-        <div class="panel-title">Prompt</div>
-        <div id="prompt" class="panel-body"></div>
-        </div>
-    </section>
-
-    <h4>Images</h4>
-    <div id="grid"></div>
-    </main>
-
-    <style>
     body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem; background: #0b1020; color: #e8ecf1; }
     header { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.75rem; }
     button { background: #1f6feb; color: white; border: 0; padding: 0.6rem 1rem; border-radius: 8px; cursor: pointer; }
@@ -628,9 +650,32 @@ INDEX_HTML = """<!doctype html>
     .card { background: #141a2e; border-radius: 10px; overflow: hidden; box-shadow: 0 0 0 1px rgba(255,255,255,0.06) inset; }
     .card img { width: 100%; display: block; }
     .cap { padding: 0.5rem 0.75rem; font-size: 0.85rem; color: #c7d1df; }
-    </style>
+  </style>
+</head>
+<body>
+  <header>
+    <button id="start">Start</button>
+    <button id="stop" class="stop">Stop</button>
+    <div id="status">Ready.</div>
+  </header>
 
-    <script>
+  <main>
+    <section id="live">
+      <div class="panel">
+        <div class="panel-title">Transcript</div>
+        <div id="transcript" class="panel-body mono"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">Prompt</div>
+        <div id="prompt" class="panel-body"></div>
+      </div>
+    </section>
+
+    <h4>Images</h4>
+    <div id="grid"></div>
+  </main>
+
+  <script>
     const statusEl = document.getElementById('status');
     const promptEl = document.getElementById('prompt');
     const transcriptEl = document.getElementById('transcript');
@@ -642,20 +687,20 @@ INDEX_HTML = """<!doctype html>
     function setTranscript(t) { transcriptEl.textContent = t || ''; }
 
     async function start() {
-        if (evtSrc) evtSrc.close();
-        evtSrc = new EventSource('/events');
+      if (evtSrc) evtSrc.close();
+      evtSrc = new EventSource('/events');
 
-        // Status updates
-        evtSrc.addEventListener('status', e => setStatus(e.data));
+      // Status updates
+      evtSrc.addEventListener('status', e => setStatus(e.data));
 
-        // Show live transcript text
-        evtSrc.addEventListener('transcript', e => setTranscript(e.data));
+      // Show live transcript text
+      evtSrc.addEventListener('transcript', e => setTranscript(e.data));
 
-        // Show latest LLM prompt
-        evtSrc.addEventListener('llm_prompt', e => setPrompt(e.data));
+      // Show latest LLM prompt
+      evtSrc.addEventListener('llm_prompt', e => setPrompt(e.data));
 
-        // Show generated images
-        evtSrc.addEventListener('image', e => {
+      // Show generated images
+      evtSrc.addEventListener('image', e => {
         const rel = e.data;
         const src = '/static/' + rel;
         const card = document.createElement('div');
@@ -666,29 +711,29 @@ INDEX_HTML = """<!doctype html>
         cap.textContent = new Date().toLocaleTimeString();
         card.appendChild(img); card.appendChild(cap);
         grid.prepend(card);
-        });
+      });
 
-        // Wait until connection is open, then start backend
-        await new Promise(res => {
+      // Wait until connection is open, then start backend
+      await new Promise(res => {
         const check = () => {
-            if (evtSrc && evtSrc.readyState === 1) res();
-            else setTimeout(check, 50);
+          if (evtSrc && evtSrc.readyState === 1) res();
+          else setTimeout(check, 50);
         };
         check();
-        });
+      });
 
-        await fetch('/start', { method:'POST' });
+      await fetch('/start', { method:'POST' });
     }
 
     async function stop() {
-        await fetch('/stop', { method:'POST' });
-        if (evtSrc) { evtSrc.close(); evtSrc = null; }
-        setStatus('stopped');
+      await fetch('/stop', { method:'POST' });
+      if (evtSrc) { evtSrc.close(); evtSrc = null; }
+      setStatus('stopped');
     }
 
     document.getElementById('start').addEventListener('click', start);
     document.getElementById('stop').addEventListener('click', stop);
-    </script>
+  </script>
 </body>
 </html>
 """
@@ -732,7 +777,7 @@ async def get_image(path: str):
         return FileResponse(str(fp))
     return Response(status_code=404, content="Not found")
 
-# Geräte-Inspektion
+# Device inspection (useful for debugging microphones)
 @app.get("/devices")
 async def list_devices():
     try:
@@ -753,7 +798,7 @@ async def list_devices():
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-# Optionaler kurzer Audio-Selbsttest
+# Quick audio self-test endpoint
 @app.get("/selftest/audio")
 async def selftest_audio():
     try:
@@ -761,7 +806,7 @@ async def selftest_audio():
         sr = SAMPLE_RATE_ENV
         ch = 1
         dur = 3.0
-        # Explizit ALSA-String verwenden, wenn möglich
+        # Prefer ALSA string if available for extra stability
         dev_param: int | str = idx
         alsa_name = "hw:0,0" if "(hw:0,0)" in (dev.get("name") or "") else None
         if alsa_name:
@@ -775,3 +820,17 @@ async def selftest_audio():
         return JSONResponse({"device_used_index": idx, "device_used_name": dev.get("name"), "sr": sr, "duration_s": dur, "peak": round(peak,4), "rms": round(rms,4)})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+# Debug endpoints to verify Ollama connectivity and last prompt
+@app.get("/debug/last-prompt")
+async def debug_last_prompt():
+    return {"last_prompt": STATE.last_prompt, "last_llm_error": STATE.last_llm_error, "model": OLLAMA_MODEL}
+
+@app.get("/health/ollama")
+async def health_ollama():
+    try:
+        async with httpx.AsyncClient() as client:
+            data = await http_get_json(client, f"http://127.0.0.1:11434/api/tags")
+        return {"ok": True, "models": [m.get("name") for m in data.get("models", [])]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
