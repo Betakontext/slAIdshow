@@ -29,7 +29,7 @@ APP_SNAPSHOT_SEC: Final[float] = env_float("APP_SNAPSHOT_SEC", 7.0)
 # Ollama
 APP_OLLAMA_HOST: Final[str] = env_str("APP_OLLAMA_HOST", "127.0.0.1")
 APP_OLLAMA_PORT: Final[int] = env_int("APP_OLLAMA_PORT", 11434)
-APP_OLLAMA_MODEL: Final[str] = env_str("APP_OLLAMA_MODEL", "llama3")
+APP_OLLAMA_MODEL: Final[str] = env_str("APP_OLLAMA_MODEL", "phi3:mini")
 APP_OLLAMA_TEMPERATURE: Final[float] = env_float("APP_OLLAMA_TEMPERATURE", 0.2)
 
 # ComfyUI

@@ -591,28 +591,71 @@ INDEX_HTML = """<!doctype html>
   <header>
     <button id="start">Start</button>
     <button id="stop" class="stop">Stop</button>
-    <div id="status">Bereit.</div>
-    <div id="prompt" title="LLM Prompt (zuletzt)"></div>
-  </header>
-  <main>
+
+    <div id="status">Ready.</div>
+    </header>
+
+    <main>
+    <section id="live">
+        <div class="panel">
+        <div class="panel-title">Transcript</div>
+        <div id="transcript" class="panel-body mono"></div>
+        </div>
+        <div class="panel">
+        <div class="panel-title">Prompt</div>
+        <div id="prompt" class="panel-body"></div>
+        </div>
+    </section>
+
+    <h4>Images</h4>
     <div id="grid"></div>
-  </main>
-  <script>
+    </main>
+
+    <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem; background: #0b1020; color: #e8ecf1; }
+    header { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.75rem; }
+    button { background: #1f6feb; color: white; border: 0; padding: 0.6rem 1rem; border-radius: 8px; cursor: pointer; }
+    button.stop { background: #c53b3b; }
+    #status { opacity: 0.9; font-size: 0.9rem; }
+
+    #live { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 0.75rem; }
+    .panel { background: #141a2e; border-radius: 10px; overflow: hidden; box-shadow: 0 0 0 1px rgba(255,255,255,0.06) inset; }
+    .panel-title { font-size: 0.9rem; font-weight: 600; padding: 0.5rem 0.75rem; color: #c7d1df; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .panel-body { padding: 0.6rem 0.75rem; min-height: 52px; white-space: pre-wrap; word-break: break-word; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+
+    #grid { margin-top: 0.5rem; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+    .card { background: #141a2e; border-radius: 10px; overflow: hidden; box-shadow: 0 0 0 1px rgba(255,255,255,0.06) inset; }
+    .card img { width: 100%; display: block; }
+    .cap { padding: 0.5rem 0.75rem; font-size: 0.85rem; color: #c7d1df; }
+    </style>
+
+    <script>
     const statusEl = document.getElementById('status');
     const promptEl = document.getElementById('prompt');
+    const transcriptEl = document.getElementById('transcript');
     const grid = document.getElementById('grid');
     let evtSrc = null;
 
     function setStatus(msg) { statusEl.textContent = msg; }
-    function setPrompt(p) { promptEl.textContent = p ? ('Prompt: ' + p) : ''; }
+    function setPrompt(p) { promptEl.textContent = p || ''; }
+    function setTranscript(t) { transcriptEl.textContent = t || ''; }
 
     async function start() {
-      if (evtSrc) evtSrc.close();
-      evtSrc = new EventSource('/events');
-      evtSrc.addEventListener('status', e => setStatus(e.data));
-      evtSrc.addEventListener('transcript', e => console.log('TRANSCRIPT:', e.data));
-      evtSrc.addEventListener('llm_prompt', e => setPrompt(e.data));
-      evtSrc.addEventListener('image', e => {
+        if (evtSrc) evtSrc.close();
+        evtSrc = new EventSource('/events');
+
+        // Status updates
+        evtSrc.addEventListener('status', e => setStatus(e.data));
+
+        // Show live transcript text
+        evtSrc.addEventListener('transcript', e => setTranscript(e.data));
+
+        // Show latest LLM prompt
+        evtSrc.addEventListener('llm_prompt', e => setPrompt(e.data));
+
+        // Show generated images
+        evtSrc.addEventListener('image', e => {
         const rel = e.data;
         const src = '/static/' + rel;
         const card = document.createElement('div');
@@ -623,27 +666,29 @@ INDEX_HTML = """<!doctype html>
         cap.textContent = new Date().toLocaleTimeString();
         card.appendChild(img); card.appendChild(cap);
         grid.prepend(card);
-      });
-      // Warte bis EventSource offen ist
-      await new Promise(res => {
+        });
+
+        // Wait until connection is open, then start backend
+        await new Promise(res => {
         const check = () => {
-          if (evtSrc && evtSrc.readyState === 1) res();
-          else setTimeout(check, 50);
+            if (evtSrc && evtSrc.readyState === 1) res();
+            else setTimeout(check, 50);
         };
         check();
-      });
-      await fetch('/start', {method:'POST'});
+        });
+
+        await fetch('/start', { method:'POST' });
     }
 
     async function stop() {
-      await fetch('/stop', {method:'POST'});
-      if (evtSrc) { evtSrc.close(); evtSrc = null; }
-      setStatus('gestoppt');
+        await fetch('/stop', { method:'POST' });
+        if (evtSrc) { evtSrc.close(); evtSrc = null; }
+        setStatus('stopped');
     }
 
     document.getElementById('start').addEventListener('click', start);
     document.getElementById('stop').addEventListener('click', stop);
-  </script>
+    </script>
 </body>
 </html>
 """
