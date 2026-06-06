@@ -272,6 +272,7 @@ Load environment variables and start the server:
 
 BASH
 
+	source .venv/bin/activate
 	# Load environment from .env (optional)
 	export $(grep -v '^#' .env | xargs -d '\n')
 	# Optional: show what is set

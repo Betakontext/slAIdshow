@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import signal
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,9 +85,20 @@ OLLAMA_PORT = _env_int("APP_OLLAMA_PORT", 11434)
 OLLAMA_MODEL = _env_str("APP_OLLAMA_MODEL", "phi3:mini")
 OLLAMA_TEMPERATURE = _env_float("APP_OLLAMA_TEMPERATURE", 0.2)
 
+# Latency-friendly defaults
+OLLAMA_NUM_CTX = _env_int("APP_OLLAMA_NUM_CTX", 2048)
+OLLAMA_NUM_PREDICT = _env_int("APP_OLLAMA_NUM_PREDICT", 320)
+OLLAMA_TOP_K = _env_int("APP_OLLAMA_TOP_K", 40)
+OLLAMA_TOP_P = _env_float("APP_OLLAMA_TOP_P", 0.9)
+OLLAMA_REPEAT_PENALTY = _env_float("APP_OLLAMA_REPEAT_PENALTY", 1.1)
+OLLAMA_TIMEOUT_SEC = _env_float("APP_OLLAMA_TIMEOUT_SEC", 60.0)
+OLLAMA_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 3)
+OLLAMA_RETRY_BASE_DELAY = _env_float("APP_OLLAMA_RETRY_BASE_DELAY", 0.5)
+
 # ComfyUI
 COMFY_HOST = _env_str("APP_COMFY_HOST", "127.0.0.1")
 COMFY_PORT = _env_int("APP_COMFY_PORT", 8188)
+DISABLE_COMFYUI = _env_int("APP_DISABLE_COMFYUI", 0) == 1  # quick way to disable ComfyUI
 
 # Output directory for generated images
 OUTPUT_DIR = Path(_env_str("APP_OUTPUT_DIR", "./outputs/images"))
@@ -135,10 +147,10 @@ def _list_input_devices() -> list[dict]:
 
 def _prefer_to_index(prefer: Optional[str | int]) -> int:
     """
-    Map a preferred device (exact name, substring or index) to an input device index:
+    Input device selection priority:
     1) exact name match
     2) substring match
-    3) 'pulse' host device
+    3) device containing 'pulse'
     4) first device with max_input_channels > 0
     """
     devs = _list_input_devices()
@@ -178,14 +190,13 @@ def to_int16(x: np.ndarray) -> np.ndarray:
     return (x * 32767.0).astype(np.int16, copy=False)
 
 def rms_vad(frame: np.ndarray, rms_threshold: float = 0.01) -> bool:
-    # Simple amplitude-based VAD (fallback if webrtcvad is not available)
     if frame.size == 0:
         return False
     rms = float(np.sqrt(np.mean(np.square(frame, dtype=np.float32), dtype=np.float64)))
     return rms >= rms_threshold
 
 def resample_to_16k(samples: np.ndarray, sr: int) -> np.ndarray:
-    # Simple linear resampling to 16 kHz expected by Whisper
+    # Lightweight linear resampling to 16 kHz (sufficient for Whisper)
     if sr == 16000:
         return samples.astype(np.float32, copy=False)
     target_len = int(samples.shape[0] * (16000.0 / float(sr)))
@@ -207,6 +218,7 @@ def seconds_in_buffer(frame_count: int) -> float:
 _WHISPER_MODEL: Optional[WhisperModel] = None
 
 def init_whisper_model() -> None:
+    # Initialize Whisper model once on startup
     global _WHISPER_MODEL
     if not WHISPER_AVAILABLE:
         print("[WHISPER] pywhispercpp not available.")
@@ -236,7 +248,16 @@ def init_whisper_model() -> None:
         print(f"[WHISPER] initialization failed: {e}")
         _WHISPER_MODEL = None
 
+def _strip_metadata_like_segments(text: str) -> str:
+    # Remove metadata-like bracketed segments (e.g., "[t0=..., text=...]") from certain pywhispercpp builds
+    if not text:
+        return ""
+    import re
+    text = re.sub(r"$$.*?$$", " ", text)
+    return " ".join(text.split()).strip()
+
 def transcribe_chunk_with_whisper(samples: np.ndarray, sr: int) -> str:
+    # Transcribe a given PCM float32 sample array (single channel)
     if not WHISPER_AVAILABLE or _WHISPER_MODEL is None:
         return ""
     if samples.size == 0 or float(np.max(np.abs(samples))) < 0.01:
@@ -246,28 +267,26 @@ def transcribe_chunk_with_whisper(samples: np.ndarray, sr: int) -> str:
         if samples.size == 0:
             return ""
     try:
-        # Try multiple known entry points depending on pywhispercpp build
         if hasattr(_WHISPER_MODEL, "transcribe_float32"):
             txt = _WHISPER_MODEL.transcribe_float32(samples)
         elif hasattr(_WHISPER_MODEL, "transcribe"):
             txt = _WHISPER_MODEL.transcribe(samples)
         else:
             txt = _WHISPER_MODEL.transcribe_pcm16(to_int16(samples))
-        if isinstance(txt, str):
-            return txt.strip()
         if isinstance(txt, dict):
-            return (txt.get("text") or "").strip()
-        return str(txt).strip()
+            txt = txt.get("text") or ""
+        elif not isinstance(txt, str):
+            txt = str(txt)
+        return _strip_metadata_like_segments(txt)
     except Exception as e:
         print(f"[WHISPER] transcription failed: {e}")
         return ""
 
 # -------------------------------
-# HTTP helpers (robust error logging)
+# HTTP helpers (robust error logging + retries)
 # -------------------------------
 
 async def http_post_json(client: httpx.AsyncClient, url: str, json: dict, timeout: float = 30.0) -> dict:
-    # Wrapper to surface body content on HTTP errors (useful for diagnosing 4xx/5xx)
     try:
         r = await client.post(url, json=json, timeout=timeout)
         r.raise_for_status()
@@ -294,20 +313,54 @@ async def http_get_json(client: httpx.AsyncClient, url: str, timeout: float = 15
 def _ollama_url(path: str) -> str:
     return f"http://{OLLAMA_HOST}:{OLLAMA_PORT}{path}"
 
-async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> str:
-    # System-style instruction to shape the image prompt succinctly
+def _ollama_options_for_prompt() -> dict:
+    return {
+        "temperature": OLLAMA_TEMPERATURE,
+        "num_ctx": OLLAMA_NUM_CTX,
+        "num_predict": OLLAMA_NUM_PREDICT,
+        "top_k": OLLAMA_TOP_K,
+        "top_p": OLLAMA_TOP_P,
+        "repeat_penalty": OLLAMA_REPEAT_PENALTY,
+    }
+
+async def _post_with_retries(client: httpx.AsyncClient, url: str, body: dict, timeout: float) -> dict:
+    # Exponential backoff for transient errors
+    delay = OLLAMA_RETRY_BASE_DELAY
+    last_exc = None
+    for attempt in range(1, OLLAMA_MAX_RETRIES + 1):
+        try:
+            resp = await client.post(url, json=body, timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
+            last_exc = e
+            status = getattr(e, "response", None).status_code if getattr(e, "response", None) else None
+            retryable = status in (429, 500, 502, 503) or isinstance(e, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.ConnectError))
+            print(f"[OLLAMA] attempt {attempt} failed (status={status}): {e}")
+            if not STATE.running:
+                break  # do not retry during shutdown
+            if attempt >= OLLAMA_MAX_RETRIES or not retryable:
+                break
+            await asyncio.sleep(delay)
+            delay *= 2.0
+    raise RuntimeError(f"Ollama request failed after {OLLAMA_MAX_RETRIES} attempts: {last_exc}")
+
+def _make_ollama_prompt(user_text: str) -> str:
     sys_prompt = (
-        "Reformulate the following description into a concise, robust prompt for image generation. "
-        "Cover: subject, environment, style, lighting, color mood, composition. No placeholders."
+        "You are an assistant that reformulates a description into a concise, robust prompt for image generation "
+        "(subject, environment, style, lighting, color mood, composition). Avoid placeholders. Keep it short."
     )
-    full_prompt = f"{sys_prompt}\n\nDescription:\n{user_text.strip()}\n\nPrompt:"
-    req = OllamaGenerateRequest(
-        model=OLLAMA_MODEL,
-        prompt=full_prompt,
-        stream=False,
-        options={"temperature": OLLAMA_TEMPERATURE},
-    )
-    data = await http_post_json(client, _ollama_url("/api/generate"), req.model_dump())
+    return f"<<SYS>>{sys_prompt}<</SYS>>\n\nInput:\n{user_text.strip()}\n\nPrompt:"
+
+async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> str:
+    body = {
+        "model": OLLAMA_MODEL,
+        "prompt": _make_ollama_prompt(user_text),
+        "stream": False,
+        "options": _ollama_options_for_prompt(),
+    }
+    url = _ollama_url("/api/generate")
+    data = await _post_with_retries(client, url, body, timeout=OLLAMA_TIMEOUT_SEC)
     return (data.get("response") or "").strip()
 
 # -------------------------------
@@ -317,8 +370,20 @@ async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> s
 def _comfy_url(path: str) -> str:
     return f"http://{COMFY_HOST}:{COMFY_PORT}{path}"
 
+async def _comfy_available(client: httpx.AsyncClient) -> bool:
+    # Simple availability probe via /queue or /history
+    try:
+        _ = await http_get_json(client, _comfy_url("/queue"))
+        return True
+    except Exception:
+        try:
+            _ = await http_get_json(client, _comfy_url("/history"))
+            return True
+        except Exception:
+            return False
+
 def build_comfy_prompt_from_text(text: str) -> ComfyPromptRequest:
-    # Placeholder. Adapt to your specific ComfyUI workflow graph.
+    # Placeholder workflow payload. Adjust to your ComfyUI setup.
     prompt_payload = {
         "3": {
             "inputs": {"text": text},
@@ -333,13 +398,12 @@ async def comfyui_run_and_wait(
     req: ComfyPromptRequest,
     poll_interval: float = 1.0,
 ) -> Tuple[str, Optional[str]]:
-    # Submit a workflow to ComfyUI and poll its history for outputs
     resp = await http_post_json(client, _comfy_url("/prompt"), req.model_dump())
     pr = ComfyPromptResponse.model_validate(resp)
     prompt_id = pr.prompt_id
     url_hist = _comfy_url(f"/history/{prompt_id}")
     print(f"[COMFY] prompt id={prompt_id} submitted, waiting for result...")
-    for _ in range(600):  # up to ~10 minutes
+    for _ in range(600):  # ~10 minutes
         await asyncio.sleep(poll_interval)
         hist = await http_get_json(client, url_hist)
         outputs = hist.get(prompt_id, {}).get("outputs", {})
@@ -362,12 +426,13 @@ class PipelineState:
     running: bool = False
     task: Optional[asyncio.Task] = None
     listeners: List[asyncio.Queue] = field(default_factory=list)
-    transcript_buffer: List[bytes] = field(default_factory=list)
+    transcript_buffer: List[bytes] = field(default_factory=list)  # legacy; kept for status ticks
     actual_sr: int = 16000
     device_used_index: Optional[int] = None
     device_used_name: Optional[str] = None
-    last_prompt: Optional[str] = None           # for debugging UI/endpoint
-    last_llm_error: Optional[str] = None        # store last LLM error for diagnostics
+    last_prompt: Optional[str] = None
+    last_llm_error: Optional[str] = None
+    last_llm_run_ts: float = 0.0  # debounce LLM calls
 
 STATE = PipelineState()
 
@@ -400,20 +465,19 @@ async def sse_stream() -> AsyncGenerator[bytes, None]:
             STATE.listeners.remove(q)
 
 # -------------------------------
-# Audio/transcription loop with callback→polling fallback
+# Audio/transcription loop with segmented endpointing
 # -------------------------------
 
 def _device_name_override_for_alsa(idx: int, name: str) -> Optional[str]:
-    # Example: on some laptops the ALSA device string "hw:0,0" is more reliable than index usage
+    # On some Linux/ALSA combos it's more reliable to use explicit hw:* identifier
     if "ALC293" in name and "(hw:0,0)" in name:
         return "hw:0,0"
     return None
 
 def _open_input_stream(desired_sr: int, frame_ms: int, prefer: Optional[str | int]):
+    # Try preferred device and a list of common sample rates
     dev_idx, dev_info = pick_input_device_index(prefer)
     dev_name = dev_info.get("name", f"idx:{dev_idx}")
-
-    # If available, prefer an explicit ALSA identifier for stability
     dev_param: int | str = dev_idx
     alsa_name = _device_name_override_for_alsa(dev_idx, dev_name)
     if alsa_name:
@@ -426,9 +490,9 @@ def _open_input_stream(desired_sr: int, frame_ms: int, prefer: Optional[str | in
                 samplerate=sr,
                 channels=1,
                 dtype="float32",
-                device=dev_param,         # index or ALSA string
+                device=dev_param,
                 blocksize=frame_samples,
-                callback=None,            # set later
+                callback=None,
                 latency="low",
             )
             print(f"[AUDIO] open OK: device={dev_param!r}, name={dev_name!r}, samplerate={sr}, blocksize={frame_samples}")
@@ -439,6 +503,7 @@ def _open_input_stream(desired_sr: int, frame_ms: int, prefer: Optional[str | in
     raise RuntimeError(f"No supported samplerate for device={dev_param!r} ({dev_name!r}).")
 
 async def audio_transcription_loop() -> None:
+    # Open input stream
     try:
         stream, actual_sr, frame_samples, dev_idx, dev_name, dev_param = _open_input_stream(
             SAMPLE_RATE_ENV, FRAME_MS, AUDIO_DEVICE_PREF
@@ -451,24 +516,30 @@ async def audio_transcription_loop() -> None:
     STATE.actual_sr = actual_sr
     STATE.device_used_index = dev_idx
     STATE.device_used_name = dev_name
+    # If WebRTC VAD is available and VAD is enabled, you can wire it here; we use RMS as default
     vad = webrtcvad.Vad(VAD_AGGR) if (WEBRTCVAD_AVAILABLE and not DISABLE_VAD) else None
 
     audio_frames: List[np.ndarray] = []
     last_snapshot = time.time()
     last_tick = time.time()
-    first_snapshot_sec = min(1.0, SNAPSHOT_SEC)  # provide a faster first result
-    first_done = False
     total_frames = 0
 
+    # New: segmented endpointing buffers
+    current_segment_frames: List[np.ndarray] = []
+    silence_ms = 0
+    endpoint_silence_ms = 400   # segment ends after this much silence
+    max_segment_sec = 10.0      # hard cap per segment
+    max_segment_frames = int((max_segment_sec * 1000) / FRAME_MS)
+
     def sd_callback(indata, frames, timeinfo, status):
+        # Collect frames from sounddevice callback
         mono = indata[:, 0].copy()
         audio_frames.append(mono)
 
     stream.callback = sd_callback
 
-    # Default settings to mirror our stream
     try:
-        sd.default.device = (dev_param, None)  # enforce input
+        sd.default.device = (dev_param, None)
         sd.default.samplerate = actual_sr
         sd.default.channels = 1
     except Exception as e:
@@ -480,10 +551,9 @@ async def audio_transcription_loop() -> None:
     await broadcast("status", f"device_used idx={dev_idx} name={dev_name}")
     await broadcast("status", "tick warmup")
 
-    # Explicitly start the stream (not just context-managed)
     stream.start()
 
-    # Priming: wait briefly for initial frames to arrive
+    # Give callback a short priming period
     try:
         priming_deadline = time.time() + 0.6
         while time.time() < priming_deadline and not audio_frames:
@@ -493,9 +563,9 @@ async def audio_transcription_loop() -> None:
         await broadcast("status", "recording_stop")
         return
 
+    # Fallback to polling if callback did not produce frames
     use_polling = False
     if not audio_frames:
-        # Fallback to synchronous read() when callbacks don't deliver frames
         use_polling = True
         print("[AUDIO] callback produced no frames; switching to polling read() loop")
 
@@ -506,10 +576,11 @@ async def audio_transcription_loop() -> None:
             now = time.time()
             if now - last_tick >= 1.0:
                 last_tick = now
+                # Legacy: transcript_buffer is no longer used for content; keep a short indicator
                 buf_sec = seconds_in_buffer(len(STATE.transcript_buffer))
-                await broadcast("status", f"tick frames={total_frames} buf_frames={len(STATE.transcript_buffer)} (~{buf_sec:.1f}s) sr={actual_sr}")
+                await broadcast("status", f"tick frames={total_frames} seg_frames={len(current_segment_frames)} (~{buf_sec:.1f}s) sr={actual_sr}")
 
-            # Pull next frame either from callback queue or direct read
+            # Read frame if in polling mode
             if use_polling:
                 try:
                     data, ov = stream.read(frame_samples)
@@ -522,6 +593,7 @@ async def audio_transcription_loop() -> None:
             if not audio_frames:
                 continue
 
+            # Normalize frame length and clamp range
             frame = audio_frames.pop(0)
             total_frames += 1
             if len(frame) != frame_samples:
@@ -531,41 +603,42 @@ async def audio_transcription_loop() -> None:
                     frame = frame[:frame_samples]
             frame = np.clip(frame, -1.0, 1.0)
 
-            # Maintain a rolling buffer (float32 bytes) for snapshot transcription
-            STATE.transcript_buffer.append(frame.tobytes())
-            max_buf_frames = int((12_000 / FRAME_MS))  # ~12s safety cap
-            if len(STATE.transcript_buffer) > max_buf_frames:
-                STATE.transcript_buffer = STATE.transcript_buffer[-max_buf_frames:]
+            # Endpointing: simple RMS-based speech gate per frame
+            if DISABLE_VAD:
+                is_speech = True
+            else:
+                is_speech = rms_vad(frame, rms_threshold=RMS_VAD_THRESHOLD)
 
-            # Take a snapshot periodically and transcribe
-            interval = first_snapshot_sec if not first_done else SNAPSHOT_SEC
-            if now - last_snapshot >= interval:
+            current_segment_frames.append(frame)
+            if len(current_segment_frames) > max_segment_frames:
+                is_segment_end = True
+            else:
+                if is_speech:
+                    silence_ms = 0
+                else:
+                    silence_ms += FRAME_MS
+                is_segment_end = (silence_ms >= endpoint_silence_ms)
+
+            # Periodic snapshot OR segment end → run Whisper
+            do_snapshot = (now - last_snapshot >= SNAPSHOT_SEC)
+            if do_snapshot or is_segment_end:
                 last_snapshot = now
-                first_done = True
-                seg = np.frombuffer(b"".join(STATE.transcript_buffer), dtype=np.float32)
-                if seg.size == 0 or float(np.max(np.abs(seg))) < 0.01:
-                    await broadcast("status", "whisper_empty(low_level_or_no_audio)")
-                    continue
-
-                # Optional VAD gating (WebRTC VAD if available, else RMS threshold)
-                speech_ok = True
-                if vad is not None:
-                    # WebRTC VAD expects 16kHz 16-bit mono frames of 10/20/30 ms. For simplicity we use RMS gate here.
-                    pass
-                else:
-                    speech_ok = rms_vad(seg[-int(actual_sr * 0.25):], rms_threshold=RMS_VAD_THRESHOLD)
-
-                if not speech_ok:
-                    await broadcast("status", "vad_silence")
-                    continue
-
-                txt = transcribe_chunk_with_whisper(seg, actual_sr)
-                if txt:
-                    print(f"[WHISPER] text: {txt}")
-                    await broadcast("transcript", txt)
-                    asyncio.create_task(run_llm_and_optionally_image(txt))
-                else:
-                    await broadcast("status", "whisper_empty(no_text)")
+                seg = np.frombuffer(b"".join([f.tobytes() for f in current_segment_frames]), dtype=np.float32)
+                if seg.size > 0 and float(np.max(np.abs(seg))) >= 0.01:
+                    txt = transcribe_chunk_with_whisper(seg, actual_sr)
+                    if txt:
+                        print(f"[WHISPER] text: {txt}")
+                        await broadcast("transcript", txt)
+                        # LLM debounce: minimum gap between runs
+                        if time.time() - STATE.last_llm_run_ts >= 3.0:
+                            STATE.last_llm_run_ts = time.time()
+                            asyncio.create_task(run_llm_and_optionally_image(txt))
+                    else:
+                        await broadcast("status", "whisper_empty(no_text)")
+                # Reset on segment end; also reset silence counter
+                if is_segment_end:
+                    current_segment_frames.clear()
+                    silence_ms = 0
 
     except asyncio.CancelledError:
         pass
@@ -583,8 +656,14 @@ async def audio_transcription_loop() -> None:
 # -------------------------------
 
 async def run_llm_and_optionally_image(text: str) -> None:
-    # One-shot LLM call (temperature kept low) and optional ComfyUI run.
     async with httpx.AsyncClient() as client:
+        # Health probe for Ollama before first generate (helps with clear status if server is down)
+        try:
+            _ = await http_get_json(client, f"http://127.0.0.1:{OLLAMA_PORT}/api/tags")
+        except Exception as e:
+            await broadcast("status", f"ollama_unavailable: {e}")
+            return
+
         try:
             img_prompt = await ollama_generate_prompt(client, text)
             if img_prompt:
@@ -598,7 +677,19 @@ async def run_llm_and_optionally_image(text: str) -> None:
 
             await broadcast("status", "llm_ok")
 
-            # Optional: send prompt to ComfyUI workflow
+            # Optional ComfyUI integration (can be disabled via APP_DISABLE_COMFYUI=1)
+            if DISABLE_COMFYUI:
+                await broadcast("status", "comfy_disabled")
+                return
+
+            try:
+                if not await _comfy_available(client):
+                    await broadcast("status", "comfy_unavailable")
+                    return
+            except Exception as e:
+                await broadcast("status", f"comfy_unavailable: {e}")
+                return
+
             try:
                 req = build_comfy_prompt_from_text(img_prompt)
                 pid, rel_img_path = await comfyui_run_and_wait(client, req)
@@ -607,7 +698,7 @@ async def run_llm_and_optionally_image(text: str) -> None:
                 else:
                     await broadcast("status", "comfy_timeout")
             except Exception as e:
-                await broadcast("status", f"comfy_unavailable: {e}")
+                await broadcast("status", f"comfy_error: {e}")
         except Exception as e:
             STATE.last_llm_error = f"pipeline_error: {e}"
             print("[LLM] pipeline_error:", e)
@@ -626,7 +717,6 @@ async def _startup_init_models() -> None:
 # Serve generated images under /static (local only)
 app.mount("/static", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="static")
 
-# Minimal UI: shows transcript, prompt and image grid
 INDEX_HTML = """<!doctype html>
 <html lang="de">
 <head>
@@ -690,16 +780,10 @@ INDEX_HTML = """<!doctype html>
       if (evtSrc) evtSrc.close();
       evtSrc = new EventSource('/events');
 
-      // Status updates
       evtSrc.addEventListener('status', e => setStatus(e.data));
-
-      // Show live transcript text
       evtSrc.addEventListener('transcript', e => setTranscript(e.data));
-
-      // Show latest LLM prompt
       evtSrc.addEventListener('llm_prompt', e => setPrompt(e.data));
 
-      // Show generated images
       evtSrc.addEventListener('image', e => {
         const rel = e.data;
         const src = '/static/' + rel;
@@ -713,7 +797,6 @@ INDEX_HTML = """<!doctype html>
         grid.prepend(card);
       });
 
-      // Wait until connection is open, then start backend
       await new Promise(res => {
         const check = () => {
           if (evtSrc && evtSrc.readyState === 1) res();
@@ -777,7 +860,7 @@ async def get_image(path: str):
         return FileResponse(str(fp))
     return Response(status_code=404, content="Not found")
 
-# Device inspection (useful for debugging microphones)
+# Device inspection
 @app.get("/devices")
 async def list_devices():
     try:
@@ -798,7 +881,7 @@ async def list_devices():
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-# Quick audio self-test endpoint
+# Audio self-test
 @app.get("/selftest/audio")
 async def selftest_audio():
     try:
@@ -806,7 +889,6 @@ async def selftest_audio():
         sr = SAMPLE_RATE_ENV
         ch = 1
         dur = 3.0
-        # Prefer ALSA string if available for extra stability
         dev_param: int | str = idx
         alsa_name = "hw:0,0" if "(hw:0,0)" in (dev.get("name") or "") else None
         if alsa_name:
@@ -821,7 +903,7 @@ async def selftest_audio():
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-# Debug endpoints to verify Ollama connectivity and last prompt
+# Debug + Health
 @app.get("/debug/last-prompt")
 async def debug_last_prompt():
     return {"last_prompt": STATE.last_prompt, "last_llm_error": STATE.last_llm_error, "model": OLLAMA_MODEL}
@@ -834,3 +916,48 @@ async def health_ollama():
         return {"ok": True, "models": [m.get("name") for m in data.get("models", [])]}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+@app.get("/health/comfyui")
+async def health_comfyui():
+    try:
+        async with httpx.AsyncClient() as client:
+            ok = await _comfy_available(client)
+            return {"ok": ok}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+# Warmup Ollama (loads model to RAM)
+@app.post("/warmup/ollama")
+async def warmup_ollama():
+    try:
+        async with httpx.AsyncClient() as client:
+            body = {
+                "model": OLLAMA_MODEL,
+                "prompt": "Say hello.",
+                "stream": False,
+                "options": {
+                    "temperature": OLLAMA_TEMPERATURE,
+                    "num_ctx": max(512, min(OLLAMA_NUM_CTX, 2048)),
+                    "num_predict": 8,
+                },
+            }
+            data = await _post_with_retries(client, _ollama_url("/api/generate"), body, timeout=min(OLLAMA_TIMEOUT_SEC, 30.0))
+            return {"ok": True, "response": (data.get("response") or "").strip()}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+
+# Optional: clean SIGINT/SIGTERM handling to stop background tasks
+def _graceful_shutdown(*_):
+    if STATE.running:
+        STATE.running = False
+    if STATE.task:
+        try:
+            STATE.task.cancel()
+        except Exception:
+            pass
+
+try:
+    signal.signal(signal.SIGINT, _graceful_shutdown)
+    signal.signal(signal.SIGTERM, _graceful_shutdown)
+except Exception:
+    pass
