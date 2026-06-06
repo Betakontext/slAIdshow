@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 from __future__ import annotations
 
 import asyncio
@@ -8,8 +6,6 @@ import contextlib
 import os
 import signal
 import time
-import re
-from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncGenerator, List, Optional, Tuple, Set
@@ -39,7 +35,7 @@ except Exception as e:
     WHISPER_AVAILABLE = False
 
 def _env_str(key: str, default: str) -> str:
-    return (os.getenv(key, default) or "").strip()
+    return os.getenv(key, default).strip()
 
 def _env_int(key: str, default: int) -> int:
     try:
@@ -53,7 +49,7 @@ def _env_float(key: str, default: float) -> float:
     except Exception:
         return default
 
-# Audio
+# Audio/Device ENV
 AUDIO_DEVICE_RAW = _env_str("APP_AUDIO_DEVICE", "")
 AUDIO_DEVICE_PREF: Optional[str | int] = None
 if AUDIO_DEVICE_RAW != "":
@@ -61,7 +57,7 @@ if AUDIO_DEVICE_RAW != "":
 
 SAMPLE_RATE_ENV = _env_int("APP_SAMPLE_RATE", 48000)
 FRAME_MS = _env_int("APP_FRAME_DURATION_MS", 20)
-FORCE_HW_DEVICE = _env_int("APP_FORCE_HW_DEVICE", 0) == 1
+FORCE_HW_DEVICE = _env_int("APP_FORCE_HW_DEVICE", 0) == 1  # NEU: erzwinge hw:X,Y statt default/pulse
 
 # VAD
 DISABLE_VAD = _env_int("APP_DISABLE_VAD", 1) == 1
@@ -80,7 +76,7 @@ WHISPER_TEMPERATURE = _env_float("APP_WHISPER_TEMPERATURE", 0.0)
 # Ollama
 OLLAMA_HOST = _env_str("APP_OLLAMA_HOST", "127.0.0.1")
 OLLAMA_PORT = _env_int("APP_OLLAMA_PORT", 11434)
-OLLAMA_MODEL = _env_str("APP_OLLAMA_MODEL", "glm-4.7:cloud")
+OLLAMA_MODEL = _env_str("APP_OLLAMA_MODEL", "phi3:mini")
 OLLAMA_TEMPERATURE = _env_float("APP_OLLAMA_TEMPERATURE", 0.2)
 OLLAMA_NUM_CTX = _env_int("APP_OLLAMA_NUM_CTX", 2048)
 OLLAMA_NUM_PREDICT = _env_int("APP_OLLAMA_NUM_PREDICT", 320)
@@ -90,16 +86,14 @@ OLLAMA_REPEAT_PENALTY = _env_float("APP_OLLAMA_REPEAT_PENALTY", 1.1)
 OLLAMA_TIMEOUT_SEC = _env_float("APP_OLLAMA_TIMEOUT_SEC", 60.0)
 OLLAMA_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 3)
 OLLAMA_RETRY_BASE_DELAY = _env_float("APP_OLLAMA_RETRY_BASE_DELAY", 0.5)
-LLM_INTERVAL_SEC = _env_float("APP_LLM_INTERVAL_SEC", 10.0)
-OLLAMA_DISABLED = _env_int("APP_OLLAMA_DISABLE", 0) == 1
 
 # ComfyUI
 COMFY_HOST = _env_str("APP_COMFY_HOST", "127.0.0.1")
 COMFY_PORT = _env_int("APP_COMFY_PORT", 8188)
-DISABLE_COMFYUI = _env_int("APP_DISABLE_COMFYUI", 1) == 1
+DISABLE_COMFYUI = _env_int("APP_DISABLE_COMFYUI", 0) == 1
 
 # Output
-OUTPUT_DIR = Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")).resolve()
+OUTPUT_DIR = Path(_env_str("APP_OUTPUT_DIR", "./outputs/images"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def assert_local(host: str) -> None:
@@ -134,13 +128,14 @@ def _list_input_devices() -> list[dict]:
     return list(sd.query_devices())
 
 def _prefer_default_or_pulse_index() -> Optional[int]:
+    # Suche nach "pulse" oder "default" (stabile Callback-Lieferung unter PulseAudio/PipeWire)
     devs = sd.query_devices()
     best_idx = None
     for i, d in enumerate(devs):
         name = (d.get("name") or "").lower()
         if d.get("max_input_channels", 0) <= 0:
             continue
-        if "pulse" in name or "pipewire" in name:
+        if "pulse" in name:
             return i
         if "default" in name:
             best_idx = i
@@ -150,6 +145,7 @@ def _prefer_to_index(prefer: Optional[str | int]) -> int:
     devs = _list_input_devices()
     if not devs:
         raise RuntimeError("No audio devices found (sd.query_devices empty).")
+    # Wenn nicht explizit hw erzwungen → wähle pulse/default bevorzugt
     if not FORCE_HW_DEVICE:
         idx_pd = _prefer_default_or_pulse_index()
         if idx_pd is not None:
@@ -164,10 +160,11 @@ def _prefer_to_index(prefer: Optional[str | int]) -> int:
                 if d.get("name", "").lower() == name and d.get("max_input_channels", 0) > 0:
                     return i
             for i, d in enumerate(devs):
-                if name in (d.get("name", "")).lower() and d.get("max_input_channels", 0) > 0:
+                if name in d.get("name", "").lower() and d.get("max_input_channels", 0) > 0:
                     return i
+    # Fallbacks
     for i, d in enumerate(devs):
-        if any(k in (d.get("name","").lower()) for k in ("pulse","pipewire")) and d.get("max_input_channels", 0) > 0:
+        if "pulse" in d.get("name", "").lower() and d.get("max_input_channels", 0) > 0:
             return i
     for i, d in enumerate(devs):
         if d.get("max_input_channels", 0) > 0:
@@ -232,105 +229,44 @@ def init_whisper_model() -> None:
         print(f"[WHISPER] initialization failed: {e}")
         _WHISPER_MODEL = None
 
-# KORREKTE Regex: entferne Inhalte in [], (), {}, *...*
-BRACKET_BLOCKS_RE = re.compile(r"$$[^$$]*$$|$[^$]*$|\{[^\}]*\}|\*[^\*]*\*")
-TEXT_FIELD_RE = re.compile(r"text\s*=\s*(.+?)(?:,|$$)")
-META_RE = re.compile(
-    r"\b(musik|music|applaus|applause|lachen|laugh|geräusch|noise|husten|cough|klatschen|klingel|ring|summen|hmm+|pause)\b",
-    re.I,
-)
-
-def _parse_whisper_out(raw: object) -> str:
-    if raw is None:
+def _strip_metadata_like_segments(text: str) -> str:
+    if not text:
         return ""
-    if isinstance(raw, dict):
-        if isinstance(raw.get("text"), str):
-            return raw["text"]
-        segs = raw.get("segments")
-        if isinstance(segs, list):
-            return " ".join(str(s.get("text", "")).strip() for s in segs if isinstance(s, dict)).strip()
-        return ""
-    s = str(raw).strip()
-    if not s or s == "[]":
-        return ""
-    if s.startswith("[") and "text=" in s:
-        parts = TEXT_FIELD_RE.findall(s)
-        if parts:
-            cleaned = []
-            for t in parts:
-                t = t.strip()
-                if len(t) >= 2 and ((t[0] == t[-1] == '"') or (t[0] == t[-1] == "'")):
-                    t = t[1:-1]
-                cleaned.append(t.strip())
-            return " ".join(cleaned).strip()
-    return s
-
-def clean_transcript(raw: str) -> str:
-    if not raw:
-        return ""
-    txt = BRACKET_BLOCKS_RE.sub(" ", raw)
-    txt = " ".join(txt.split()).strip()
-    if not txt:
-        return ""
-    if META_RE.search(txt) and len(txt.split()) <= 3:
-        return ""
-    if len(txt.split()) == 1 and txt.lower() in {"ja", "und", "also", "äh", "oh"}:
-        return ""
-    return txt
-
-def is_meaningful_text(t: str, min_chars: int = 6, min_words: int = 2) -> bool:
-    t = (t or "").strip()
-    if not t:
-        return False
-    if len(t) < min_chars:
-        return False
-    if len(t.split()) < min_words:
-        return False
-    return bool(re.search(r"[A-Za-zÄÖÜäöüß]", t))
+    import re
+    text = re.sub(r"$$(?:music|musik|applause|lachen|laugh|noise|geräusch)$$", " ", text, flags=re.IGNORECASE)
+    for _ in range(3):
+        new = re.sub(r"$$[^$$$$]*?$$", " ", text)
+        if new == text:
+            break
+        text = new
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    return text
 
 def transcribe_chunk_with_whisper(samples: np.ndarray, sr: int) -> str:
     if not WHISPER_AVAILABLE or _WHISPER_MODEL is None:
-        print("[WHISPER] model unavailable")
         return ""
-    if samples.size == 0:
+    if samples.size == 0 or float(np.max(np.abs(samples))) < 0.01:
         return ""
-    peak = float(np.max(np.abs(samples)))
-    if peak < 0.004:
-        return ""
-    min_sec = 0.6
-    if samples.size < int(sr * min_sec):
-        pad = int(sr * min_sec) - samples.size
-        samples = np.concatenate([samples, np.zeros(pad, dtype=np.float32)], axis=0)
     if sr != 16000:
         samples = resample_to_16k(samples, sr)
         if samples.size == 0:
             return ""
     try:
         if hasattr(_WHISPER_MODEL, "transcribe_float32"):
-            raw = _WHISPER_MODEL.transcribe_float32(samples)
+            txt = _WHISPER_MODEL.transcribe_float32(samples)
         elif hasattr(_WHISPER_MODEL, "transcribe"):
-            raw = _WHISPER_MODEL.transcribe(samples)
+            txt = _WHISPER_MODEL.transcribe(samples)
         else:
-            raw = _WHISPER_MODEL.transcribe_pcm16(to_int16(samples))
-        txt = clean_transcript(_parse_whisper_out(raw))
-        if txt:
-            print(f"[WHISPER] text: {txt}")
-        else:
-            print(f"[WHISPER] raw→empty")
-        return txt
+            txt = _WHISPER_MODEL.transcribe_pcm16(to_int16(samples))
+        if isinstance(txt, dict):
+            txt = txt.get("text") or ""
+        elif not isinstance(txt, str):
+            txt = str(txt)
+        return _strip_metadata_like_segments(txt)
     except Exception as e:
         print(f"[WHISPER] transcription failed: {e}")
         return ""
-
-def _httpx_limits() -> httpx.Limits:
-    return httpx.Limits(max_keepalive_connections=0, max_connections=5)
-
-def _timeout_short() -> httpx.Timeout:
-    return httpx.Timeout(connect=2.0, read=3.0, write=3.0, pool=2.0)
-
-def _timeout_normal() -> httpx.Timeout:
-    t = min(max(5.0, OLLAMA_TIMEOUT_SEC), 30.0)
-    return httpx.Timeout(connect=2.0, read=t, write=3.0, pool=2.0)
 
 async def http_post_json(client: httpx.AsyncClient, url: str, json: dict, timeout: float = 30.0) -> dict:
     try:
@@ -380,29 +316,15 @@ async def _post_with_retries(client: httpx.AsyncClient, url: str, body: dict, ti
             print(f"[OLLAMA] attempt {attempt} failed (status={status}): {e}")
             if attempt >= OLLAMA_MAX_RETRIES or not retryable:
                 break
-            for _ in range(int(delay / 0.05)):
-                await asyncio.sleep(0.05)
-                if not STATE.running:
-                    raise RuntimeError("stopped_during_retry")
-            delay *= 2.0
+            await asyncio.sleep(delay); delay *= 2.0
     raise RuntimeError(f"Ollama request failed after {OLLAMA_MAX_RETRIES} attempts: {last_exc}")
 
 def _make_ollama_prompt(user_text: str) -> str:
     sys_prompt = (
-        "Du reformulierst eine gesprochene Beschreibung zu einem prägnanten Bildprompt: "
-        "Motiv/Objekt, Umgebung, Stil, Licht, Farbgestaltung, Komposition. "
-        "Keine Platzhalter. Kurz. Antworte auf Deutsch, wenn der Input Deutsch ist."
+        "You are an assistant that reformulates a description into a concise, robust prompt for image generation "
+        "(subject, environment, style, lighting, color mood, composition). Avoid placeholders. Keep it short."
     )
-    return f"<<SYS>>{sys_prompt}<</SYS>>\n\nGesprochener Kontext:\n{user_text.strip()}\n\nBild-Prompt:"
-
-async def _ollama_available() -> bool:
-    try:
-        async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short()) as c:
-            r = await c.get(_ollama_url("/api/tags"))
-            r.raise_for_status()
-            return True
-    except Exception:
-        return False
+    return f"<<SYS>>{sys_prompt}<</SYS>>\n\nInput:\n{user_text.strip()}\n\nPrompt:"
 
 async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> str:
     body = {
@@ -412,7 +334,7 @@ async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> s
         "options": _ollama_options_for_prompt(),
     }
     url = _ollama_url("/api/generate")
-    data = await _post_with_retries(client, url, body, timeout=min(OLLAMA_TIMEOUT_SEC, 30.0))
+    data = await _post_with_retries(client, url, body, timeout=OLLAMA_TIMEOUT_SEC)
     return (data.get("response") or "").strip()
 
 def _comfy_url(path: str) -> str:
@@ -440,10 +362,7 @@ async def comfyui_run_and_wait(client: httpx.AsyncClient, req: ComfyPromptReques
     url_hist = _comfy_url(f"/history/{prompt_id}")
     print(f"[COMFY] prompt id={prompt_id} submitted, waiting for result...")
     for _ in range(600):
-        for _ in range(int(poll_interval / 0.05)):
-            if not STATE.running:
-                return prompt_id, None
-            await asyncio.sleep(0.05)
+        await asyncio.sleep(poll_interval)
         hist = await http_get_json(client, url_hist)
         outputs = hist.get(prompt_id, {}).get("outputs", {})
         for _node_id, node_out in outputs.items():
@@ -487,8 +406,6 @@ async def sse_stream() -> AsyncGenerator[bytes, None]:
         await q.put(sse_format("status", "connected"))
         while True:
             msg = await q.get()
-            if not msg:
-                break
             yield msg.encode("utf-8")
     except asyncio.CancelledError:
         pass
@@ -496,25 +413,9 @@ async def sse_stream() -> AsyncGenerator[bytes, None]:
         if q in STATE.listeners:
             STATE.listeners.remove(q)
 
-async def _close_sse_listeners():
-    for q in list(STATE.listeners):
-        with contextlib.suppress(Exception):
-            await q.put("")
-    STATE.listeners.clear()
-
-CONTEXT_MAX_SEGMENTS = 3
-CONTEXT_MAX_CHARS = 220
-_context_buffer: deque[str] = deque(maxlen=CONTEXT_MAX_SEGMENTS)
-
-def update_context_buffer(text: str) -> str:
-    _context_buffer.append(text)
-    ctx = " ".join(_context_buffer)
-    if len(ctx) > CONTEXT_MAX_CHARS:
-        ctx = ctx[-CONTEXT_MAX_CHARS:]
-    return ctx
-
 def _device_name_override_for_alsa(idx: int, name: str) -> Optional[str]:
-    if FORCE_HW_DEVICE and "(hw:0,0)" in name:
+    # Nur anwenden, wenn explizit erzwungen
+    if FORCE_HW_DEVICE and "ALC293" in name and "(hw:0,0)" in name:
         return "hw:0,0"
     return None
 
@@ -565,11 +466,12 @@ async def audio_transcription_loop() -> None:
 
     current_segment_frames: List[np.ndarray] = []
     silence_ms = 0
-    endpoint_silence_ms = _env_int("APP_MAX_SILENCE_MS", 300)
+    endpoint_silence_ms = 400
     max_segment_sec = 10.0
     max_segment_frames = int((max_segment_sec * 1000) / FRAME_MS)
 
     def sd_callback(indata, frames, timeinfo, status):
+        # Status-Flags melden (Under/Overflow)
         if status:
             print(f"[AUDIO] callback status: {status}")
         mono = indata[:, 0].copy()
@@ -584,7 +486,7 @@ async def audio_transcription_loop() -> None:
     except Exception as e:
         print(f"[AUDIO] could not set sd.default.*: {e}")
 
-    print(f"[CFG] device_pref={AUDIO_DEVICE_PREF!r}, force_hw={FORCE_HW_DEVICE}, used idx:{dev_idx} name:{dev_name!r}, param={dev_param!r}, desired_sr={SAMPLE_RATE_ENV}, actual_sr={actual_sr}, frame_ms={FRAME_MS}, snapshot_sec={SNAPSHOT_SEC}, disable_vad={DISABLE_VAD}, rms_th={RMS_VAD_THRESHOLD}")
+    print(f"[CFG] device_pref={AUDIO_DEVICE_PREF!r}, force_hw={FORCE_HW_DEVICE}, device_used idx:{dev_idx} name:{dev_name!r}, param={dev_param!r}, desired_sr={SAMPLE_RATE_ENV}, actual_sr={actual_sr}, frame_ms={FRAME_MS}, snapshot_sec={SNAPSHOT_SEC}, disable_vad={DISABLE_VAD}")
 
     await broadcast("status", f"recording_start sr={actual_sr}")
     await broadcast("status", f"device_used idx={dev_idx} name={dev_name}")
@@ -592,11 +494,8 @@ async def audio_transcription_loop() -> None:
 
     stream.start()
 
-    first_snapshot_deadline = time.time() + 0.8
-    MIN_BUF_SEC = 0.8
-
     try:
-        priming_deadline = time.time() + 1.2
+        priming_deadline = time.time() + 0.8
         while time.time() < priming_deadline and not audio_frames and STATE.running:
             await asyncio.sleep(FRAME_MS / 1000.0)
     except asyncio.CancelledError:
@@ -607,6 +506,7 @@ async def audio_transcription_loop() -> None:
 
     use_polling = False
     if not audio_frames:
+        # Zweiter Versuch: ohne blocksize (0)
         try:
             with contextlib.suppress(Exception):
                 stream.stop(); stream.close()
@@ -619,9 +519,10 @@ async def audio_transcription_loop() -> None:
                 callback=None,
                 latency="low",
             )
+            stream.callback = sd_callback
             stream.start()
             print("[AUDIO] retry with blocksize=0")
-            retry_deadline = time.time() + 1.2
+            retry_deadline = time.time() + 0.8
             while time.time() < retry_deadline and not audio_frames and STATE.running:
                 await asyncio.sleep(FRAME_MS / 1000.0)
         except Exception as e:
@@ -641,18 +542,11 @@ async def audio_transcription_loop() -> None:
 
             if use_polling:
                 try:
-                    to_read = int(actual_sr * (FRAME_MS / 1000.0) * 3)
-                    data, ov = stream.read(to_read)
+                    data, ov = stream.read(int(actual_sr * FRAME_MS / 1000))
                     if ov:
                         print(f"[AUDIO] polling over/underflow: {ov}")
-                    target = int(actual_sr * FRAME_MS / 1000.0)
-                    pos = 0
-                    while pos < data.shape[0]:
-                        chunk = data[pos:pos+target, 0].copy()
-                        if chunk.shape[0] < target:
-                            chunk = np.pad(chunk, (0, target - chunk.shape[0]))
-                        audio_frames.append(chunk)
-                        pos += target
+                    frame = data[:, 0].copy()
+                    audio_frames.append(frame)
                 except Exception as e:
                     await broadcast("status", f"audio_read_error: {e}")
                     continue
@@ -679,35 +573,21 @@ async def audio_transcription_loop() -> None:
                 silence_ms = 0 if is_speech else (silence_ms + FRAME_MS)
                 is_segment_end = (silence_ms >= endpoint_silence_ms)
 
-            buf_sec = (len(current_segment_frames) * FRAME_MS) / 1000.0
-            do_snapshot_time = (now - last_snapshot >= SNAPSHOT_SEC) or (now >= first_snapshot_deadline)
-            do_snapshot = (do_snapshot_time or is_segment_end) and (buf_sec >= MIN_BUF_SEC)
-
-            if do_snapshot:
+            do_snapshot = (now - last_snapshot >= SNAPSHOT_SEC)
+            if do_snapshot or is_segment_end:
                 last_snapshot = now
-                if now >= first_snapshot_deadline:
-                    first_snapshot_deadline = float("inf")
                 seg = np.frombuffer(b"".join([f.tobytes() for f in current_segment_frames]), dtype=np.float32)
-                if seg.size > 0:
-                    peak = float(np.max(np.abs(seg)))
-                    if peak >= 0.004:
-                        txt = transcribe_chunk_with_whisper(seg, actual_sr)
-                        if txt:
-                            await broadcast("transcript", txt)
-                            ctx = update_context_buffer(txt)
-                            now_ts = time.time()
-                            if STATE.running and (now_ts - STATE.last_llm_run_ts >= LLM_INTERVAL_SEC):
-                                STATE.last_llm_run_ts = now_ts
-                                if not OLLAMA_DISABLED:
-                                    t = asyncio.create_task(run_llm_and_optionally_image(ctx))
-                                    STATE.bg_tasks.add(t)
-                                    t.add_done_callback(lambda fut: STATE.bg_tasks.discard(fut))
-                                else:
-                                    await broadcast("status", "ollama_disabled")
-                        else:
-                            await broadcast("status", "whisper_empty(no_text)")
+                if seg.size > 0 and float(np.max(np.abs(seg))) >= 0.01:
+                    txt = transcribe_chunk_with_whisper(seg, actual_sr)
+                    if txt:
+                        await broadcast("transcript", txt)
+                        if STATE.running and (time.time() - STATE.last_llm_run_ts >= 3.0):
+                            STATE.last_llm_run_ts = time.time()
+                            t = asyncio.create_task(run_llm_and_optionally_image(txt))
+                            STATE.bg_tasks.add(t)
+                            t.add_done_callback(lambda fut: STATE.bg_tasks.discard(fut))
                     else:
-                        await broadcast("status", f"low_peak({peak:.3f})")
+                        await broadcast("status", "whisper_empty(no_text)")
                 if is_segment_end:
                     current_segment_frames.clear()
                     silence_ms = 0
@@ -722,35 +602,33 @@ async def audio_transcription_loop() -> None:
             stream.stop()
             stream.close()
         await broadcast("status", "recording_stop")
-        print("[AUDIO] stream closed")
 
 async def run_llm_and_optionally_image(text: str) -> None:
     if not STATE.running:
         return
-    if await _ollama_available() is False:
-        await broadcast("status", "ollama_unavailable")
-        return
-
-    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_normal()) as client:
+    async with httpx.AsyncClient() as client:
         try:
-            if not STATE.running:
-                return
+            _ = await http_get_json(client, f"http://127.0.0.1:{OLLAMA_PORT}/api/tags")
+        except Exception as e:
+            await broadcast("status", f"ollama_unavailable: {e}")
+            return
+        if not STATE.running:
+            return
+        try:
             img_prompt = await ollama_generate_prompt(client, text)
             if not STATE.running:
                 return
             if img_prompt:
                 STATE.last_prompt = img_prompt
                 await broadcast("llm_prompt", img_prompt)
-                await broadcast("status", "llm_ok")
             else:
                 STATE.last_llm_error = "llm_empty"
                 await broadcast("status", "llm_empty")
                 return
-
+            await broadcast("status", "llm_ok")
             if DISABLE_COMFYUI or not STATE.running:
                 await broadcast("status", "comfy_disabled" if DISABLE_COMFYUI else "stopped_before_comfy")
                 return
-
             try:
                 if not await _comfy_available(client):
                     await broadcast("status", "comfy_unavailable")
@@ -758,7 +636,6 @@ async def run_llm_and_optionally_image(text: str) -> None:
             except Exception as e:
                 await broadcast("status", f"comfy_unavailable: {e}")
                 return
-
             try:
                 req = build_comfy_prompt_from_text(img_prompt)
                 pid, rel_img_path = await comfyui_run_and_wait(client, req)
@@ -770,8 +647,6 @@ async def run_llm_and_optionally_image(text: str) -> None:
                     await broadcast("status", "comfy_timeout")
             except Exception as e:
                 await broadcast("status", f"comfy_error: {e}")
-        except asyncio.CancelledError:
-            pass
         except Exception as e:
             STATE.last_llm_error = f"pipeline_error: {e}"
             await broadcast("status", f"pipeline_error: {e}")
@@ -888,25 +763,19 @@ async def start_pipeline():
     STATE.task = asyncio.create_task(audio_transcription_loop())
     return PlainTextResponse("started")
 
-async def _cancel_bg_tasks(timeout: float = 2.0) -> None:
+async def _cancel_bg_tasks() -> None:
     if not STATE.bg_tasks:
         return
     for t in list(STATE.bg_tasks):
         t.cancel()
-    t0 = time.time()
     for t in list(STATE.bg_tasks):
-        try:
-            await asyncio.wait_for(t, timeout=max(0.05, timeout - (time.time()-t0)))
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            pass
-        except Exception:
-            pass
+        with contextlib.suppress(asyncio.CancelledError):
+            await t
     STATE.bg_tasks.clear()
 
 @app.post("/stop", response_class=PlainTextResponse)
 async def stop_pipeline():
-    if not STATE.running and not STATE.task and not STATE.bg_tasks:
-        await _close_sse_listeners()
+    if not STATE.running:
         return PlainTextResponse("not running", status_code=200)
     STATE.running = False
     if STATE.task:
@@ -915,7 +784,6 @@ async def stop_pipeline():
             await STATE.task
         STATE.task = None
     await _cancel_bg_tasks()
-    await _close_sse_listeners()
     return PlainTextResponse("stopped")
 
 @app.get("/events")
@@ -958,7 +826,7 @@ async def selftest_audio():
         idx, dev = pick_input_device_index(AUDIO_DEVICE_PREF)
         sr = SAMPLE_RATE_ENV
         ch = 1
-        dur = 2.0
+        dur = 3.0
         dev_param: int | str = idx
         alsa_name = "hw:0,0" if FORCE_HW_DEVICE and "(hw:0,0)" in (dev.get("name") or "") else None
         if alsa_name:
@@ -975,6 +843,9 @@ async def selftest_audio():
 
 @app.get("/selftest/callback")
 async def selftest_callback():
+    """
+    Kurzer Callback-Test: öffnet Stream, wartet bis zu 1s auf Callback-Frames.
+    """
     try:
         idx, dev = pick_input_device_index(AUDIO_DEVICE_PREF)
         name = dev.get("name") or f"idx:{idx}"
@@ -1008,8 +879,8 @@ async def debug_last_prompt():
 @app.get("/health/ollama")
 async def health_ollama():
     try:
-        async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short()) as client:
-            data = await http_get_json(client, _ollama_url("/api/tags"))
+        async with httpx.AsyncClient() as client:
+            data = await http_get_json(client, f"http://127.0.0.1:{OLLAMA_PORT}/api/tags")
         return {"ok": True, "models": [m.get("name") for m in data.get("models", [])]}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -1017,7 +888,7 @@ async def health_ollama():
 @app.get("/health/comfyui")
 async def health_comfyui():
     try:
-        async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short()) as client:
+        async with httpx.AsyncClient() as client:
             ok = await _comfy_available(client)
             return {"ok": ok}
     except Exception as e:
@@ -1026,7 +897,7 @@ async def health_comfyui():
 @app.post("/warmup/ollama")
 async def warmup_ollama():
     try:
-        async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_normal()) as client:
+        async with httpx.AsyncClient() as client:
             body = {
                 "model": OLLAMA_MODEL,
                 "prompt": "Say hello.",
@@ -1038,41 +909,14 @@ async def warmup_ollama():
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
 
-_shutdown_once = False
-
 def _graceful_shutdown(*_):
-    global _shutdown_once
-    if _shutdown_once:
-        return
-    _shutdown_once = True
-    print("[SHUTDOWN] signal received, stopping...")
-    try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(_async_shutdown())
-    except Exception:
-        if STATE.running:
-            STATE.running = False
-        if STATE.task:
-            try:
-                STATE.task.cancel()
-            except Exception:
-                pass
-
-async def _async_shutdown():
-    STATE.running = False
+    if STATE.running:
+        STATE.running = False
     if STATE.task:
-        STATE.task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await STATE.task
-        STATE.task = None
-    for t in list(STATE.bg_tasks):
-        t.cancel()
-    with contextlib.suppress(Exception):
-        await asyncio.gather(*list(STATE.bg_tasks), return_exceptions=True)
-    STATE.bg_tasks.clear()
-    await _close_sse_listeners()
-    print("[SHUTDOWN] cleanup done")
-    await asyncio.sleep(0.2)
+        try:
+            STATE.task.cancel()
+        except Exception:
+            pass
 
 try:
     signal.signal(signal.SIGINT, _graceful_shutdown)

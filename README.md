@@ -256,7 +256,7 @@ BASH
 	# Ollama (optional)
 	export APP_OLLAMA_HOST="127.0.0.1"
 	export APP_OLLAMA_PORT="11434"
-	export APP_OLLAMA_MODEL="phi3:mini"
+	export APP_OLLAMA_MODEL="glm-4.7:cloud"
 	export APP_OLLAMA_TEMPERATURE="0.2"
 
 	# ComfyUI (optional)
@@ -278,7 +278,7 @@ BASH
 	# Optional: show what is set
 	env | egrep 'APP_(AUDIO_DEVICE|SAMPLE_RATE|DISABLE_VAD|SNAPSHOT_SEC|WHISPER_)'
 	# Start server
-	uvicorn app:app --host 127.0.0.1 --port 8080 --reload
+	uvicorn app:app --host 127.0.0.1 --port 8080 #--reload
 
 Open the browser:
 
