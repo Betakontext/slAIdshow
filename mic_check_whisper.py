@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 
-MODEL = os.getenv("APP_WHISPER_MODEL_PATH", "").strip()
+MODEL = os.getenv("APP_WHISPER_MODEL_PATH", "ggml-base.bin").strip()
 LANG  = os.getenv("APP_WHISPER_LANGUAGE", "de").strip()
 THR   = int(os.getenv("APP_WHISPER_THREADS","4"))
 SR    = int(os.getenv("APP_SAMPLE_RATE","48000"))
