@@ -195,6 +195,7 @@ Whisper test:
 
 BASH
 
+	export $(grep -v '^#' .env | xargs -d '\n')
 	python3 mic_check_whisper.py
 
 Tips:
