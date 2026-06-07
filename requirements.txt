@@ -4,7 +4,16 @@ httpx==0.27.2
 pydantic>=2,<3
 numpy==2.0.1
 sounddevice==0.4.7
-webrtcvad==2.0.10
 python-dotenv==1.0.1
+
+# Whisper (lokal, Python-Bindings für whisper.cpp)
+pywhispercpp>=1.1.0
+
+# Optional: WebRTC VAD. Achtung: Source-Build kann fehlschlagen.
+# Wenn du es brauchst und Build passt, aktiviere:
+# webrtcvad==2.0.10
+# Alternativ installiert run.sh: webrtcvad-wheels (empfohlen)
+
+# Build-Werkzeuge nur falls nötig (manche Systeme brauchen sie nicht als Runtime-Abhängigkeit)
 setuptools>=68
 wheel>=0.41
