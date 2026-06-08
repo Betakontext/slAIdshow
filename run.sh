@@ -11,12 +11,12 @@ DEV_RELOAD="${DEV_RELOAD:-1}"     # 1 = uvicorn --reload, 0 = ohne reload
 QUIET_PIP="${QUIET_PIP:-0}"       # 1 = weniger Pip-Ausgabe
 
 # ---- .env laden (falls vorhanden) ----
-if [[ -f ".env" ]]; then
-  set -a
+# if [[ -f ".env" ]]; then
+#   set -a
   # shellcheck disable=SC1090
-  . "./.env"
-  set +a
-fi
+#  . "./.env"
+#  set +a
+# fi
 
 # ---- Python-Version prüfen (mindestens 3.9 empfohlen) ----
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then

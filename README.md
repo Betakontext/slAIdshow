@@ -63,7 +63,6 @@ BASH
 	sudo apt install -y build-essential cmake pkg-config python3-dev \
 	libportaudio2 libasound2-dev
 
-
 Prepare project folder:
 
 Put all files from the repo into a new directory, e.g., speechtoimage_ai/
@@ -82,6 +81,16 @@ BASH
 
 	chmod +x run.sh
 	./run.sh
+	
+Start app.py (Server automaticly started)
+
+	python app.py
+	
+Open the browser to use UI:
+
+    http://127.0.0.1:8080
+
+
 
 -----------------------------------------
 
@@ -131,6 +140,16 @@ BASH
 	pip uninstall -y pywhispercpp
 	pip install --no-cache-dir pywhispercpp
 
+Create /models folder and pull Whisper model:
+
+BASH
+
+	mkdir -p models
+	curl -L -o models/ggml-base.bin \
+	https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+	# or tiny:
+	# curl -L -o models/ggml-tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
+
 
 Find audio device:
 
@@ -170,16 +189,6 @@ Peak=0.368, RMS=0.052
 
 Whisper (pywhispercpp)
 
-Install pywhispercpp (done above). Download a ggml model into models/:
-
-BASH
-
-	mkdir -p models
-	curl -L -o models/ggml-base.bin \
-	https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
-	# or tiny:
-	# curl -L -o models/ggml-tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
-
 Set model path and basic config:
 
 BASH
@@ -195,8 +204,7 @@ Whisper test:
 
 BASH
 
-	export $(grep -v '^#' .env | xargs -d '\n')
-	python3 mic_check_whisper.py
+	python mic_check_whisper.py
 
 Tips:
 
@@ -274,14 +282,15 @@ Load environment variables and start the server:
 BASH
 
 	source .venv/bin/activate
-	# Load environment from .env (optional)
-	export $(grep -v '^#' .env | xargs -d '\n')
-	# Optional: show what is set
-	env | egrep 'APP_(AUDIO_DEVICE|SAMPLE_RATE|DISABLE_VAD|SNAPSHOT_SEC|WHISPER_)'
 	# Start server
-	uvicorn app:app --host 127.0.0.1 --port 8080 #--reload
+	python app.py
+	
+oder
 
-Open the browser:
+	uvicorn app:app --host 127.0.0.1 --port 8080
+	
+	
+Open the browser to use UI:
 
     http://127.0.0.1:8080
 
