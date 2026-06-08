@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <title>Lokale Speech-to-Image Pipeline</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --text: #e7eaf0;
+      --muted: #a9b2c3;
+      --accent: #5ac8fa;
+      --danger: #ff5f56;
+      --ok: #3ddc84;
+      --btn: #232734;
+      --border: #262b36;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Inter, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 10;
+    }
+    .brand { font-weight: 600; letter-spacing: .2px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; }
+    button, .btn {
+      background: var(--btn); color: var(--text);
+      border: 1px solid #2c3140; padding: 8px 12px; border-radius: 8px;
+      cursor: pointer; display: inline-flex; align-items: center; gap: 8px;
+      transition: background .15s ease, border-color .15s ease, transform .02s;
+    }
+    button:hover { background: #2a3041; border-color: #3a4052; }
+    button:active { transform: translateY(1px); }
+    .btn-ok { border-color: #2d4a3b; }
+    .btn-danger { border-color: #5a2d2d; color: #ffdada; }
+    .status {
+      color: var(--muted); font-size: 13px; padding: 4px 8px; border-radius: 6px; background: #11141a; border: 1px solid var(--border);
+    }
+    main { padding: 16px; display: grid; gap: 16px; grid-template-columns: 1fr; }
+    .grid {
+      display: grid; gap: 16px;
+      grid-template-columns: 1.3fr .7fr;
+    }
+    @media (max-width: 1000px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+    }
+    .card h3 {
+      margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: 14px; color: #cfd6e6;
+      background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(0,0,0,0));
+    }
+    .card .body { padding: 12px; }
+    /* Bildviewer */
+    #image-viewer {
+      background: #0c0e12; border: 1px solid #232838; border-radius: 12px;
+      min-height: 360px; display: grid; place-items: center; position: relative; overflow: hidden;
+    }
+    #current-image {
+      max-width: 100%; max-height: 80vh; object-fit: contain; display: block; width: auto; height: auto; cursor: zoom-in;
+      transition: opacity .2s ease;
+      opacity: 0; /* fade-in bei Ladung */
+    }
+    #current-image.loaded { opacity: 1; }
+    #image-viewer .caption {
+      position: absolute; left: 12px; bottom: 12px; padding: 6px 10px; background: rgba(0,0,0,0.45);
+      border-radius: 8px; color: #e6e6e6; font-size: 12px; backdrop-filter: blur(6px); max-width: calc(100% - 24px);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    /* Fullscreen spezifisch nur für den Viewer */
+    #image-viewer:fullscreen { background: #000; }
+    #image-viewer:fullscreen #current-image { max-width: 100vw; max-height: 100vh; cursor: zoom-out; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    input[type="text"], textarea {
+      background: #0e1118; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+      width: 100%; outline: none;
+    }
+    textarea { min-height: 80px; resize: vertical; }
+    .log {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px; color: #c5cad6; background: #0d1016; border: 1px solid var(--border);
+      padding: 8px; border-radius: 8px; max-height: 240px; overflow: auto; white-space: pre-wrap;
+    }
+    .pill { font-size: 12px; color: #cfd6e6; background: #0e121a; border: 1px solid var(--border); padding: 4px 8px; border-radius: 999px; }
+    .right { margin-left: auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">Lokale Speech-to-Image Pipeline</div>
+    <div class="toolbar">
+      <span class="status" id="status">Verbinde…</span>
+      <button id="btn-fullscreen" type="button" title="Vollbild">
+        <span id="fs-icon-enter">⤢</span>
+        <span id="fs-icon-exit" style="display:none;">⤡</span>
+        <span id="fs-label">Vollbild</span>
+      </button>
+      <button id="btn-open-dir" type="button" title="Bilder-Ordner öffnen" class="right">Ordner</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="grid">
+      <section class="card">
+        <h3>Bildanzeige</h3>
+        <div class="body">
+          <div id="image-viewer">
+            <img id="current-image" src="" alt="Generiertes Bild" />
+            <div class="caption" id="img-caption">Kein Bild</div>
+          </div>
+          <div class="row" style="margin-top:10px;">
+            <button id="btn-start" class="btn-ok">Aufnahme starten</button>
+            <button id="btn-stop" class="btn-danger">Stop</button>
+            <span class="pill" id="ollama-pill">Ollama: ?</span>
+            <span class="pill" id="poll-pill">Images: ?</span>
+            <span class="pill" id="sr-pill">SR: ?</span>
+          </div>
+        </div>
+      </section>
+
+      <aside class="card">
+        <h3>Steuerung & Logs</h3>
+        <div class="body">
+          <div class="row" style="margin-bottom:8px;">
+            <input id="plan-input" type="text" placeholder="Text eingeben → Prompt erzeugen und Bild generieren" />
+            <button id="btn-plan">Senden</button>
+          </div>
+          <div class="row" style="margin-bottom:8px;">
+            <button id="btn-test">Testbild</button>
+          </div>
+          <div>
+            <strong>Letzter Prompt</strong>
+            <div class="log" id="prompt-log"></div>
+          </div>
+          <div style="margin-top:10px;">
+            <strong>Transkripte</strong>
+            <div class="log" id="transcript-log"></div>
+          </div>
+          <div style="margin-top:10px;">
+            <strong>Status</strong>
+            <div class="log" id="status-log"></div>
+          <div class="row" style="margin-top:8px;">
+              <button id="btn-shutdown" class="btn-danger" title="Server beenden">Server beenden</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    // ---------- Utility ----------
+    const $ = (s) => document.querySelector(s);
+    const statusEl = $('#status');
+    const promptLog = $('#prompt-log');
+    const transcriptLog = $('#transcript-log');
+    const statusLog = $('#status-log');
+    const img = $('#current-image');
+    const caption = $('#img-caption');
+    const viewer = $('#image-viewer');
+
+    function log(el, msg) {
+      const ts = new Date().toLocaleTimeString();
+      el.textContent = `[${ts}] ${msg}\n` + el.textContent;
+      if (el.textContent.length > 20000) el.textContent = el.textContent.slice(0, 20000);
+    }
+
+    // Bild laden + Fade-in
+    img.addEventListener('load', () => img.classList.add('loaded'));
+    function setImage(filenameRel, captionText) {
+      const url = filenameRel.startsWith('/static/') ? filenameRel : `/static/${filenameRel.replace(/^\/+/, '')}`;
+      img.classList.remove('loaded');
+      img.src = url;
+      caption.textContent = captionText || filenameRel;
+    }
+
+    // ---------- Fullscreen (nur Viewer) ----------
+    const btnFS = $('#btn-fullscreen');
+    const iconEnter = $('#fs-icon-enter');
+    const iconExit = $('#fs-icon-exit');
+    const fsLabel = $('#fs-label');
+
+    function isInFullscreenFor(el) { return document.fullscreenElement === el; }
+    async function enterFullscreen(el) {
+      try {
+        if (!document.fullscreenElement) await el.requestFullscreen();
+        else if (document.fullscreenElement !== el) {
+          await document.exitFullscreen(); await el.requestFullscreen();
+        }
+      } catch (e) { console.warn('enterFullscreen failed', e); }
+    }
+    async function exitFullscreen() { try { if (document.fullscreenElement) await document.exitFullscreen(); } catch (e) { console.warn('exitFullscreen failed', e); } }
+    async function toggleFullscreenFor(el) { isInFullscreenFor(el) ? await exitFullscreen() : await enterFullscreen(el); }
+    function syncFullscreenUI() {
+      const active = isInFullscreenFor(viewer);
+      iconEnter.style.display = active ? 'none' : '';
+      iconExit.style.display = active ? '' : 'none';
+      fsLabel.textContent = active ? 'Verkleinern' : 'Vollbild';
+      statusEl.textContent = active ? 'Vollbild aktiv' : 'Bereit';
+    }
+    btnFS.addEventListener('click', () => toggleFullscreenFor(viewer));
+    img.addEventListener('dblclick', () => toggleFullscreenFor(viewer));
+    document.addEventListener('fullscreenchange', syncFullscreenUI);
+    syncFullscreenUI();
+
+    // ---------- SSE: robustes (Re-)Connect ----------
+    let sse = null;
+    let backoffMs = 1000;
+    let reconnectTimer = null;
+    let connecting = false;
+    let wantAutoReconnect = true; // nur false, wenn Nutzer "Server beenden" drückt
+
+    function closeSSE(reason = 'closeSSE') {
+      try { if (sse) sse.close(); } catch {}
+      sse = null;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      console.debug('[SSE]', reason, '→ Verbindung geschlossen');
+    }
+
+    function scheduleReconnect() {
+      if (!wantAutoReconnect) {
+        console.debug('[SSE] Auto-Reconnect deaktiviert');
+        return;
+      }
+      if (reconnectTimer) return;
+      const delay = backoffMs;
+      log(statusLog, `SSE-Reconnect in ${Math.round(delay/1000)}s`);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectSSE();
+      }, delay);
+      backoffMs = Math.min(backoffMs * 2, 15000);
+    }
+
+    async function checkEventsHeaders() {
+      // Nur diagnostisch; brich sofort ab, um keine Ressourcen zu binden
+      try {
+        const ctrl = new AbortController();
+        const p = fetch('/events', { method: 'GET', signal: ctrl.signal });
+        setTimeout(() => ctrl.abort(), 50); // nach 50ms abbrechen
+        const r = await p.catch(() => null);
+        if (r) {
+          const ctype = r.headers.get('content-type') || '';
+          console.debug('[SSE] /events HEADERS content-type=', ctype);
+          if (!ctype.includes('text/event-stream')) {
+            log(statusLog, `Warnung: /events content-type ist "${ctype}" (erwartet text/event-stream)`);
+          }
+          try { ctrl.abort(); } catch {}
+        }
+      } catch (e) {
+        console.debug('[SSE] /events Header-Check fehlgeschlagen:', e);
+      }
+    }
+
+    function connectSSE() {
+      if (connecting) return;
+      connecting = true;
+      closeSSE('before-connect');
+      statusEl.textContent = 'Verbinde…';
+      log(statusLog, 'SSE: Verbinde…');
+      console.debug('[SSE] connecting to /events');
+
+      checkEventsHeaders();
+
+      try {
+        sse = new EventSource('/events');
+      } catch (e) {
+        console.debug('[SSE] EventSource-Konstruktor Fehler:', e);
+        connecting = false;
+        scheduleReconnect();
+        return;
+      }
+
+      sse.onopen = () => {
+        console.debug('[SSE] open');
+        connecting = false;
+        wantAutoReconnect = true;
+        backoffMs = 1000;
+        statusEl.textContent = 'Verbunden';
+        setShutdownMode(true);
+        log(statusLog, 'SSE verbunden');
+      };
+
+      sse.onerror = (err) => {
+        console.debug('[SSE] error:', err);
+        connecting = false;
+        statusEl.textContent = 'SSE getrennt';
+        log(statusLog, 'SSE getrennt');
+        closeSSE('onerror');
+        scheduleReconnect();
+      };
+
+      sse.addEventListener('status', (ev) => {
+        console.debug('[SSE] status', ev.data);
+        if (ev.data) { statusEl.textContent = ev.data; log(statusLog, ev.data); }
+      });
+
+      sse.addEventListener('transcript', (ev) => {
+        console.debug('[SSE] transcript', ev.data?.slice?.(0, 120));
+        if (ev.data) log(transcriptLog, ev.data);
+      });
+
+      sse.addEventListener('llm_prompt', (ev) => {
+        console.debug('[SSE] llm_prompt', ev.data?.slice?.(0, 120));
+        if (ev.data) { log(promptLog, ev.data); caption.textContent = ev.data; }
+      });
+
+      sse.addEventListener('image', (ev) => {
+        console.debug('[SSE] image', ev.data);
+        const rel = (ev.data || '').trim();
+        if (rel) setImage(rel, caption.textContent || rel);
+      });
+    }
+
+    // Erster Verbindungsversuch
+    connectSSE();
+
+    // ---------- Healthcheck + manueller Verbinden-Button ----------
+    async function isServerUp() {
+      try {
+        const r = await fetch('/health', { cache: 'no-store' });
+        return r.ok;
+      } catch { return false; }
+    }
+
+    async function manualReconnect() {
+      wantAutoReconnect = false;
+      closeSSE('manual-reconnect');
+      statusEl.textContent = 'Verbinde…';
+      log(statusLog, 'Manueller Verbindungsversuch gestartet');
+      let delay = 1000;
+      while (true) {
+        const up = await isServerUp();
+        if (up) {
+          log(statusLog, 'Server erreichbar – starte SSE');
+          wantAutoReconnect = true;
+          connectSSE();
+          return;
+        }
+        await new Promise(res => setTimeout(res, delay));
+        delay = Math.min(delay * 2, 15000);
+      }
+    }
+
+    // Shutdown/Verbinden Button
+    const btnShutdown = document.getElementById('btn-shutdown');
+    function setShutdownMode(connected) {
+      if (connected) {
+        btnShutdown.textContent = 'Server beenden';
+        btnShutdown.classList.add('btn-danger');
+        btnShutdown.title = 'Server beenden';
+      } else {
+        btnShutdown.textContent = 'Server verbinden';
+        btnShutdown.classList.remove('btn-danger');
+        btnShutdown.title = 'Erneut verbinden';
+      }
+    }
+    setShutdownMode(true);
+
+    btnShutdown.addEventListener('click', async () => {
+      if (btnShutdown.textContent.includes('verbinden')) {
+        btnShutdown.disabled = true;
+        const old = btnShutdown.textContent;
+        btnShutdown.textContent = 'Verbinde…';
+        try {
+          await manualReconnect();
+        } finally {
+          // Button wird bei Erfolg durch sse.onopen wieder zu "Server beenden"
+          if (btnShutdown.textContent === 'Verbinde…') {
+            btnShutdown.textContent = old;
+          }
+          btnShutdown.disabled = false;
+        }
+        return;
+      }
+
+      // Server beenden
+      const confirmStop = confirm('Server wirklich beenden? Die Seite verliert die Verbindung.');
+      if (!confirmStop) return;
+      btnShutdown.disabled = true;
+      const oldTxt = btnShutdown.textContent;
+      btnShutdown.textContent = 'Beende…';
+      try {
+        const r = await fetch('/shutdown', { method: 'POST' });
+        log(statusLog, `shutdown → ${r.status}`);
+        statusEl.textContent = r.ok ? 'Server wird beendet…' : 'Shutdown fehlgeschlagen';
+        setShutdownMode(false);
+        wantAutoReconnect = false; // Auto-Reconnect aus, bis Nutzer aktiv verbindet
+        closeSSE('after-shutdown');
+      } catch (e) {
+        log(statusLog, `shutdown error: ${e}`);
+        statusEl.textContent = 'Shutdown-Fehler';
+      } finally {
+        btnShutdown.disabled = false;
+        if (btnShutdown.textContent === 'Beende…') btnShutdown.textContent = 'Server verbinden';
+      }
+    });
+
+    // ---------- Backend Controls ----------
+    $('#btn-start').addEventListener('click', async () => {
+      try {
+        const r = await fetch('/start', { method: 'POST' });
+        statusEl.textContent = r.ok ? 'Aufnahme läuft' : 'Start fehlgeschlagen';
+        log(statusLog, `start → ${r.status}`);
+      } catch (e) { log(statusLog, `start error: ${e}`); }
+    });
+    $('#btn-stop').addEventListener('click', async () => {
+      try {
+        const r = await fetch('/stop', { method: 'POST' });
+        statusEl.textContent = r.ok ? 'Gestoppt' : 'Stop fehlgeschlagen';
+        log(statusLog, `stop → ${r.status}`);
+      } catch (e) { log(statusLog, `stop error: ${e}`); }
+    });
+    $('#btn-plan').addEventListener('click', async () => {
+      const text = $('#plan-input').value.trim();
+      if (!text) return;
+      try {
+        const r = await fetch('/api/plan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, tags: [] }) });
+        const j = await r.json();
+        if (j.prompt) { log(promptLog, j.prompt); statusEl.textContent = 'Prompt erzeugt'; }
+        else if (j.error) { log(statusLog, `plan error: ${j.error}`); }
+      } catch (e) { log(statusLog, `plan exception: ${e}`); }
+    });
+    $('#btn-test').addEventListener('click', async () => {
+      try {
+        const r = await fetch('/api/pollinations/test', { method: 'POST' });
+        const j = await r.json();
+        if (r.ok && j.rel) {
+          setImage(j.rel, 'Testbild');
+          log(statusLog, `Testbild geladen: ${j.rel}`);
+        } else {
+          log(statusLog, `Test fehlgeschlagen: ${j.error || r.status}`);
+        }
+      } catch (e) { log(statusLog, `test exception: ${e}`); }
+    });
+
+    // Ordner öffnen (Platzhalter)
+    $('#btn-open-dir').addEventListener('click', () => {
+      alert('Bitte den Output-Ordner lokal im Dateisystem öffnen: ./outputs/images');
+    });
+
+    // ---------- Initiale Konfig laden ----------
+    (async function init() {
+      try {
+        const r = await fetch('/config', { cache: 'no-store' });
+        if (!r.ok) throw new Error('config fetch failed');
+        const j = await r.json();
+        $('#ollama-pill').textContent = `Ollama: ${j?.ollama?.model || '?'}`;
+        $('#poll-pill').textContent = `Images: ${j?.image?.backend || '?'}`;
+        $('#sr-pill').textContent = `SR: ${j?.audio?.sample_rate || '?'}`;
+        statusEl.textContent = 'Bereit';
+      } catch (e) {
+        log(statusLog, `config error: ${e}`);
+        statusEl.textContent = 'Konfig-Fehler';
+      }
+    })();
+  </script>
+
+</body>
+</html>
