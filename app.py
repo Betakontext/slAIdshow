@@ -696,6 +696,35 @@ async def broadcast(event: str, data: str) -> None:
 
 _context_buffer: deque[str] = deque(maxlen=CONTEXT_MAX_SEGMENTS)
 
+# ----- SSE Helper: alle Listener sauber schließen -----
+async def _close_sse_listeners(timeout: float = 0.25) -> None:
+    """
+    Sendet ein Terminierungssignal an alle aktiven SSE-Listener-Queues und leert die Liste.
+    Wir verwenden eine leere Zeichenkette "" als Signal zum Beenden.
+    """
+    listeners = getattr(STATE, "listeners", None)
+    if not listeners:
+        return
+    queues: List[asyncio.Queue] = list(listeners)
+
+    async def _signal(q: asyncio.Queue) -> None:
+        try:
+            q.put_nowait("")
+        except Exception:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(q.put(""), timeout=timeout)
+
+    tasks = [asyncio.create_task(_signal(q)) for q in queues]
+    with contextlib.suppress(Exception):
+        await asyncio.wait(tasks, timeout=timeout + 0.25)
+
+    try:
+        listeners.clear()
+    except Exception:
+        setattr(STATE, "listeners", [])
+
+
+
 def update_context_buffer(text: str) -> str:
     _context_buffer.append(text)
     ctx = " ".join(_context_buffer)
@@ -722,6 +751,8 @@ def _log_effective_config() -> None:
         "| image:",
         f"backend={IMAGE_BACKEND} allow_cloud={ALLOW_CLOUD_IMAGE_BACKEND} api_base={POLLINATIONS_API_BASE} key_present={bool(POLLINATIONS_SECRET)}",
     )
+
+
 
 # ---- Audio main loop ----
 async def audio_transcription_loop() -> None:
@@ -988,172 +1019,21 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="static")
 
-# ---- UI mit Vollbild-Button und sanftem Übergang ----
-INDEX_HTML = """<!doctype html>
-<html lang="de"><head><meta charset="utf-8"><title>Vorlesen → Bilder (Serverseitig)</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-:root{--bg:#0b1020;--panel:#141a2e;--line:rgba(255,255,255,.06);--fg:#e8ecf1;--accent:#1f6feb}
-html,body{height:100%}
-body{font-family:system-ui,sans-serif;margin:0;padding:0;background:var(--bg);color:var(--fg);display:flex;flex-direction:column}
-header{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;padding:1rem}
-button{background:var(--accent);color:#fff;border:0;padding:.6rem 1rem;border-radius:8px;cursor:pointer}
-button.stop{background:#c53b3b}
-#status{opacity:.9;font-size:.9rem}
-main{display:flex;flex-direction:column;gap:.75rem;padding:0 1rem 1rem 1rem;flex:1;min-height:0}
-#live{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.panel{background:var(--panel);border-radius:10px;overflow:hidden;box-shadow:0 0 0 1px var(--line) inset}
-.panel-title{font-size:.9rem;font-weight:600;padding:.5rem .75rem;color:#c7d1df;border-bottom:1px solid var(--line)}
-.panel-body{padding:.6rem .75rem;min-height:52px;white-space:pre-wrap;word-break:break-word}
-.mono{font-family:ui-monospace,Menlo,Consolas,"Liberation Mono",monospace}
-#viewer{background:var(--panel);border-radius:10px;box-shadow:0 0 0 1px var(--line) inset;display:flex;flex-direction:column;min-height:0;flex:1;position:relative}
-#stage{position:relative;flex:1;min-height:0;display:flex;align-items:center;justify-content:center;background:#0e1426;overflow:hidden}
-#stage img.layer{position:absolute;inset:0;margin:auto;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;display:block;opacity:0;transition:opacity 450ms ease}
-#stage img.layer.show{opacity:1}
-#stage .placeholder{color:#8fa0b8;opacity:.9;font-size:.95rem}
-#stage .caption{position:absolute;left:8px;bottom:6px;background:rgba(0,0,0,.45);color:#d7e1ef;padding:.25rem .5rem;border-radius:6px;font-size:.8rem;pointer-events:none}
-.controls{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
-input[type="text"]{background:#0e1426;color:#e8ecf1;border:1px solid #283355;border-radius:8px;padding:.45rem .6rem;min-width:260px}
-.small{font-size:.85rem;opacity:.85}
-.warn{color:#f9cdcd}
-/* Vollbild-Button rechts unten */
-#fsbtn{position:absolute;right:10px;bottom:10px;background:rgba(31,111,235,.9);border-radius:8px;padding:.5rem .75rem;z-index:5}
-</style>
-</head><body>
-<header class="controls">
-  <button id="start">Start</button>
-  <button id="stop" class="stop">Stop</button>
-  <button id="shutdown" class="stop">Server beenden</button>
-  <button id="llmtest">LLM Test</button>
-  <input id="manual" type="text" placeholder="Manueller Text → Prompt" />
-  <button id="send">Senden</button>
-  <div id="status">Ready.</div>
-</header>
-<main>
-  <section id="live">
-    <div class="panel"><div class="panel-title">Transcript</div><div id="transcript" class="panel-body mono"></div></div>
-    <div class="panel"><div class="panel-title warn">Prompt (serverseitig)</div><div id="prompt" class="panel-body"></div></div>
-  </section>
-  <div id="viewer">
-    <div id="stage">
-      <div class="placeholder">Noch kein Bild. Sprich etwas oder sende einen Prompt.</div>
-      <img class="layer" id="imgA" alt="">
-      <img class="layer" id="imgB" alt="">
-      <div class="caption" id="cap"></div>
-      <button id="fsbtn" title="Vollbild umschalten">Vollbild</button>
-    </div>
-  </div>
-</main>
-<script>
-const statusEl=document.getElementById('status');
-const promptEl=document.getElementById('prompt');
-const transcriptEl=document.getElementById('transcript');
-const stage=document.getElementById('stage');
-const imgA=document.getElementById('imgA');
-const imgB=document.getElementById('imgB');
-const cap=document.getElementById('cap');
-const fsbtn=document.getElementById('fsbtn');
+# ---- UI Static Mounts ----
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse
 
-let evtSrc=null, busy=false, toggle=false;
+# Liefert Bilder aus OUTPUT_DIR unter /static
+app.mount("/static", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="static")
 
-function setStatus(m){statusEl.textContent=m}
-function setPrompt(p){promptEl.textContent=p||''}
-function setTranscript(t){transcriptEl.textContent=t||''}
+# UI aus ./web unter /web
+app.mount("/web", StaticFiles(directory="web", html=True), name="web")
 
-function crossfadeTo(rel){
-  const ph = stage.querySelector('.placeholder');
-  if(ph) ph.remove();
-  const next = toggle ? imgA : imgB;
-  const current = toggle ? imgB : imgA;
-  toggle = !toggle;
+@app.get("/", include_in_schema=False)
+async def root_redirect():
+    # einzig gültiger Root-Handler: leite auf /web/index.html
+    return RedirectResponse(url="/web/index.html", status_code=307)
 
-  // Cache-buster und Pfad
-  const url = '/static/'+rel+'?t='+Date.now();
-  next.classList.remove('show');
-  next.onload = ()=>{
-    // erst wenn geladen, dann einblenden
-    if(current) current.classList.remove('show');
-    next.classList.add('show');
-    cap.textContent = new Date().toLocaleTimeString();
-  };
-  next.src = url;
-}
-
-async function start(){
-  if(busy) return; busy=true;
-  try{
-    if(evtSrc){ try{evtSrc.close();}catch(_){} evtSrc=null; }
-    evtSrc=new EventSource('/events');
-    evtSrc.addEventListener('status', e=>setStatus(e.data));
-    evtSrc.addEventListener('transcript', e=>setTranscript(e.data));
-    evtSrc.addEventListener('llm_prompt', e=>setPrompt(e.data));
-    evtSrc.addEventListener('image', e=>crossfadeTo(e.data));
-    await new Promise(res=>{
-      const check=()=>{ if(evtSrc && evtSrc.readyState===1) res(); else setTimeout(check,50); }; check();
-    });
-    await fetch('/start',{method:'POST'});
-  } finally { busy=false; }
-}
-
-async function stop(){
-  if(busy) return; busy=true;
-  try{
-    await fetch('/stop',{method:'POST'});
-    if(evtSrc){ try{evtSrc.close();}catch(_){} evtSrc=null; }
-    setStatus('stopped');
-  } finally { busy=false; }
-}
-
-async function shutdown(){
-  if(busy) return; busy=true;
-  try{
-    await fetch('/shutdown',{method:'POST'});
-    if(evtSrc){ try{evtSrc.close();}catch(_){} evtSrc=null; }
-    setStatus('server shutting down');
-  } finally { busy=false; }
-}
-
-async function llmTest(){
-  const cfg = await (await fetch('/config')).json();
-  const body={model: cfg.ollama.model, prompt:"<<SYS>>Schneller Test-Prompt<</SYS>>\\n\\nINPUT_JSON:\\n{\\"user_text\\": \\"Ein roter Ballon über einer Stadt im Sonnenuntergang\\", \\"constraints\\":{\\"no_meta\\":true,\\"max_sentences\\":2,\\"avoid_sensitive\\":true}}\\n\\nOUTPUT:\\n", stream:false, options:{}};
-  const r=await fetch('/api/ollama/generate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
-  const j=await r.json();
-  const out = j.response || j.error || JSON.stringify(j);
-  setPrompt(out);
-}
-
-async function sendManual(){
-  const t=document.getElementById('manual').value.trim();
-  if(!t) return;
-  const r=await fetch('/api/plan',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:t,tags:[]})});
-  const j=await r.json();
-  if(j.prompt){ setPrompt(j.prompt); }
-  else if(j.error){ setStatus('Error: '+j.error); }
-}
-
-// Vollbild-Toggle
-fsbtn.addEventListener('click', async ()=>{
-  const el = document.documentElement; // ganze Seite in Vollbild
-  try{
-    if(!document.fullscreenElement){
-      await el.requestFullscreen();
-      fsbtn.textContent = 'Vollbild beenden';
-    }else{
-      await document.exitFullscreen();
-      fsbtn.textContent = 'Vollbild';
-    }
-  }catch(e){
-    console.warn('Fullscreen failed', e);
-  }
-});
-
-document.getElementById('start').addEventListener('click', start);
-document.getElementById('stop').addEventListener('click', stop);
-document.getElementById('shutdown').addEventListener('click', shutdown);
-document.getElementById('llmtest').addEventListener('click', llmTest);
-document.getElementById('send').addEventListener('click', sendManual);
-</script>
-</body></html>"""
 
 # ---- Routes ----
 from fastapi import APIRouter
@@ -1174,31 +1054,28 @@ async def events(request: Request):
         q: asyncio.Queue[str] = asyncio.Queue()
         STATE.listeners.append(q)
         try:
+            # sofortiges Connected-Event
             await q.put(sse_format("status", "connected"))
             while True:
                 if await request.is_disconnected():
                     break
                 try:
-                    msg = await asyncio.wait_for(q.get(), timeout=1.0)
+                    msg = await asyncio.wait_for(q.get(), timeout=15.0)
                 except asyncio.TimeoutError:
+                    # Heartbeat
                     yield sse_format("status", "hb").encode("utf-8")
                     continue
-                if not msg:
+                if msg == "":
                     break
                 yield msg.encode("utf-8")
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError:
             pass
         finally:
-            with contextlib.suppress(ValueError):
+            with contextlib.suppress(Exception):
                 if q in STATE.listeners:
                     STATE.listeners.remove(q)
     return StreamingResponse(gen(), media_type="text/event-stream")
 
-async def _close_sse_listeners():
-    for q in list(STATE.listeners):
-        with contextlib.suppress(Exception):
-            await q.put("")
-    STATE.listeners.clear()
 
 @app.get("/config")
 async def get_config():
