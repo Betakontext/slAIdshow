@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
   <meta charset="utf-8" />
-  <title>Lokale Speech-to-Image Pipeline</title>
+  <title>Local Speech-to-Image Pipeline</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
@@ -55,9 +55,9 @@
     .card h3 {
       margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: 14px; color: #cfd6e6;
       background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(0,0,0,0));
+      display: flex; align-items: center; gap: 8px;
     }
     .card .body { padding: 12px; }
-    /* Bildviewer */
     #image-viewer {
       background: #0c0e12; border: 1px solid #232838; border-radius: 12px;
       min-height: 360px; display: grid; place-items: center; position: relative; overflow: hidden;
@@ -65,7 +65,7 @@
     #current-image {
       max-width: 100%; max-height: 80vh; object-fit: contain; display: block; width: auto; height: auto; cursor: zoom-in;
       transition: opacity .2s ease;
-      opacity: 0; /* fade-in bei Ladung */
+      opacity: 0;
     }
     #current-image.loaded { opacity: 1; }
     #image-viewer .caption {
@@ -73,7 +73,6 @@
       border-radius: 8px; color: #e6e6e6; font-size: 12px; backdrop-filter: blur(6px); max-width: calc(100% - 24px);
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    /* Fullscreen spezifisch nur für den Viewer */
     #image-viewer:fullscreen { background: #000; }
     #image-viewer:fullscreen #current-image { max-width: 100vw; max-height: 100vh; cursor: zoom-out; }
     .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -89,13 +88,20 @@
     }
     .pill { font-size: 12px; color: #cfd6e6; background: #0e121a; border: 1px solid var(--border); padding: 4px 8px; border-radius: 999px; }
     .right { margin-left: auto; }
+    select.lang {
+      background: var(--btn); color: var(--text); border: 1px solid #2c3140; border-radius: 8px; padding: 6px 10px;
+    }
   </style>
 </head>
 <body>
   <header>
-    <div class="brand">Lokale Speech-to-Image Pipeline</div>
+    <div class="brand" id="brand-title">Lokale Speech-to-Image Pipeline</div>
     <div class="toolbar">
       <span class="status" id="status">Verbinde…</span>
+      <select id="lang-select" class="lang" title="Language">
+        <option value="de">Deutsch</option>
+        <option value="en">English</option>
+      </select>
       <button id="btn-fullscreen" type="button" title="Vollbild">
         <span id="fs-icon-enter">⤢</span>
         <span id="fs-icon-exit" style="display:none;">⤡</span>
@@ -108,7 +114,7 @@
   <main>
     <div class="grid">
       <section class="card">
-        <h3>Bildanzeige</h3>
+        <h3 id="title-viewer">Bildanzeige</h3>
         <div class="body">
           <div id="image-viewer">
             <img id="current-image" src="" alt="Generiertes Bild" />
@@ -125,7 +131,7 @@
       </section>
 
       <aside class="card">
-        <h3>Steuerung & Logs</h3>
+        <h3 id="title-controls">Steuerung & Logs</h3>
         <div class="body">
           <div class="row" style="margin-bottom:8px;">
             <input id="plan-input" type="text" placeholder="Text eingeben → Prompt erzeugen und Bild generieren" />
@@ -135,17 +141,17 @@
             <button id="btn-test">Testbild</button>
           </div>
           <div>
-            <strong>Letzter Prompt</strong>
+            <strong id="label-last-prompt">Letzter Prompt</strong>
             <div class="log" id="prompt-log"></div>
           </div>
           <div style="margin-top:10px;">
-            <strong>Transkripte</strong>
+            <strong id="label-transcripts">Transkripte</strong>
             <div class="log" id="transcript-log"></div>
           </div>
           <div style="margin-top:10px;">
-            <strong>Status</strong>
+            <strong id="label-status">Status</strong>
             <div class="log" id="status-log"></div>
-          <div class="row" style="margin-top:8px;">
+            <div class="row" style="margin-top:8px;">
               <button id="btn-shutdown" class="btn-danger" title="Server beenden">Server beenden</button>
             </div>
           </div>
@@ -155,6 +161,137 @@
   </main>
 
   <script>
+    // ---------- i18n dictionary ----------
+    // All UI strings are driven by this dictionary based on selected language.
+    const I18N = {
+      de: {
+        brand: "Lokale Speech-to-Image Pipeline",
+        status_connecting: "Verbinde…",
+        status_connected: "Verbunden",
+        status_ready: "Bereit",
+        status_fullscreen_on: "Vollbild aktiv",
+        status_fullscreen_off: "Bereit",
+        title_viewer: "Bildanzeige",
+        title_controls: "Steuerung & Logs",
+        caption_none: "Kein Bild",
+        fs_enter: "Vollbild",
+        fs_exit: "Verkleinern",
+        btn_open_dir: "Ordner",
+        btn_start: "Aufnahme starten",
+        btn_stop: "Stop",
+        btn_plan: "Senden",
+        btn_test: "Testbild",
+        label_last_prompt: "Letzter Prompt",
+        label_transcripts: "Transkripte",
+        label_status: "Status",
+        shutdown: "Server beenden",
+        reconnect: "Server verbinden",
+        reconnecting: "Verbinde…",
+        confirm_shutdown: "Server wirklich beenden? Die Seite verliert die Verbindung.",
+        server_offline: "Server offline – bitte Server starten",
+        sse_connecting: "SSE: Verbinde…",
+        sse_connected: "SSE verbunden",
+        sse_disconnected: "SSE getrennt",
+        manual_connect_start: "Manueller Verbindungsversuch gestartet",
+        manual_connect_ok: "Server erreichbar – starte SSE",
+        start_ok: "Aufnahme läuft",
+        start_fail: "Start fehlgeschlagen",
+        stop_ok: "Gestoppt",
+        stop_fail: "Stop fehlgeschlagen",
+        config_error: "Konfig-Fehler",
+        prompt_created: "Prompt erzeugt",
+        shutdown_in_progress: "Server wird beendet…",
+        shutdown_failed: "Shutdown fehlgeschlagen",
+        shutdown_error: "Shutdown-Fehler",
+      },
+      en: {
+        brand: "Local Speech-to-Image Pipeline",
+        status_connecting: "Connecting…",
+        status_connected: "Connected",
+        status_ready: "Ready",
+        status_fullscreen_on: "Fullscreen active",
+        status_fullscreen_off: "Ready",
+        title_viewer: "Image Viewer",
+        title_controls: "Controls & Logs",
+        caption_none: "No image",
+        fs_enter: "Fullscreen",
+        fs_exit: "Exit",
+        btn_open_dir: "Folder",
+        btn_start: "Start Recording",
+        btn_stop: "Stop",
+        btn_plan: "Send",
+        btn_test: "Test Image",
+        label_last_prompt: "Last Prompt",
+        label_transcripts: "Transcripts",
+        label_status: "Status",
+        shutdown: "Shut down server",
+        reconnect: "Connect to server",
+        reconnecting: "Connecting…",
+        confirm_shutdown: "Really shut down the server? This page will lose the connection.",
+        server_offline: "Server offline — please start the server",
+        sse_connecting: "SSE: Connecting…",
+        sse_connected: "SSE connected",
+        sse_disconnected: "SSE disconnected",
+        manual_connect_start: "Manual reconnect started",
+        manual_connect_ok: "Server reachable — starting SSE",
+        start_ok: "Recording running",
+        start_fail: "Start failed",
+        stop_ok: "Stopped",
+        stop_fail: "Stop failed",
+        config_error: "Config error",
+        prompt_created: "Prompt created",
+        shutdown_in_progress: "Server is shutting down…",
+        shutdown_failed: "Shutdown failed",
+        shutdown_error: "Shutdown error",
+      }
+    };
+
+    // ---------- Language state ----------
+    const langSelect = document.getElementById('lang-select');
+    let LANG = localStorage.getItem('ui_lang') || 'de';
+    langSelect.value = LANG;
+
+    function t(key) {
+      return I18N[LANG][key] || key;
+    }
+
+    function applyI18N() {
+      document.getElementById('brand-title').textContent = t('brand');
+      document.getElementById('title-viewer').textContent = t('title_viewer');
+      document.getElementById('title-controls').textContent = t('title_controls');
+      document.getElementById('img-caption').textContent = t('caption_none');
+      document.getElementById('fs-label').textContent = t('fs_enter');
+      document.getElementById('btn-open-dir').textContent = t('btn_open_dir');
+      document.getElementById('btn-start').textContent = t('btn_start');
+      document.getElementById('btn-stop').textContent = t('btn_stop');
+      document.getElementById('btn-plan').textContent = t('btn_plan');
+      document.getElementById('btn-test').textContent = t('btn_test');
+      document.getElementById('label-last-prompt').textContent = t('label_last_prompt');
+      document.getElementById('label-transcripts').textContent = t('label_transcripts');
+      document.getElementById('label-status').textContent = t('label_status');
+      const btnShutdown = document.getElementById('btn-shutdown');
+      if (btnShutdown.dataset.mode === 'reconnect') {
+        btnShutdown.textContent = t('reconnect');
+        btnShutdown.title = t('reconnect');
+        btnShutdown.classList.remove('btn-danger');
+      } else {
+        btnShutdown.textContent = t('shutdown');
+        btnShutdown.title = t('shutdown');
+        btnShutdown.classList.add('btn-danger');
+      }
+      // Update initial status label if it is still at initial connecting text
+      const statusEl = document.getElementById('status');
+      if (statusEl.dataset.state === 'connecting') {
+        statusEl.textContent = t('status_connecting');
+      }
+    }
+
+    langSelect.addEventListener('change', () => {
+      LANG = langSelect.value;
+      localStorage.setItem('ui_lang', LANG);
+      applyI18N();
+    });
+
     // ---------- Utility ----------
     const $ = (s) => document.querySelector(s);
     const statusEl = $('#status');
@@ -171,7 +308,11 @@
       if (el.textContent.length > 20000) el.textContent = el.textContent.slice(0, 20000);
     }
 
-    // Bild laden + Fade-in
+    // Set initial text according to language
+    statusEl.dataset.state = 'connecting';
+    statusEl.textContent = t('status_connecting');
+
+    // Image loading + fade-in
     img.addEventListener('load', () => img.classList.add('loaded'));
     function setImage(filenameRel, captionText) {
       const url = filenameRel.startsWith('/static/') ? filenameRel : `/static/${filenameRel.replace(/^\/+/, '')}`;
@@ -180,7 +321,7 @@
       caption.textContent = captionText || filenameRel;
     }
 
-    // ---------- Fullscreen (nur Viewer) ----------
+    // ---------- Fullscreen (viewer only) ----------
     const btnFS = $('#btn-fullscreen');
     const iconEnter = $('#fs-icon-enter');
     const iconExit = $('#fs-icon-exit');
@@ -201,31 +342,30 @@
       const active = isInFullscreenFor(viewer);
       iconEnter.style.display = active ? 'none' : '';
       iconExit.style.display = active ? '' : 'none';
-      fsLabel.textContent = active ? 'Verkleinern' : 'Vollbild';
-      statusEl.textContent = active ? 'Vollbild aktiv' : 'Bereit';
+      fsLabel.textContent = active ? t('fs_exit') : t('fs_enter');
+      statusEl.textContent = active ? t('status_fullscreen_on') : t('status_fullscreen_off');
     }
     btnFS.addEventListener('click', () => toggleFullscreenFor(viewer));
     img.addEventListener('dblclick', () => toggleFullscreenFor(viewer));
     document.addEventListener('fullscreenchange', syncFullscreenUI);
-    syncFullscreenUI();
 
-    // ---------- SSE: robustes (Re-)Connect ----------
+    // ---------- SSE robust connect ----------
     let sse = null;
     let backoffMs = 1000;
     let reconnectTimer = null;
     let connecting = false;
-    let wantAutoReconnect = true; // nur false, wenn Nutzer "Server beenden" drückt
+    let wantAutoReconnect = true; // disabled after shutdown until manual reconnect
 
     function closeSSE(reason = 'closeSSE') {
       try { if (sse) sse.close(); } catch {}
       sse = null;
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-      console.debug('[SSE]', reason, '→ Verbindung geschlossen');
+      console.debug('[SSE]', reason, '→ connection closed');
     }
 
     function scheduleReconnect() {
       if (!wantAutoReconnect) {
-        console.debug('[SSE] Auto-Reconnect deaktiviert');
+        console.debug('[SSE] auto-reconnect disabled');
         return;
       }
       if (reconnectTimer) return;
@@ -238,40 +378,19 @@
       backoffMs = Math.min(backoffMs * 2, 15000);
     }
 
-    async function checkEventsHeaders() {
-      // Nur diagnostisch; brich sofort ab, um keine Ressourcen zu binden
-      try {
-        const ctrl = new AbortController();
-        const p = fetch('/events', { method: 'GET', signal: ctrl.signal });
-        setTimeout(() => ctrl.abort(), 50); // nach 50ms abbrechen
-        const r = await p.catch(() => null);
-        if (r) {
-          const ctype = r.headers.get('content-type') || '';
-          console.debug('[SSE] /events HEADERS content-type=', ctype);
-          if (!ctype.includes('text/event-stream')) {
-            log(statusLog, `Warnung: /events content-type ist "${ctype}" (erwartet text/event-stream)`);
-          }
-          try { ctrl.abort(); } catch {}
-        }
-      } catch (e) {
-        console.debug('[SSE] /events Header-Check fehlgeschlagen:', e);
-      }
-    }
-
-    function connectSSE() {
+    async function connectSSE() {
       if (connecting) return;
       connecting = true;
       closeSSE('before-connect');
-      statusEl.textContent = 'Verbinde…';
-      log(statusLog, 'SSE: Verbinde…');
+      statusEl.dataset.state = 'connecting';
+      statusEl.textContent = t('status_connecting');
+      log(statusLog, t('sse_connecting'));
       console.debug('[SSE] connecting to /events');
-
-      checkEventsHeaders();
 
       try {
         sse = new EventSource('/events');
       } catch (e) {
-        console.debug('[SSE] EventSource-Konstruktor Fehler:', e);
+        console.debug('[SSE] EventSource ctor error:', e);
         connecting = false;
         scheduleReconnect();
         return;
@@ -282,63 +401,64 @@
         connecting = false;
         wantAutoReconnect = true;
         backoffMs = 1000;
-        statusEl.textContent = 'Verbunden';
+        statusEl.dataset.state = 'connected';
+        statusEl.textContent = t('status_connected');
         setShutdownMode(true);
-        log(statusLog, 'SSE verbunden');
+        log(statusLog, t('sse_connected'));
       };
 
       sse.onerror = (err) => {
         console.debug('[SSE] error:', err);
         connecting = false;
-        statusEl.textContent = 'SSE getrennt';
-        log(statusLog, 'SSE getrennt');
+        statusEl.dataset.state = 'disconnected';
+        statusEl.textContent = t('sse_disconnected');
+        log(statusLog, t('sse_disconnected'));
         closeSSE('onerror');
         scheduleReconnect();
       };
 
       sse.addEventListener('status', (ev) => {
-        console.debug('[SSE] status', ev.data);
-        if (ev.data) { statusEl.textContent = ev.data; log(statusLog, ev.data); }
+        if (ev?.data) { statusEl.textContent = ev.data; log(statusLog, ev.data); }
       });
 
       sse.addEventListener('transcript', (ev) => {
-        console.debug('[SSE] transcript', ev.data?.slice?.(0, 120));
-        if (ev.data) log(transcriptLog, ev.data);
+        if (ev?.data) log(transcriptLog, ev.data);
       });
 
       sse.addEventListener('llm_prompt', (ev) => {
-        console.debug('[SSE] llm_prompt', ev.data?.slice?.(0, 120));
-        if (ev.data) { log(promptLog, ev.data); caption.textContent = ev.data; }
+        if (ev?.data) { log(promptLog, ev.data); caption.textContent = ev.data; }
       });
 
       sse.addEventListener('image', (ev) => {
-        console.debug('[SSE] image', ev.data);
-        const rel = (ev.data || '').trim();
+        const rel = (ev?.data || '').trim();
         if (rel) setImage(rel, caption.textContent || rel);
       });
     }
 
-    // Erster Verbindungsversuch
+    // Initial connect
     connectSSE();
 
-    // ---------- Healthcheck + manueller Verbinden-Button ----------
+    // ---------- Health/Status checks ----------
     async function isServerUp() {
       try {
-        const r = await fetch('/health', { cache: 'no-store' });
-        return r.ok;
+        const r = await fetch('/status', { cache: 'no-store' });
+        if (!r.ok) return false;
+        const j = await r.json();
+        return !!j.ok;
       } catch { return false; }
     }
 
     async function manualReconnect() {
       wantAutoReconnect = false;
       closeSSE('manual-reconnect');
-      statusEl.textContent = 'Verbinde…';
-      log(statusLog, 'Manueller Verbindungsversuch gestartet');
+      statusEl.dataset.state = 'connecting';
+      statusEl.textContent = t('status_connecting');
+      log(statusLog, t('manual_connect_start'));
       let delay = 1000;
       while (true) {
         const up = await isServerUp();
         if (up) {
-          log(statusLog, 'Server erreichbar – starte SSE');
+          log(statusLog, t('manual_connect_ok'));
           wantAutoReconnect = true;
           connectSSE();
           return;
@@ -348,31 +468,39 @@
       }
     }
 
-    // Shutdown/Verbinden Button
+    // Shutdown/Connect button
     const btnShutdown = document.getElementById('btn-shutdown');
     function setShutdownMode(connected) {
       if (connected) {
-        btnShutdown.textContent = 'Server beenden';
+        btnShutdown.dataset.mode = 'shutdown';
+        btnShutdown.textContent = t('shutdown');
+        btnShutdown.title = t('shutdown');
         btnShutdown.classList.add('btn-danger');
-        btnShutdown.title = 'Server beenden';
       } else {
-        btnShutdown.textContent = 'Server verbinden';
+        btnShutdown.dataset.mode = 'reconnect';
+        btnShutdown.textContent = t('reconnect');
+        btnShutdown.title = t('reconnect');
         btnShutdown.classList.remove('btn-danger');
-        btnShutdown.title = 'Erneut verbinden';
       }
     }
     setShutdownMode(true);
 
     btnShutdown.addEventListener('click', async () => {
-      if (btnShutdown.textContent.includes('verbinden')) {
+      if (btnShutdown.dataset.mode === 'reconnect') {
         btnShutdown.disabled = true;
         const old = btnShutdown.textContent;
-        btnShutdown.textContent = 'Verbinde…';
+        btnShutdown.textContent = t('reconnecting');
         try {
-          await manualReconnect();
+          const up = await isServerUp();
+          if (!up) {
+            log(statusLog, t('server_offline'));
+            // Keep button as reconnect
+          } else {
+            await manualReconnect();
+          }
         } finally {
-          // Button wird bei Erfolg durch sse.onopen wieder zu "Server beenden"
-          if (btnShutdown.textContent === 'Verbinde…') {
+          // On success, sse.onopen will switch to shutdown mode again
+          if (btnShutdown.dataset.mode === 'reconnect' && btnShutdown.textContent === t('reconnecting')) {
             btnShutdown.textContent = old;
           }
           btnShutdown.disabled = false;
@@ -380,25 +508,29 @@
         return;
       }
 
-      // Server beenden
-      const confirmStop = confirm('Server wirklich beenden? Die Seite verliert die Verbindung.');
+      // Server shutdown
+      const confirmStop = confirm(t('confirm_shutdown'));
       if (!confirmStop) return;
       btnShutdown.disabled = true;
       const oldTxt = btnShutdown.textContent;
-      btnShutdown.textContent = 'Beende…';
+      btnShutdown.textContent = t('shutdown_in_progress');
       try {
         const r = await fetch('/shutdown', { method: 'POST' });
         log(statusLog, `shutdown → ${r.status}`);
-        statusEl.textContent = r.ok ? 'Server wird beendet…' : 'Shutdown fehlgeschlagen';
+        statusEl.textContent = r.ok ? t('shutdown_in_progress') : t('shutdown_failed');
         setShutdownMode(false);
-        wantAutoReconnect = false; // Auto-Reconnect aus, bis Nutzer aktiv verbindet
+        wantAutoReconnect = false; // disable auto-reconnect until user manually reconnects
         closeSSE('after-shutdown');
       } catch (e) {
         log(statusLog, `shutdown error: ${e}`);
-        statusEl.textContent = 'Shutdown-Fehler';
+        statusEl.textContent = t('shutdown_error');
       } finally {
         btnShutdown.disabled = false;
-        if (btnShutdown.textContent === 'Beende…') btnShutdown.textContent = 'Server verbinden';
+        if (btnShutdown.dataset.mode !== 'shutdown') {
+          btnShutdown.textContent = t('reconnect');
+        } else {
+          btnShutdown.textContent = oldTxt;
+        }
       }
     });
 
@@ -406,14 +538,14 @@
     $('#btn-start').addEventListener('click', async () => {
       try {
         const r = await fetch('/start', { method: 'POST' });
-        statusEl.textContent = r.ok ? 'Aufnahme läuft' : 'Start fehlgeschlagen';
+        statusEl.textContent = r.ok ? t('start_ok') : t('start_fail');
         log(statusLog, `start → ${r.status}`);
       } catch (e) { log(statusLog, `start error: ${e}`); }
     });
     $('#btn-stop').addEventListener('click', async () => {
       try {
         const r = await fetch('/stop', { method: 'POST' });
-        statusEl.textContent = r.ok ? 'Gestoppt' : 'Stop fehlgeschlagen';
+        statusEl.textContent = r.ok ? t('stop_ok') : t('stop_fail');
         log(statusLog, `stop → ${r.status}`);
       } catch (e) { log(statusLog, `stop error: ${e}`); }
     });
@@ -423,7 +555,7 @@
       try {
         const r = await fetch('/api/plan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, tags: [] }) });
         const j = await r.json();
-        if (j.prompt) { log(promptLog, j.prompt); statusEl.textContent = 'Prompt erzeugt'; }
+        if (j.prompt) { log(promptLog, j.prompt); statusEl.textContent = t('prompt_created'); }
         else if (j.error) { log(statusLog, `plan error: ${j.error}`); }
       } catch (e) { log(statusLog, `plan exception: ${e}`); }
     });
@@ -432,21 +564,22 @@
         const r = await fetch('/api/pollinations/test', { method: 'POST' });
         const j = await r.json();
         if (r.ok && j.rel) {
-          setImage(j.rel, 'Testbild');
-          log(statusLog, `Testbild geladen: ${j.rel}`);
+          setImage(j.rel, 'Test');
+          log(statusLog, `test image: ${j.rel}`);
         } else {
-          log(statusLog, `Test fehlgeschlagen: ${j.error || r.status}`);
+          log(statusLog, `test failed: ${j.error || r.status}`);
         }
       } catch (e) { log(statusLog, `test exception: ${e}`); }
     });
 
-    // Ordner öffnen (Platzhalter)
+    // Open folder (placeholder)
     $('#btn-open-dir').addEventListener('click', () => {
-      alert('Bitte den Output-Ordner lokal im Dateisystem öffnen: ./outputs/images');
+      alert('Please open the output folder on your local filesystem: ./outputs/images');
     });
 
-    // ---------- Initiale Konfig laden ----------
+    // ---------- Initial config ----------
     (async function init() {
+      applyI18N();
       try {
         const r = await fetch('/config', { cache: 'no-store' });
         if (!r.ok) throw new Error('config fetch failed');
@@ -454,13 +587,15 @@
         $('#ollama-pill').textContent = `Ollama: ${j?.ollama?.model || '?'}`;
         $('#poll-pill').textContent = `Images: ${j?.image?.backend || '?'}`;
         $('#sr-pill').textContent = `SR: ${j?.audio?.sample_rate || '?'}`;
-        statusEl.textContent = 'Bereit';
+        // If SSE already connected, status will be updated there; otherwise set to ready
+        if (statusEl.dataset.state !== 'connected') {
+          statusEl.textContent = t('status_ready');
+        }
       } catch (e) {
         log(statusLog, `config error: ${e}`);
-        statusEl.textContent = 'Konfig-Fehler';
+        statusEl.textContent = t('config_error');
       }
     })();
   </script>
-
 </body>
 </html>

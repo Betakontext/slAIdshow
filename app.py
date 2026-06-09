@@ -113,9 +113,7 @@ OLLAMA_DISABLED = _env_bool01("APP_OLLAMA_DISABLE", 0)
 
 OLLAMA_SYS_PROMPT = _env_str(
     "APP_OLLAMA_SYS_PROMPT",
-    "Du bist ein präziser Prompt-Designer für Bildgeneratoren. "
-    "Erzeuge kurze, klare, fotografische oder illustrative Bild-Prompts, "
-    "ohne Meta-Kommentare, in Deutsch.",
+    "Du bist ein präziser Prompt-Designer für Bildgeneratoren. Erzeuge kurze, klare, fotografische oder illustrative Bild-Prompts, ohne Meta-Kommentare, in Deutsch.",
 )
 
 def assert_local(host: str) -> None:
@@ -123,7 +121,7 @@ def assert_local(host: str) -> None:
         raise AssertionError(f"Only localhost allowed, got {host}")
 assert_local(OLLAMA_HOST)
 
-# ---- Image: Pollinations (serverseitiger Secret) ----
+# ---- Image: Pollinations ----
 IMAGE_BACKEND = _env_str("IMAGE_BACKEND", "pollinations").lower()
 ALLOW_CLOUD_IMAGE_BACKEND = _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0)
 POLLINATIONS_API_BASE = _env_str("POLLINATIONS_API_BASE", "https://gen.pollinations.ai").rstrip("/")
@@ -138,9 +136,8 @@ try:
 except Exception:
     POLLINATIONS_SEED_INT = None
 
-# New: v1 JSON toggle/size
 POLLINATIONS_USE_V1 = _env_bool01("POLLINATIONS_USE_V1", 1)
-POLLINATIONS_SIZE = _env_str("POLLINATIONS_SIZE", "")  # e.g. "1024x1024"
+POLLINATIONS_SIZE = _env_str("POLLINATIONS_SIZE", "")
 
 # ---- Output ----
 OUTPUT_DIR = Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")).resolve()
@@ -294,7 +291,7 @@ def _parse_whisper_out(raw: object) -> str:
                 if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
                     t = t[1:-1]
                 cleaned.append(t.strip())
-            return " " .join(cleaned).strip()
+            return " ".join(cleaned).strip()
     return s
 
 def clean_transcript(raw: str) -> str:
@@ -416,7 +413,7 @@ async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> s
     data = await _post_with_retries(client, _ollama_url("/api/generate"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
     return (data.get("response") or "").strip()
 
-# ---- Pollinations: GET builder (kept) ----
+# ---- Pollinations helpers (omitted comments for brevity; unchanged logic) ----
 def _build_pollinations_image_url(
     api_base: str,
     prompt: str,
@@ -445,7 +442,6 @@ def _build_pollinations_image_url(
         url = f"{url}?{urlencode(params)}"
     return url
 
-# ---- Pollinations: GET (legacy) ----
 async def fetch_pollinations_image_secure(prompt: str, out_dir: Path) -> Path:
     if IMAGE_BACKEND != "pollinations":
         raise RuntimeError("IMAGE_BACKEND!=pollinations")
@@ -529,7 +525,6 @@ async def fetch_pollinations_image_secure(prompt: str, out_dir: Path) -> Path:
     print(f"[POLLINATIONS] saved {target} ({target.stat().st_size} bytes)")
     return target
 
-# ---- Pollinations v1 JSON and GET fallback ----
 from base64 import b64decode
 
 class _PollinationsV1Datum(BaseModel):
@@ -592,7 +587,6 @@ async def fetch_pollinations_v1_image(prompt: str, out_dir: Path) -> Path:
                 continue
         raise RuntimeError(f"pollinations_v1_all_attempts_failed: {last_exc}")
 
-# GET fallback with extra params (key, enhance, safe, nologo)
 import urllib.parse
 def _get_params_for_pollinations() -> Dict[str, str]:
     params: Dict[str, str] = {}
@@ -650,7 +644,6 @@ async def fetch_pollinations_get_image(prompt: str, out_dir: Path) -> Path:
         raise RuntimeError(f"pollinations_get_all_attempts_failed: {last_exc}")
 
 async def fetch_image(prompt: str, out_dir: Path) -> Path:
-    # Fassade mit Fallback: v1 → GET
     if IMAGE_BACKEND != "pollinations":
         raise RuntimeError("Unsupported IMAGE_BACKEND")
     if not ALLOW_CLOUD_IMAGE_BACKEND:
@@ -696,11 +689,11 @@ async def broadcast(event: str, data: str) -> None:
 
 _context_buffer: deque[str] = deque(maxlen=CONTEXT_MAX_SEGMENTS)
 
-# ----- SSE Helper: alle Listener sauber schließen -----
+# ---- SSE close helper ----
 async def _close_sse_listeners(timeout: float = 0.25) -> None:
     """
-    Sendet ein Terminierungssignal an alle aktiven SSE-Listener-Queues und leert die Liste.
-    Wir verwenden eine leere Zeichenkette "" als Signal zum Beenden.
+    Sends an empty string sentinel to all active SSE listener queues to terminate streams,
+    then clears the listeners list.
     """
     listeners = getattr(STATE, "listeners", None)
     if not listeners:
@@ -722,8 +715,6 @@ async def _close_sse_listeners(timeout: float = 0.25) -> None:
         listeners.clear()
     except Exception:
         setattr(STATE, "listeners", [])
-
-
 
 def update_context_buffer(text: str) -> str:
     _context_buffer.append(text)
@@ -751,8 +742,6 @@ def _log_effective_config() -> None:
         "| image:",
         f"backend={IMAGE_BACKEND} allow_cloud={ALLOW_CLOUD_IMAGE_BACKEND} api_base={POLLINATIONS_API_BASE} key_present={bool(POLLINATIONS_SECRET)}",
     )
-
-
 
 # ---- Audio main loop ----
 async def audio_transcription_loop() -> None:
@@ -958,7 +947,6 @@ async def run_llm_and_image(text: str) -> None:
                     await broadcast("status", "image_backend_blocked")
                     return
                 try:
-                    # unified fetch with v1→GET fallback
                     path = await fetch_image(img_prompt, OUTPUT_DIR)
                     rel = path.name
                     await broadcast("image", rel)
@@ -973,6 +961,7 @@ async def run_llm_and_image(text: str) -> None:
 
 # ---- FastAPI & Lifespan ----
 from contextlib import asynccontextmanager
+from fastapi.responses import RedirectResponse
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1017,44 +1006,63 @@ async def lifespan(app: FastAPI):
         print("[LIFESPAN] cleanup done")
 
 app = FastAPI(lifespan=lifespan)
+
+# Single static mount for generated images
 app.mount("/static", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="static")
-
-# ---- UI Static Mounts ----
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
-
-# Liefert Bilder aus OUTPUT_DIR unter /static
-app.mount("/static", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="static")
-
-# UI aus ./web unter /web
+# Serve UI from ./web under /web
 app.mount("/web", StaticFiles(directory="web", html=True), name="web")
 
 @app.get("/", include_in_schema=False)
 async def root_redirect():
-    # einzig gültiger Root-Handler: leite auf /web/index.html
+    # Redirect root consistently to the Web UI
     return RedirectResponse(url="/web/index.html", status_code=307)
 
+# ---- Status/Health ----
+@app.get("/status")
+async def status():
+    # Lightweight liveness/status for the UI
+    return {"ok": True, "running": STATE.running, "shutting_down": STATE.shutting_down}
 
-# ---- Routes ----
-from fastapi import APIRouter
-router = APIRouter()
+@app.get("/health", response_model=HealthReport)
+async def health() -> HealthReport:
+    ollama_ok = await _ollama_available()
+    return HealthReport(
+        ollama_ok=ollama_ok,
+        image_backend=IMAGE_BACKEND,
+        allow_cloud=ALLOW_CLOUD_IMAGE_BACKEND,
+        output_dir=str(OUTPUT_DIR),
+        output_dir_exists=OUTPUT_DIR.exists(),
+        last_prompt=STATE.last_prompt,
+        last_llm_error=STATE.last_llm_error,
+        pollinations_key_present=bool(POLLINATIONS_SECRET),
+    )
 
-@app.get("/", response_class=HTMLResponse)
-def index() -> HTMLResponse:
-    return HTMLResponse(INDEX_HTML)
+# ---- Config ----
+@app.get("/config")
+async def get_config():
+    wpath = WHISPER_MODEL_PATH
+    masked = (wpath[:3] + "..." + wpath[-10:]) if wpath and len(wpath) > 16 else wpath
+    return {
+        "env_file": ENV_PATH or "(env vars only)",
+        "audio": {"device_pref": AUDIO_DEVICE_PREF, "sample_rate": SAMPLE_RATE, "frame_ms": FRAME_MS, "stream_latency_sec": APP_STREAM_LATENCY_SEC},
+        "vad": {"disable_vad": DISABLE_VAD, "rms_threshold": RMS_VAD_THRESHOLD},
+        "snapshot": {"snapshot_sec": SNAPSHOT_SEC, "min_buf_sec": MIN_BUF_SEC, "max_silence_ms": MAX_SILENCE_MS, "max_segment_sec": MAX_SEGMENT_SEC, "first_snapshot_deadline_sec": FIRST_SNAPSHOT_DEADLINE_SEC},
+        "whisper": {"model_path": masked, "language": WHISPER_LANGUAGE, "threads": WHISPER_THREADS, "temperature": WHISPER_TEMPERATURE, "min_sec": WHISPER_MIN_SEC, "min_peak": WHISPER_MIN_PEAK},
+        "text": {"min_chars": TEXT_MIN_CHARS, "min_words": TEXT_MIN_WORDS, "force_meaningful": FORCE_MEANINGFUL_CHECK},
+        "context": {"max_segments": CONTEXT_MAX_SEGMENTS, "max_chars": CONTEXT_MAX_CHARS},
+        "ollama": {"host": OLLAMA_HOST, "port": OLLAMA_PORT, "model": OLLAMA_MODEL, "temperature": OLLAMA_TEMPERATURE, "timeout_sec": OLLAMA_TIMEOUT_SEC, "interval_sec": LLM_INTERVAL_SEC, "disabled": OLLAMA_DISABLED},
+        "image": {"backend": IMAGE_BACKEND, "allow_cloud": ALLOW_CLOUD_IMAGE_BACKEND, "api_base": POLLINATIONS_API_BASE, "width": POLLINATIONS_WIDTH, "height": POLLINATIONS_HEIGHT, "seed": POLLINATIONS_SEED_INT, "server_key_present": bool(POLLINATIONS_SECRET), "use_v1": POLLINATIONS_USE_V1, "size": POLLINATIONS_SIZE or _size_from_wh(POLLINATIONS_WIDTH, POLLINATIONS_HEIGHT)},
+        "output_dir": str(OUTPUT_DIR),
+    }
 
-@app.get("/favicon.ico")
-def favicon() -> Response:
-    data = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0cIDATx\x9cc``\x00\x00\x00\x02\x00\x01\xe2!\xbc3\x00\x00\x00\x00IEND\xaeB`\x82"
-    return Response(content=data, media_type="image/png")
-
+# ---- SSE /events ----
 @app.get("/events")
 async def events(request: Request):
     async def gen():
         q: asyncio.Queue[str] = asyncio.Queue()
         STATE.listeners.append(q)
         try:
-            # sofortiges Connected-Event
+            # Notify immediate connection
             await q.put(sse_format("status", "connected"))
             while True:
                 if await request.is_disconnected():
@@ -1076,38 +1084,7 @@ async def events(request: Request):
                     STATE.listeners.remove(q)
     return StreamingResponse(gen(), media_type="text/event-stream")
 
-
-@app.get("/config")
-async def get_config():
-    wpath = WHISPER_MODEL_PATH
-    masked = (wpath[:3] + "..." + wpath[-10:]) if wpath and len(wpath) > 16 else wpath
-    return {
-        "env_file": ENV_PATH or "(env vars only)",
-        "audio": {"device_pref": AUDIO_DEVICE_PREF, "sample_rate": SAMPLE_RATE, "frame_ms": FRAME_MS, "stream_latency_sec": APP_STREAM_LATENCY_SEC},
-        "vad": {"disable_vad": DISABLE_VAD, "rms_threshold": RMS_VAD_THRESHOLD},
-        "snapshot": {"snapshot_sec": SNAPSHOT_SEC, "min_buf_sec": MIN_BUF_SEC, "max_silence_ms": MAX_SILENCE_MS, "max_segment_sec": MAX_SEGMENT_SEC, "first_snapshot_deadline_sec": FIRST_SNAPSHOT_DEADLINE_SEC},
-        "whisper": {"model_path": masked, "language": WHISPER_LANGUAGE, "threads": WHISPER_THREADS, "temperature": WHISPER_TEMPERATURE, "min_sec": WHISPER_MIN_SEC, "min_peak": WHISPER_MIN_PEAK},
-        "text": {"min_chars": TEXT_MIN_CHARS, "min_words": TEXT_MIN_WORDS, "force_meaningful": FORCE_MEANINGFUL_CHECK},
-        "context": {"max_segments": CONTEXT_MAX_SEGMENTS, "max_chars": CONTEXT_MAX_CHARS},
-        "ollama": {"host": OLLAMA_HOST, "port": OLLAMA_PORT, "model": OLLAMA_MODEL, "temperature": OLLAMA_TEMPERATURE, "timeout_sec": OLLAMA_TIMEOUT_SEC, "interval_sec": LLM_INTERVAL_SEC, "disabled": OLLAMA_DISABLED},
-        "image": {"backend": IMAGE_BACKEND, "allow_cloud": ALLOW_CLOUD_IMAGE_BACKEND, "api_base": POLLINATIONS_API_BASE, "width": POLLINATIONS_WIDTH, "height": POLLINATIONS_HEIGHT, "seed": POLLINATIONS_SEED_INT, "server_key_present": bool(POLLINATIONS_SECRET), "use_v1": POLLINATIONS_USE_V1, "size": POLLINATIONS_SIZE or _size_from_wh(POLLINATIONS_WIDTH, POLLINATIONS_HEIGHT)},
-        "output_dir": str(OUTPUT_DIR),
-    }
-
-@app.get("/health", response_model=HealthReport)
-async def health() -> HealthReport:
-    ollama_ok = await _ollama_available()
-    return HealthReport(
-        ollama_ok=ollama_ok,
-        image_backend=IMAGE_BACKEND,
-        allow_cloud=ALLOW_CLOUD_IMAGE_BACKEND,
-        output_dir=str(OUTPUT_DIR),
-        output_dir_exists=OUTPUT_DIR.exists(),
-        last_prompt=STATE.last_prompt,
-        last_llm_error=STATE.last_llm_error,
-        pollinations_key_present=bool(POLLINATIONS_SECRET),
-    )
-
+# ---- Audio/info routes ----
 @app.get("/audio/devices")
 def audio_devices():
     try:
@@ -1140,13 +1117,16 @@ def audio_probe():
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+# ---- Control routes ----
 @app.post("/start", response_class=PlainTextResponse)
 async def start_pipeline():
     print("[HTTP] /start called")
     if STATE.running:
         print("[HTTP] /start ignored (already running)")
         return PlainTextResponse("already running", status_code=200)
-    STATE.shutting_down = False
+    if STATE.shutting_down:
+        # Prevent starting while shutdown is in progress
+        return PlainTextResponse("shutting_down", status_code=409)
     STATE.running = True
     STATE.start_ts = time.time()
     STATE.task = asyncio.create_task(audio_transcription_loop())
@@ -1175,7 +1155,7 @@ async def stop_pipeline():
         await asyncio.gather(*list(STATE.bg_tasks), return_exceptions=True)
     STATE.bg_tasks.clear()
     await broadcast("status", "server_stopped")
-    await _close_sse_listeners()
+    # Keep SSE connections; they will keep receiving heartbeats/status.
     print("[HTTP] /stop completed")
     return PlainTextResponse("stopped")
 
@@ -1183,13 +1163,34 @@ async def stop_pipeline():
 async def shutdown_server():
     print("[HTTP] /shutdown called")
     STATE.shutting_down = True
+    # Stop pipeline and then close SSE listeners
     await stop_pipeline()
+    await _close_sse_listeners()
     asyncio.create_task(_exit_after_delay())
     return PlainTextResponse("shutting down")
 
 async def _exit_after_delay():
     await asyncio.sleep(0.2)
     os._exit(0)
+
+# ---- Ollama APIs ----
+class OllamaGenerateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model: str
+    prompt: str
+    stream: bool = False
+    options: dict = Field(default_factory=dict)
+
+class OllamaChatTurn(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+class OllamaChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model: str
+    messages: List[OllamaChatTurn]
+    stream: bool = False
+    options: dict = Field(default_factory=dict)
 
 @app.post("/api/ollama/generate")
 async def api_ollama_generate(req: OllamaGenerateRequest):
