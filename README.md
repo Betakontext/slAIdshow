@@ -187,7 +187,7 @@ Peak=0.368, RMS=0.052
 
 
 
-Whisper (pywhispercpp)
+####	Whisper setup (pywhispercpp)
 
 Set model path and basic config:
 
@@ -230,54 +230,185 @@ BASH
 	curl -s http://127.0.0.1:11434/api/generate \
 	-H "Content-Type: application/json" \
 	-d '{"model":"phi3:mini","prompt":"Say hello","stream":false,"options":{"temperature":0.2}}'
+	
+	
+####	Pollinations setup (Cloud image generation)
 
-ComfyUI setup (optional, image generation)
+Create a Pollinations account and sve your keys, f.e.:
 
-Install and start ComfyUI locally (API at http://127.0.0.1:8188).
+
+-> Integrate your key in .env
+
+
+
+####	ComfyUI installation and setup (optional, image generation)
+
+Install and start ComfyUI 
+
+Prepare your system:
+
+BASH
+
+	sudo apt update
+	sudo apt install -y git python3 python3-venv python3-dev build-essential libglib2.0-0 libsm6 libxrender1 libxext6
+
+Decide where you want to place ComfyUI on your system and open that in your terminal:
+
+BASH
+
+	git clone https://github.com/comfyanonymous/ComfyUI.git
+	cd ComfyUI
+	
+Open virtual environment:
+
+BASH
+
+	python3 -m venv .venv
+	source .venv/bin/activate
+	python -m pip install --upgrade pip setuptools wheel
+
+Install dependencies:
+
+BASH
+
+	pip install -r requirements.txt
+	
+Start locally (API at http://127.0.0.1:8188).
+
+	BASH
+
+	python main.py --listen 127.0.0.1 --port 8188
+	
+API-endpoints: /prompt, /history/{id}, /view
+
+Modelle besorgen
+
+ComfyUI does not automaticly load big modells. 
+Depending on your workflow you may need heckpoints/VAEs/LoRAs:
+
+main paths (under ComfyUI/models):
+
+models/checkpoints → z. B. SDXL/SD1.5 .safetensors
+models/vae
+models/clip
+models/unet
+models/ipadapter, models/controlnet etc. (optional)
+
+Copy the comfyui.service into your /etc/systemd/system/ or create the service file in  /etc/systemd/system/comfyui.service:
+
+	sudo cp -p yourpathto/comfyui.service /etc/systemd/system/ 
+
+Addapt the paths to your ComfyUi Installation.
+
+	# /etc/systemd/system/comfyui.service
+	[Unit]
+	Description=ComfyUI (local)
+	After=network.target
+
+	[Service]
+	Type=simple
+	User=cm
+	WorkingDirectory=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI
+	ExecStart=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/.venv/bin/python main.py --listen 127.0.0.1 --port 8188
+	Environment="PATH=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/.venv/bin:%s"
+	Restart=on-failure
+
+	[Install]
+	WantedBy=multi-user.target
+	
+
+Proof rw rights:
+	
+	sudo chown -R cm:cm /home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/
+	ls -ld /home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/
+
+CPU only mode if GPU is not available (f.e. on AMD hardware)
+
+BASH : Check whats installed in the venv
+	
+	source .venv/bin/activate
+	python -c "import torch; print('torch', torch.__version__, 'cuda?', torch.cuda.is_available())"
+	deactivate
+	
+Output f.e.: torch 2.12.0+cu130 cuda? False
+-> No Cuda available -> CPU only mode
+
+Switch torch to CPU in the venv:
+
+BASH
+
+	source .venv/bin/activate
+	pip install --upgrade --force-reinstall --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+	pip uninstall -y xformers triton
+	python - << 'PY'
+	import torch
+	print("torch", torch.__version__, "cuda_available?", torch.cuda.is_available())
+	PY
+	deactivate
+	
+BASH 
+
+	sudo systemctl daemon-reload
+	sudo systemctl enable comfyui
+	sudo systemctl start comfyui
+	sudo systemctl status comfyui
+
+Activate, test and start locally (API at http://127.0.0.1:8188)
+
+START
+
+BASH
+
+	source .venv/bin/activate
+	python main.py --listen 127.0.0.1 --port 8188 --cpu´
+	
+LOGS:
+
+BASH
+	
+	journalctl -u comfyui -f
+	
+STOP
+
+BASH
+
+	sudo systemctl stop comfyui
+	
+
+Download a model for comfyUI checkpoint and place it under /ComfyUI/models/
+
+BASH	
+
+	mkdir -p ~/Downloads/tmp_models && cd ~/Downloads/tmp_models
+	# Direktdownload-URL vom HF-Button "Download" kopieren:
+	curl -L --fail -o anything-v4.5-pruned.safetensors \
+	"https://huggingface.co/shibal1/anything-v4.5-clone/resolve/main/anything-v4.5-pruned.safetensors?download=true"
+
+	# SHA256 berechnen und notieren
+	sha256sum anything-v4.5-pruned.safetensors
+	# macOS Alternative:
+	# shasum -a 256 anything-v4.5-pruned.safetensors
+	
+TEST test_comfy_local.py with ComfyUI running on http://127.0.0.1:8188.
+	
+BASH
+	
+	APP_DISABLE_COMFYUI=0 python test_comfy_local.py --workflow ./workflows/text2img.json --prompt "Fotorealistisches Klassenzimmer, natürliches Licht" --width 512 --height 512 --steps 20 --cfg 6.5 --sampler dpmpp_2m --seed 1234 --timeout 300
+
 Export your workflow JSON in ComfyUI.
+
 In app.py, adapt:
 build_comfy_prompt_from_text(): turn the LLM text into your node-graph (prompt/negative prompt, sampler, VAE, SaveImage, etc.).
 comfyui_run_and_wait(): adjust reading the history (filename/subfolder).
 
 Images can be written by ComfyUI to a known folder or copied into ./outputs/images. The UI serves images via /static/... (APP_OUTPUT_DIR). Without ComfyUI, the app remains useful (status/transcript/prompt events).
-Environment variables
 
-You can use .env or export directly:
+#### Environment variables
 
-BASH
+Use and addapt values in .env
 
-	# Audio
-	export APP_AUDIO_DEVICE=""            # index or exact source name
-	export APP_SAMPLE_RATE="48000"
-	export APP_FRAME_DURATION_MS="20"
-	export APP_DISABLE_VAD="1"            # 1 = disable WebRTC VAD, use RMS gate
-	export APP_VAD_AGGRESSIVENESS="0"     # if WebRTC VAD enabled later: 0–3
-	export APP_RMS_VAD_THRESHOLD="0.012"
-	export APP_MAX_SILENCE_MS="300"
-	export APP_SNAPSHOT_SEC="6.0"         # new snapshot every X seconds
 
-	# Whisper
-	export APP_WHISPER_MODEL_PATH="$(pwd)/models/ggml-base.bin"
-	export APP_WHISPER_LANGUAGE="de"
-	export APP_WHISPER_THREADS="4"
-	export APP_WHISPER_TEMPERATURE="0.0"
-
-	# Ollama (optional)
-	export APP_OLLAMA_HOST="127.0.0.1"
-	export APP_OLLAMA_PORT="11434"
-	export APP_OLLAMA_MODEL="glm-4.7:cloud"
-	export APP_OLLAMA_TEMPERATURE="0.2"
-
-	# ComfyUI (optional)
-	export APP_COMFY_HOST="127.0.0.1"
-	export APP_COMFY_PORT="8188"
-
-	# Output directory for images
-	export APP_OUTPUT_DIR="./outputs/images"
-
-Start / Stop
-
-Load environment variables and start the server:
+#### Load environment variables and start the server:
 
 BASH
 
