@@ -403,9 +403,21 @@ comfyui_run_and_wait(): adjust reading the history (filename/subfolder).
 
 Images can be written by ComfyUI to a known folder or copied into ./outputs/images. The UI serves images via /static/... (APP_OUTPUT_DIR). Without ComfyUI, the app remains useful (status/transcript/prompt events).
 
-#### Environment variables
+#### Environment variables / .env
 
-Use and addapt values in .env
+See, use and addapt values in -> .env file
+
+Output files are saved in:
+
+	APP_OUTPUT_DIR=./outputs/images
+
+Custom ComfyUI workflows (API export) can be saved and should be defined here
+
+	APP_COMFY_WORKFLOW=./workflows/text2img_any45.json
+
+Make sure to set the correct ComfyUi output folder here, to bridge correctly to speechtoimage_ai
+
+	APP_COMFY_OUTPUT_DIR=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/output/
 
 
 #### Load environment variables and start the server:
