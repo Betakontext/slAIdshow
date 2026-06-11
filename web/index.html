@@ -140,7 +140,7 @@
         <div class="body">
           <!-- Backend switcher -->
           <div class="row" style="margin-bottom:8px;">
-            <label for="backend-select" style="min-width:120px;">Image-Backend</label>
+            <label for="backend-select" style="min-width:120px;" id="label-backend">Image-Backend</label>
             <select id="backend-select" title="Image-Backend wählen">
               <option value="comfyui">ComfyUI (lokal)</option>
               <option value="pollinations">Pollinations (Cloud)</option>
@@ -151,9 +151,9 @@
 
           <!-- Size controls -->
           <div class="row" style="margin-bottom:8px;">
-            <label for="width-input" style="min-width:120px;">Breite</label>
+            <label for="width-input" style="min-width:120px;" id="label-width">Breite</label>
             <input id="width-input" type="number" min="64" max="2048" step="64" placeholder="z.B. 768" />
-            <label for="height-input" style="min-width:60px;">Höhe</label>
+            <label for="height-input" style="min-width:60px;" id="label-height">Höhe</label>
             <input id="height-input" type="number" min="64" max="2048" step="64" placeholder="z.B. 768" />
             <button id="btn-apply-size" title="Größe übernehmen">Übernehmen</button>
           </div>
@@ -164,19 +164,16 @@
             <button id="btn-plan">Senden</button>
           </div>
 
-          <!-- Negative Prompt (jetzt für alle Backends übergeben) -->
+          <!-- Negative Prompt -->
           <div class="row" style="margin-bottom:8px;">
             <textarea id="neg-input" placeholder="Negative Prompt (z.B. low quality, blurry, extra fingers)"></textarea>
           </div>
 
-          <!-- Direct Generate (nutzt aktives Backend) -->
+          <!-- Direct Generate -->
           <div class="row" style="margin-bottom:8px;">
             <button id="btn-direct">Direct Generate</button>
           </div>
 
-          <div class="row" style="margin-bottom:8px;">
-            <button id="btn-test">Testbild</button>
-          </div>
           <div>
             <strong id="label-last-prompt">Letzter Prompt</strong>
             <div class="log" id="prompt-log"></div>
@@ -216,7 +213,14 @@
         btn_start: "Aufnahme starten",
         btn_stop: "Stop",
         btn_plan: "Senden",
-        btn_test: "Testbild",
+        btn_direct: "Direkt generieren",
+        btn_apply_backend: "Anwenden",
+        btn_apply_size: "Übernehmen",
+        label_backend: "Image-Backend",
+        label_width: "Breite",
+        label_height: "Höhe",
+        ph_plan: "Text eingeben → Prompt erzeugen und Bild generieren",
+        ph_neg: "Negative Prompt (z.B. low quality, blurry, extra fingers)",
         label_last_prompt: "Letzter Prompt",
         label_transcripts: "Transkripte",
         label_status: "Status",
@@ -262,7 +266,14 @@
         btn_start: "Start Recording",
         btn_stop: "Stop",
         btn_plan: "Send",
-        btn_test: "Test Image",
+        btn_direct: "Direct Generate",
+        btn_apply_backend: "Apply",
+        btn_apply_size: "Apply",
+        label_backend: "Image backend",
+        label_width: "Width",
+        label_height: "Height",
+        ph_plan: "Enter text → create prompt and generate image",
+        ph_neg: "Negative prompt (e.g., low quality, blurry, extra fingers)",
         label_last_prompt: "Last Prompt",
         label_transcripts: "Transcripts",
         label_status: "Status",
@@ -307,13 +318,27 @@
       document.getElementById('img-caption').textContent = t('caption_none');
       document.getElementById('fs-label').textContent = t('fs_enter');
       document.getElementById('btn-open-dir').textContent = t('btn_open_dir');
+      document.getElementById('btn-open-dir').title = t('btn_open_dir');
       document.getElementById('btn-start').textContent = t('btn_start');
       document.getElementById('btn-stop').textContent = t('btn_stop');
       document.getElementById('btn-plan').textContent = t('btn_plan');
-      document.getElementById('btn-test').textContent = t('btn_test');
+      document.getElementById('btn-direct').textContent = t('btn_direct');
+      document.getElementById('btn-apply-backend').textContent = t('btn_apply_backend');
+      document.getElementById('btn-apply-size').textContent = t('btn_apply_size');
       document.getElementById('label-last-prompt').textContent = t('label_last_prompt');
       document.getElementById('label-transcripts').textContent = t('label_transcripts');
       document.getElementById('label-status').textContent = t('label_status');
+      document.getElementById('label-backend').textContent = t('label_backend');
+      document.getElementById('label-width').textContent = t('label_width');
+      document.getElementById('label-height').textContent = t('label_height');
+
+      // Placeholder aktualisieren
+      const planInput = document.getElementById('plan-input');
+      planInput.placeholder = t('ph_plan');
+      const negInput = document.getElementById('neg-input');
+      negInput.placeholder = t('ph_neg');
+
+      // Shutdown/Reconnect Button
       const btnShutdown = document.getElementById('btn-shutdown');
       if (btnShutdown.dataset.mode === 'reconnect') {
         btnShutdown.textContent = t('reconnect');
@@ -324,6 +349,8 @@
         btnShutdown.title = t('shutdown');
         btnShutdown.classList.add('btn-danger');
       }
+
+      // Statusanzeige im Header wenn im Connecting-State
       const statusEl = document.getElementById('status');
       if (statusEl.dataset.state === 'connecting') {
         statusEl.textContent = t('status_connecting');
@@ -619,7 +646,7 @@
       finally { btn.disabled = false; }
     });
 
-    // Direct Generate (nutzt aktives Backend, negativer Prompt wird immer gesendet)
+    // Direct Generate
     document.getElementById('btn-direct').addEventListener('click', async () => {
       const prompt = document.getElementById('plan-input').value.trim();
       const negative = document.getElementById('neg-input').value.trim();
@@ -652,33 +679,6 @@
       } finally {
         btn.disabled = false;
       }
-    });
-
-    // Testbild mit optionaler Größe und negativem Prompt
-    $('#btn-test').addEventListener('click', async () => {
-      const btn = $('#btn-test');
-      btn.disabled = true;
-      try {
-        const size = currentSizePayload();
-        const negative = document.getElementById('neg-input').value.trim();
-        const r = await fetch('/api/image/test', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            width: size.width,
-            height: size.height,
-            negative_prompt: negative || null
-          })
-        });
-        const j = await r.json().catch(() => ({}));
-        if (r.ok && j.rel) {
-          setImage(j.rel, `Test ${size.width}×${size.height}`);
-          log(statusLog, `test image: ${j.rel}`);
-        } else {
-          log(statusLog, `test failed: ${j.detail || j.error || r.status}`);
-        }
-      } catch (e) { log(statusLog, `test exception: ${e}`); }
-      finally { btn.disabled = false; }
     });
 
     // Optional: Cloud erlauben, bevor auf Pollinations gewechselt wird
@@ -732,7 +732,7 @@
       }
     });
 
-    // Größe anwenden (nur UI, Server nutzt Größe über /api/plan oder /api/image/* Payload)
+    // Größe anwenden (nur UI)
     btnApplySize.addEventListener('click', async () => {
       try {
         const size = currentSizePayload();
@@ -771,14 +771,14 @@
           backendWarn.style.display = 'none';
         }
 
-        // Größe initialisieren: bevorzugt current_width/height, fallback auf width_default/height_default
+        // Größe initialisieren
         const w = Number(j?.image?.current_width ?? j?.image?.width_default ?? 512);
         const h = Number(j?.image?.current_height ?? j?.image?.height_default ?? 512);
         widthInput.value = w;
         heightInput.value = h;
         updateSizePill();
 
-        // Negativen Prompt initial sichtbar machen (optional)
+        // Negativer Prompt aus Config (optional)
         const neg = (j?.image?.negative_prompt || '').trim();
         if (neg) document.getElementById('neg-input').value = neg;
 
