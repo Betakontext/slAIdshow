@@ -248,7 +248,7 @@
         backend_switched_ok: "Backend umgeschaltet.",
         backend_switch_failed: "Umschalten fehlgeschlagen.",
         size_applied_ok: "Größe übernommen.",
-        size_applied_fail: "Größe konnte nicht übernommen werden.",
+        size_applied_fail: "Größe konnte nicht übernommen werden。",
       },
       en: {
         brand: "Local Speech-to-Image Pipeline",
@@ -301,7 +301,7 @@
         backend_switched_ok: "Backend switched.",
         backend_switch_failed: "Switch failed.",
         size_applied_ok: "Size applied.",
-        size_applied_fail: "Failed to apply size.",
+        size_applied_fail: "Failed to apply size。",
       }
     };
 
@@ -460,6 +460,29 @@
       backoffMs = Math.min(backoffMs * 2, 15000);
     }
 
+    // NEU: Debounced Size Sync auf den Server
+    let sizeSyncTimer = null;
+    function scheduleSizeSync() {
+      if (sizeSyncTimer) clearTimeout(sizeSyncTimer);
+      sizeSyncTimer = setTimeout(async () => {
+        const size = currentSizePayload();
+        try {
+          const r = await fetch('/api/settings/image_size', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(size)
+          });
+          if (!r.ok) {
+            // Optionaler Fallback, falls dein Backend dieses Endpoint nicht hat:
+            // await fetch('/api/plan', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text:"", tags:[], width:size.width, height:size.height })});
+          }
+          log(statusLog, `size sync: ${size.width}×${size.height} (${r.status})`);
+        } catch (e) {
+          log(statusLog, `size sync error: ${e}`);
+        }
+      }, 400);
+    }
+
     async function connectSSE() {
       if (connecting) return;
       connecting = true;
@@ -500,7 +523,12 @@
       sse.addEventListener('transcript', (ev) => { if (ev?.data) log(transcriptLog, ev.data); });
 
       sse.addEventListener('llm_prompt', (ev) => {
-        if (ev?.data) { log(promptLog, ev.data); caption.textContent = ev.data; }
+        if (ev?.data) {
+          log(promptLog, ev.data);
+          caption.textContent = ev.data;
+          // NEU: Beim finalen Prompt sofort Größe mit dem Server synchronisieren
+          scheduleSizeSync();
+        }
       });
 
       sse.addEventListener('image', (ev) => {
@@ -606,19 +634,26 @@
 
     // ---------- Backend Controls ----------
     $('#btn-start').addEventListener('click', async () => {
+      // Vor dem Start sicherstellen, dass der Server die aktuelle Größe hat
+      try {
+        const size = currentSizePayload();
+        await fetch('/api/settings/image_size', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(size)
+        });
+        log(statusLog, `pre-start size sync: ${size.width}×${size.height}`);
+      } catch (e) {
+        log(statusLog, `pre-start size sync error: ${e}`);
+      }
+
       try {
         const r = await fetch('/start', { method: 'POST' });
         statusEl.textContent = r.ok ? t('start_ok') : t('start_fail');
         log(statusLog, `start → ${r.status}`);
       } catch (e) { log(statusLog, `start error: ${e}`); }
     });
-    $('#btn-stop').addEventListener('click', async () => {
-      try {
-        const r = await fetch('/stop', { method: 'POST' });
-        statusEl.textContent = r.ok ? t('stop_ok') : t('stop_fail');
-        log(statusLog, `stop → ${r.status}`);
-      } catch (e) { log(statusLog, `stop error: ${e}`); }
-    });
+
 
     function currentSizePayload() {
       const w = clampSize(widthInput.value);
@@ -732,18 +767,25 @@
       }
     });
 
-    // Größe anwenden (nur UI)
+    // Größe anwenden (Server-sync statt nur UI)
     btnApplySize.addEventListener('click', async () => {
+      const size = currentSizePayload();
+      widthInput.value = size.width;
+      heightInput.value = size.height;
+      updateSizePill();
+
       try {
-        const size = currentSizePayload();
-        widthInput.value = size.width;
-        heightInput.value = size.height;
-        updateSizePill();
+        const r = await fetch('/api/settings/image_size', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(size)
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
         statusEl.textContent = t('size_applied_ok');
-        log(statusLog, `size applied: ${size.width}×${size.height}`);
+        log(statusLog, `size applied(server): ${size.width}×${size.height}`);
       } catch (e) {
         statusEl.textContent = t('size_applied_fail');
-        log(statusLog, `size apply error: ${e}`);
+        log(statusLog, `size apply(server) error: ${e}`);
       }
     });
 
@@ -794,9 +836,16 @@
     (async function init() {
       applyI18N();
       await refreshConfig();
-      widthInput.addEventListener('input', updateSizePill);
-      heightInput.addEventListener('input', updateSizePill);
+
+      function onSizeInputChange() {
+        updateSizePill();
+        // debounce-POST an /api/settings/image_size
+        scheduleSizeSync();
+      }
+
+      widthInput.addEventListener('input', onSizeInputChange);
+      heightInput.addEventListener('input', onSizeInputChange);
     })();
-  </script>
+    </script>
 </body>
 </html>
