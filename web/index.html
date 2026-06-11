@@ -76,10 +76,12 @@
     #image-viewer:fullscreen { background: #000; }
     #image-viewer:fullscreen #current-image { max-width: 100vw; max-height: 100vh; cursor: zoom-out; }
     .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    input[type="text"], textarea {
+    input[type="text"], input[type="number"], textarea, select {
       background: #0e1118; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
-      width: 100%; outline: none;
+      outline: none;
     }
+    input[type="text"], textarea { width: 100%; }
+    input[type="number"] { width: 110px; }
     textarea { min-height: 80px; resize: vertical; }
     .log {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
@@ -91,6 +93,7 @@
     select.lang {
       background: var(--btn); color: var(--text); border: 1px solid #2c3140; border-radius: 8px; padding: 6px 10px;
     }
+    .warn { color: #ffd966; }
   </style>
 </head>
 <body>
@@ -126,6 +129,7 @@
             <span class="pill" id="ollama-pill">Ollama: ?</span>
             <span class="pill" id="poll-pill">Images: ?</span>
             <span class="pill" id="sr-pill">SR: ?</span>
+            <span class="pill" id="size-pill">Size: ?</span>
           </div>
         </div>
       </section>
@@ -133,10 +137,42 @@
       <aside class="card">
         <h3 id="title-controls">Steuerung & Logs</h3>
         <div class="body">
+          <!-- Backend switcher -->
+          <div class="row" style="margin-bottom:8px;">
+            <label for="backend-select" style="min-width:120px;">Image-Backend</label>
+            <select id="backend-select" title="Image-Backend wählen">
+              <option value="comfyui">ComfyUI (lokal)</option>
+              <option value="pollinations">Pollinations (Cloud)</option>
+            </select>
+            <button id="btn-apply-backend">Anwenden</button>
+            <span id="backend-warn" class="warn" style="display:none;"></span>
+          </div>
+
+          <!-- Size controls -->
+          <div class="row" style="margin-bottom:8px;">
+            <label for="width-input" style="min-width:120px;">Breite</label>
+            <input id="width-input" type="number" min="64" max="2048" step="64" placeholder="z.B. 768" />
+            <label for="height-input" style="min-width:60px;">Höhe</label>
+            <input id="height-input" type="number" min="64" max="2048" step="64" placeholder="z.B. 768" />
+            <button id="btn-apply-size" title="Größe übernehmen">Übernehmen</button>
+          </div>
+
+          <!-- Prompt input -->
           <div class="row" style="margin-bottom:8px;">
             <input id="plan-input" type="text" placeholder="Text eingeben → Prompt erzeugen und Bild generieren" />
             <button id="btn-plan">Senden</button>
           </div>
+
+          <!-- NEW: Negative Prompt -->
+          <div class="row" style="margin-bottom:8px;">
+            <textarea id="neg-input" placeholder="Negative Prompt (nur ComfyUI)"></textarea>
+          </div>
+
+          <!-- NEW: Direct Generate for ComfyUI -->
+          <div class="row" style="margin-bottom:8px;">
+            <button id="btn-direct">Direct Generate (ComfyUI)</button>
+          </div>
+
           <div class="row" style="margin-bottom:8px;">
             <button id="btn-test">Testbild</button>
           </div>
@@ -162,7 +198,6 @@
 
   <script>
     // ---------- i18n dictionary ----------
-    // All UI strings are driven by this dictionary based on selected language.
     const I18N = {
       de: {
         brand: "Lokale Speech-to-Image Pipeline",
@@ -203,6 +238,12 @@
         shutdown_in_progress: "Server wird beendet…",
         shutdown_failed: "Shutdown fehlgeschlagen",
         shutdown_error: "Shutdown-Fehler",
+        backend_warn_cloud_blocked: "Cloud-Backends sind in der Server-Konfiguration deaktiviert.",
+        backend_warn_missing_secret: "Pollinations-Secret fehlt auf dem Server.",
+        backend_switched_ok: "Backend umgeschaltet.",
+        backend_switch_failed: "Umschalten fehlgeschlagen.",
+        size_applied_ok: "Größe übernommen.",
+        size_applied_fail: "Größe konnte nicht übernommen werden.",
       },
       en: {
         brand: "Local Speech-to-Image Pipeline",
@@ -243,6 +284,12 @@
         shutdown_in_progress: "Server is shutting down…",
         shutdown_failed: "Shutdown failed",
         shutdown_error: "Shutdown error",
+        backend_warn_cloud_blocked: "Cloud backends are disabled in server settings.",
+        backend_warn_missing_secret: "Pollinations secret is missing on the server.",
+        backend_switched_ok: "Backend switched.",
+        backend_switch_failed: "Switch failed.",
+        size_applied_ok: "Size applied.",
+        size_applied_fail: "Failed to apply size.",
       }
     };
 
@@ -250,10 +297,7 @@
     const langSelect = document.getElementById('lang-select');
     let LANG = localStorage.getItem('ui_lang') || 'de';
     langSelect.value = LANG;
-
-    function t(key) {
-      return I18N[LANG][key] || key;
-    }
+    function t(key) { return I18N[LANG][key] || key; }
 
     function applyI18N() {
       document.getElementById('brand-title').textContent = t('brand');
@@ -279,7 +323,6 @@
         btnShutdown.title = t('shutdown');
         btnShutdown.classList.add('btn-danger');
       }
-      // Update initial status label if it is still at initial connecting text
       const statusEl = document.getElementById('status');
       if (statusEl.dataset.state === 'connecting') {
         statusEl.textContent = t('status_connecting');
@@ -302,17 +345,35 @@
     const caption = $('#img-caption');
     const viewer = $('#image-viewer');
 
+    const backendSelect = $('#backend-select');
+    const backendWarn = $('#backend-warn');
+    const btnApplyBackend = $('#btn-apply-backend');
+
+    const widthInput = $('#width-input');
+    const heightInput = $('#height-input');
+    const btnApplySize = $('#btn-apply-size');
+    const sizePill = $('#size-pill');
+
     function log(el, msg) {
       const ts = new Date().toLocaleTimeString();
       el.textContent = `[${ts}] ${msg}\n` + el.textContent;
       if (el.textContent.length > 20000) el.textContent = el.textContent.slice(0, 20000);
     }
 
-    // Set initial text according to language
+    function clampSize(v) {
+      const n = Math.round(Number(v) || 0);
+      return Math.max(64, Math.min(2048, n));
+    }
+
+    function updateSizePill() {
+      const w = Number(widthInput.value) || '?';
+      const h = Number(heightInput.value) || '?';
+      sizePill.textContent = `Size: ${w}×${h}`;
+    }
+
     statusEl.dataset.state = 'connecting';
     statusEl.textContent = t('status_connecting');
 
-    // Image loading + fade-in
     img.addEventListener('load', () => img.classList.add('loaded'));
     function setImage(filenameRel, captionText) {
       const url = filenameRel.startsWith('/static/') ? filenameRel : `/static/${filenameRel.replace(/^\/+/, '')}`;
@@ -321,21 +382,14 @@
       caption.textContent = captionText || filenameRel;
     }
 
-    // ---------- Fullscreen (viewer only) ----------
+    // ---------- Fullscreen ----------
     const btnFS = $('#btn-fullscreen');
     const iconEnter = $('#fs-icon-enter');
     const iconExit = $('#fs-icon-exit');
     const fsLabel = $('#fs-label');
 
     function isInFullscreenFor(el) { return document.fullscreenElement === el; }
-    async function enterFullscreen(el) {
-      try {
-        if (!document.fullscreenElement) await el.requestFullscreen();
-        else if (document.fullscreenElement !== el) {
-          await document.exitFullscreen(); await el.requestFullscreen();
-        }
-      } catch (e) { console.warn('enterFullscreen failed', e); }
-    }
+    async function enterFullscreen(el) { try { if (!document.fullscreenElement) await el.requestFullscreen(); else if (document.fullscreenElement !== el) { await document.exitFullscreen(); await el.requestFullscreen(); } } catch (e) { console.warn('enterFullscreen failed', e); } }
     async function exitFullscreen() { try { if (document.fullscreenElement) await document.exitFullscreen(); } catch (e) { console.warn('exitFullscreen failed', e); } }
     async function toggleFullscreenFor(el) { isInFullscreenFor(el) ? await exitFullscreen() : await enterFullscreen(el); }
     function syncFullscreenUI() {
@@ -354,7 +408,7 @@
     let backoffMs = 1000;
     let reconnectTimer = null;
     let connecting = false;
-    let wantAutoReconnect = true; // disabled after shutdown until manual reconnect
+    let wantAutoReconnect = true;
 
     function closeSSE(reason = 'closeSSE') {
       try { if (sse) sse.close(); } catch {}
@@ -387,14 +441,8 @@
       log(statusLog, t('sse_connecting'));
       console.debug('[SSE] connecting to /events');
 
-      try {
-        sse = new EventSource('/events');
-      } catch (e) {
-        console.debug('[SSE] EventSource ctor error:', e);
-        connecting = false;
-        scheduleReconnect();
-        return;
-      }
+      try { sse = new EventSource('/events'); }
+      catch (e) { console.debug('[SSE] EventSource ctor error:', e); connecting = false; scheduleReconnect(); return; }
 
       sse.onopen = () => {
         console.debug('[SSE] open');
@@ -421,9 +469,7 @@
         if (ev?.data) { statusEl.textContent = ev.data; log(statusLog, ev.data); }
       });
 
-      sse.addEventListener('transcript', (ev) => {
-        if (ev?.data) log(transcriptLog, ev.data);
-      });
+      sse.addEventListener('transcript', (ev) => { if (ev?.data) log(transcriptLog, ev.data); });
 
       sse.addEventListener('llm_prompt', (ev) => {
         if (ev?.data) { log(promptLog, ev.data); caption.textContent = ev.data; }
@@ -435,10 +481,9 @@
       });
     }
 
-    // Initial connect
     connectSSE();
 
-    // ---------- Health/Status checks ----------
+    // ---------- Health/Status helpers ----------
     async function isServerUp() {
       try {
         const r = await fetch('/status', { cache: 'no-store' });
@@ -494,12 +539,10 @@
           const up = await isServerUp();
           if (!up) {
             log(statusLog, t('server_offline'));
-            // Keep button as reconnect
           } else {
             await manualReconnect();
           }
         } finally {
-          // On success, sse.onopen will switch to shutdown mode again
           if (btnShutdown.dataset.mode === 'reconnect' && btnShutdown.textContent === t('reconnecting')) {
             btnShutdown.textContent = old;
           }
@@ -508,7 +551,6 @@
         return;
       }
 
-      // Server shutdown
       const confirmStop = confirm(t('confirm_shutdown'));
       if (!confirmStop) return;
       btnShutdown.disabled = true;
@@ -519,7 +561,7 @@
         log(statusLog, `shutdown → ${r.status}`);
         statusEl.textContent = r.ok ? t('shutdown_in_progress') : t('shutdown_failed');
         setShutdownMode(false);
-        wantAutoReconnect = false; // disable auto-reconnect until user manually reconnects
+        wantAutoReconnect = false;
         closeSSE('after-shutdown');
       } catch (e) {
         log(statusLog, `shutdown error: ${e}`);
@@ -549,45 +591,177 @@
         log(statusLog, `stop → ${r.status}`);
       } catch (e) { log(statusLog, `stop error: ${e}`); }
     });
+
+    function currentSizePayload() {
+      const w = clampSize(widthInput.value);
+      const h = clampSize(heightInput.value);
+      return { width: w, height: h };
+    }
+
+    // Plan mit optionaler Größe
     $('#btn-plan').addEventListener('click', async () => {
       const text = $('#plan-input').value.trim();
       if (!text) return;
       try {
-        const r = await fetch('/api/plan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, tags: [] }) });
+        const size = currentSizePayload();
+        const r = await fetch('/api/plan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, tags: [], width: size.width, height: size.height })
+        });
         const j = await r.json();
         if (j.prompt) { log(promptLog, j.prompt); statusEl.textContent = t('prompt_created'); }
         else if (j.error) { log(statusLog, `plan error: ${j.error}`); }
       } catch (e) { log(statusLog, `plan exception: ${e}`); }
     });
-    $('#btn-test').addEventListener('click', async () => {
+
+    // NEW: Direct Generate (ComfyUI)
+    document.getElementById('btn-direct').addEventListener('click', async () => {
+      const prompt = document.getElementById('plan-input').value.trim();
+      const negative = document.getElementById('neg-input').value.trim();
+      if (!prompt) return;
+
+      const size = currentSizePayload();
       try {
-        const r = await fetch('/api/pollinations/test', { method: 'POST' });
+        const r = await fetch('/api/image/direct', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt,
+            negative_prompt: negative || null,
+            width: size.width,
+            height: size.height
+          })
+        });
         const j = await r.json();
         if (r.ok && j.rel) {
-          setImage(j.rel, 'Test');
+          setImage(j.rel, prompt);
+          log(statusLog, `direct image: ${j.rel}`);
+          log(promptLog, prompt);
+        } else {
+          log(statusLog, `direct failed: ${j.detail || j.error || r.status}`);
+        }
+      } catch (e) {
+        log(statusLog, `direct exception: ${e}`);
+      }
+    });
+
+    // Testbild mit optionaler Größe und negativem Prompt
+    $('#btn-test').addEventListener('click', async () => {
+      try {
+        const size = currentSizePayload();
+        const negative = document.getElementById('neg-input').value.trim();
+        const r = await fetch('/api/image/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            width: size.width,
+            height: size.height,
+            negative_prompt: negative || null
+          })
+        });
+        const j = await r.json();
+        if (r.ok && j.rel) {
+          setImage(j.rel, `Test ${size.width}×${size.height}`);
           log(statusLog, `test image: ${j.rel}`);
         } else {
-          log(statusLog, `test failed: ${j.error || r.status}`);
+          log(statusLog, `test failed: ${j.detail || j.error || r.status}`);
         }
       } catch (e) { log(statusLog, `test exception: ${e}`); }
     });
 
-    // Open folder (placeholder)
-    $('#btn-open-dir').addEventListener('click', () => {
-      alert('Please open the output folder on your local filesystem: ./outputs/images');
+    // Optional: Cloud erlauben, bevor auf Pollinations gewechselt wird
+    async function ensureCloudAllowed() {
+      try {
+        const r = await fetch('/api/settings/image_allow_cloud', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ allow: true })
+        });
+        return r.ok;
+      } catch {
+        return false;
+      }
+    }
+
+    // Apply backend switch (mit Cloud-Enable, wenn nötig)
+    btnApplyBackend.addEventListener('click', async () => {
+      const backend = backendSelect.value;
+      backendWarn.style.display = 'none';
+      try {
+        if (backend === 'pollinations') {
+          const ok = await ensureCloudAllowed();
+          if (!ok) log(statusLog, 'Cloud konnte nicht aktiviert werden.');
+        }
+        const r = await fetch('/api/settings/image_backend', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ backend })
+        });
+        const j = await r.json().catch(() => ({}));
+        if (r.ok && j.ok) {
+          log(statusLog, t('backend_switched_ok'));
+          await refreshConfig();
+        } else {
+          const err = j?.error || `${r.status}`;
+          log(statusLog, `${t('backend_switch_failed')}: ${err}`);
+          if (j?.reason === 'cloud_blocked') {
+            backendWarn.textContent = t('backend_warn_cloud_blocked');
+            backendWarn.style.display = '';
+          } else if (j?.reason === 'missing_secret') {
+            backendWarn.textContent = t('backend_warn_missing_secret');
+            backendWarn.style.display = '';
+          }
+        }
+      } catch (e) {
+        log(statusLog, `${t('backend_switch_failed')}: ${e}`);
+      }
+    });
+
+    // Größe anwenden (Client-seitig Anzeige)
+    btnApplySize.addEventListener('click', async () => {
+      try {
+        const size = currentSizePayload();
+        updateSizePill();
+        statusEl.textContent = t('size_applied_ok');
+        log(statusLog, `size applied: ${size.width}×${size.height}`);
+      } catch (e) {
+        statusEl.textContent = t('size_applied_fail');
+        log(statusLog, `size apply error: ${e}`);
+      }
     });
 
     // ---------- Initial config ----------
-    (async function init() {
-      applyI18N();
+    async function refreshConfig() {
       try {
         const r = await fetch('/config', { cache: 'no-store' });
         if (!r.ok) throw new Error('config fetch failed');
         const j = await r.json();
+
         $('#ollama-pill').textContent = `Ollama: ${j?.ollama?.model || '?'}`;
         $('#poll-pill').textContent = `Images: ${j?.image?.backend || '?'}`;
         $('#sr-pill').textContent = `SR: ${j?.audio?.sample_rate || '?'}`;
-        // If SSE already connected, status will be updated there; otherwise set to ready
+
+        // Backend select
+        const current = (j?.image?.backend || 'comfyui').toLowerCase();
+        backendSelect.value = current === 'pollinations' ? 'pollinations' : 'comfyui';
+
+        // Warnhinweise
+        const allowCloud = !!(j?.image?.allow_cloud);
+        if (!allowCloud && backendSelect.value === 'pollinations') {
+          backendWarn.textContent = t('backend_warn_cloud_blocked');
+          backendWarn.style.display = '';
+        } else {
+          backendWarn.style.display = 'none';
+        }
+
+        // Größe initialisieren
+        const w = Number(j?.image?.width) || 512;
+        const h = Number(j?.image?.height) || 512;
+        widthInput.value = w;
+        heightInput.value = h;
+        updateSizePill();
+
         if (statusEl.dataset.state !== 'connected') {
           statusEl.textContent = t('status_ready');
         }
@@ -595,6 +769,13 @@
         log(statusLog, `config error: ${e}`);
         statusEl.textContent = t('config_error');
       }
+    }
+
+    (async function init() {
+      applyI18N();
+      await refreshConfig();
+      widthInput.addEventListener('input', updateSizePill);
+      heightInput.addEventListener('input', updateSizePill);
     })();
   </script>
 </body>
