@@ -801,26 +801,19 @@ async def run_llm_and_image(text: str) -> None:
 # ---------- Helpers: negative prompt passing ----------
 
 def _merge_negative_into_prompt(prompt: str, negative: str) -> str:
-    # Kurzer, neutraler Merge, falls Backend keine native negative_prompt-Option hat.
     p = (prompt or "").strip()
     n = (negative or "").strip()
     if not n:
         return p
-    # Anhängen in Klammern, eindeutig, ohne den Prompt zu “vergiften”
     return f"{p}\n-- negative: {n}"
 
 async def _generate_with_negative_support(prompt: str, width: int, height: int, negative: str) -> Path:
-    # Versuche: native Übergabe an Backend.generate(..., negative_prompt=...) falls vorhanden,
-    # sonst Merge in den Prompt als Fallback.
     if BACKEND is None:
         raise RuntimeError("image_backend_not_initialized")
-    # ComfyUI: zusätzlich cfg.negative schon vorher gesetzt (oben). Hier kann optional negative_prompt ignoriert werden.
     kwargs: Dict[str, Any] = {"width": width, "height": height}
-    # Prüfe, ob generate negative_prompt annimmt (duck-typing via signature wäre teuer; einfacher try/except)
     try:
         return await BACKEND.generate(prompt, negative_prompt=(negative or ""), **kwargs)  # type: ignore[arg-type]
     except TypeError:
-        # Backend kennt den Parameter nicht → Prompt-Merge
         merged = _merge_negative_into_prompt(prompt, negative)
         return await BACKEND.generate(merged, **kwargs)
 
@@ -884,14 +877,23 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# Static mounts
 app.mount("/static", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="static")
-app.mount("/web", StaticFiles(directory="web", html=True), name="web")
+web_dir = Path("web").resolve()
+if web_dir.exists():
+    app.mount("/web", StaticFiles(directory=str(web_dir), html=True), name="web")
 
 @app.get("/", include_in_schema=False)
 async def root_redirect():
-    return RedirectResponse(url="/web/index.html", status_code=307)
+    if web_dir.exists():
+        return RedirectResponse(url="/web/index.html", status_code=307)
+    return JSONResponse({"ok": True, "msg": "Web UI not found, use /static for images or API endpoints."})
 
 # ---------- Status/Health ----------
+
+@app.get("/ping")
+async def ping():
+    return {"ok": True}
 
 @app.get("/status")
 async def status():
@@ -1123,12 +1125,10 @@ async def api_plan(req: PlanRequest):
 
 @app.post("/api/image/direct", response_model=ImageResponse)
 async def api_image_direct(req: DirectImageRequest):
-    # UPDATE direct generate: Nutze immer den aktuell gewählten Backend (ComfyUI oder Pollinations)
     if BACKEND is None:
         return JSONResponse({"error": "image_backend_not_initialized"}, status_code=500)
     try:
         neg = (req.negative_prompt or STATE.negative_prompt or "").strip()
-        # ComfyUI: neg in cfg spiegeln
         if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
             if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
                 setattr(BACKEND.cfg, "negative", neg)
@@ -1145,7 +1145,6 @@ async def api_image_direct(req: DirectImageRequest):
         await broadcast("image", rel)
         return ImageResponse(filename=path.name, relpath=rel, rel=rel, width=w, height=h)
     except PermissionError as e:
-        # Falls ein Cloud-Backend aktiv wäre, aber nicht erlaubt ist
         return JSONResponse({"error": f"{e}"}, status_code=403)
     except Exception as e:
         return JSONResponse({"error": f"{e}"}, status_code=502)
@@ -1172,7 +1171,7 @@ async def api_image_test(req: ImageRequest):
     except Exception as e:
         return JSONResponse({"error": f"{e}"}, status_code=502)
 
-# ---------- Backend switching & cloud toggle ----------
+# ---------- Image backend switching & cloud toggle ----------
 
 def _rebuild_backend(force_name: Optional[str] = None) -> ImageBackend:
     global BACKEND
@@ -1245,6 +1244,13 @@ async def set_negative_prompt(s: NegativePromptSettings):
                 setattr(BACKEND.cfg, "negative", txt)
     await broadcast("status", "negative_prompt:updated")
     return {"ok": True, "negative_prompt": STATE.negative_prompt}
+
+# ---------- Utility: Open-dir hint (UI kann /static öffnen) ----------
+
+@app.get("/open_dir_hint")
+async def open_dir_hint():
+    # Rein informativ für die UI
+    return {"static_url": "/static/", "path": str(OUTPUT_DIR)}
 
 # ---------- App entry ----------
 
