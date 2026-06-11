@@ -12,7 +12,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Set, Union
+from typing import Any, Dict, List, Literal, Optional, Set
 
 import httpx
 import numpy as np
@@ -27,10 +27,9 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-# Image backend factory and interface (provided by your project)
+# Image backend factory and interface (from your project)
 from image_backend import build_image_backend, ImageBackend
 
-# Optional: LocalComfyBackend for type checking if available
 try:
     from image_backend import LocalComfyBackend  # type: ignore
 except Exception:
@@ -115,22 +114,13 @@ CONTEXT_MAX_CHARS = _env_int("APP_CONTEXT_MAX_CHARS", 480)
 
 # ---------- Output/static config ----------
 
-# We save images into APP_OUTPUT_DIR (default ./outputs/images) and mount it at /static.
 OUTPUT_DIR = Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")).resolve()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def rel_for_ui(p: Path) -> str:
-    """
-    Return the filename for the UI. Since /static is mounted to OUTPUT_DIR,
-    the UI should request /static/<filename>.
-    """
     return Path(p).name
 
 def ensure_in_output_dir(p: Path) -> Path:
-    """
-    Ensure the final file lives inside OUTPUT_DIR. If the backend wrote the file
-    elsewhere, move/copy it into OUTPUT_DIR and return the new path.
-    """
     try:
         p = Path(p).resolve()
     except Exception:
@@ -139,7 +129,6 @@ def ensure_in_output_dir(p: Path) -> Path:
         return p
     target = OUTPUT_DIR / p.name
     if target.exists():
-        # Avoid overwriting by adding a numeric suffix
         stem, suf = p.stem, p.suffix
         for i in range(1, 1000):
             cand = OUTPUT_DIR / f"{stem}_{i}{suf}"
@@ -147,7 +136,6 @@ def ensure_in_output_dir(p: Path) -> Path:
                 target = cand
                 break
     try:
-        # Prefer atomic move; if it fails (cross-device), fall back to copy+unlink
         with contextlib.suppress(Exception):
             p.replace(target)
             print(f"[SAVE] moved image to {target}")
@@ -160,10 +148,9 @@ def ensure_in_output_dir(p: Path) -> Path:
         return target
     except Exception as e:
         print(f"[SAVE] failed to move/copy image: {e}")
-        # Fallback: return original (may not be served under /static)
         return p
 
-# Optional default image size exposed in /config
+# UI-defaults (initial)
 APP_IMAGE_WIDTH = _env_int("APP_IMAGE_WIDTH", 512)
 APP_IMAGE_HEIGHT = _env_int("APP_IMAGE_HEIGHT", 512)
 
@@ -190,13 +177,11 @@ OLLAMA_SYS_PROMPT = _env_str(
 )
 
 def assert_local(host: str) -> None:
-    """For privacy/safety, only allow localhost endpoints."""
     if host != "127.0.0.1":
         raise AssertionError(f"Only localhost allowed, got {host}")
 
 assert_local(OLLAMA_HOST)
 
-# Warmup knobs
 WARMUP_ENABLE = _env_bool01("APP_OLLAMA_WARMUP_ENABLE", 1)
 WARMUP_PROMPT = _env_str("APP_OLLAMA_WARMUP_PROMPT", "Sag Hallo auf Deutsch.")
 WARMUP_TIMEOUT_SEC = _env_float("APP_OLLAMA_WARMUP_TIMEOUT_SEC", 45.0)
@@ -248,7 +233,6 @@ _MIN_SIZE = 128
 _MAX_SIZE = 2048
 
 class ImageRequest(BaseModel):
-    # Allow empty prompt for the /api/image/test endpoint to use a default
     prompt: str = Field(min_length=0, max_length=2000)
     width: int | None = Field(default=None)
     height: int | None = Field(default=None)
@@ -278,8 +262,16 @@ class DirectImageRequest(BaseModel):
 class ImageResponse(BaseModel):
     filename: str
     relpath: str
+    rel: Optional[str] = None
     width: int | None = None
     height: int | None = None
+
+class ImageSizeSettings(BaseModel):
+    width: int = Field(ge=_MIN_SIZE, le=_MAX_SIZE)
+    height: int = Field(ge=_MIN_SIZE, le=_MAX_SIZE)
+
+class NegativePromptSettings(BaseModel):
+    negative_prompt: str = Field(default="", max_length=4000)
 
 # ---------- Audio utils ----------
 
@@ -288,15 +280,12 @@ def pick_input_device(prefer: Optional[str] = None) -> int:
     if not devs:
         raise RuntimeError("No audio devices found")
     if prefer:
-        # First try exact match with input capability
         for i, d in enumerate(devs):
             if d.get("name") == prefer and d.get("max_input_channels", 0) > 0:
                 return i
-        # Then try substring match
         for i, d in enumerate(devs):
             if prefer.lower() in (d.get("name", "").lower()) and d.get("max_input_channels", 0) > 0:
                 return i
-    # Fallbacks by common names, then first input-capable device
     for i, d in enumerate(devs):
         if "pulse" in (d.get("name", "").lower()) and d.get("max_input_channels", 0) > 0:
             return i
@@ -340,7 +329,6 @@ except Exception as e:
 _WHISPER_MODEL: Optional[WhisperModel] = None
 
 def init_whisper_model() -> None:
-    """Lazily load the whisper.cpp model with provided settings."""
     global _WHISPER_MODEL
     if not WHISPER_AVAILABLE or _WHISPER_MODEL is not None:
         return
@@ -372,7 +360,6 @@ META_RE = re.compile(
 )
 
 def _parse_whisper_out(raw: object) -> str:
-    """Parse whisper.cpp outputs from different return formats into plain text."""
     if raw is None:
         return ""
     if isinstance(raw, dict):
@@ -398,7 +385,6 @@ def _parse_whisper_out(raw: object) -> str:
     return s
 
 def clean_transcript(raw: str) -> str:
-    """Trim, drop obvious non-speech markers, and filter filler one-word utterances."""
     if not raw:
         return ""
     txt = " ".join(raw.split()).strip()
@@ -411,12 +397,10 @@ def clean_transcript(raw: str) -> str:
     return txt
 
 def is_meaningful_text(t: str, min_chars: int, min_words: int) -> bool:
-    """Heuristic to decide if a text is meaningful enough to send to the LLM."""
     t = (t or "").strip()
     return bool(t) and len(t) >= min_chars and len(t.split()) >= min_words and re.search(r"[A-Za-zÄÖÜäöüß]", t)
 
 def transcribe_chunk_with_whisper(samples: np.ndarray, sr: int) -> str:
-    """Run whisper.cpp on a short audio chunk and return cleaned text."""
     if not WHISPER_AVAILABLE or _WHISPER_MODEL is None:
         return ""
     if samples.size == 0:
@@ -480,7 +464,6 @@ def _ollama_options_for_prompt() -> dict:
     }
 
 async def _post_with_retries(client: httpx.AsyncClient, url: str, body: dict, timeout: float) -> dict:
-    """Generic POST with exponential backoff on common transient failures."""
     delay = float(_env_float("APP_OLLAMA_RETRY_BASE_DELAY", 0.8))
     max_retries = int(_env_int("APP_OLLAMA_MAX_RETRIES", 4))
     last_exc: Optional[Exception] = None
@@ -503,7 +486,6 @@ async def _post_with_retries(client: httpx.AsyncClient, url: str, body: dict, ti
     raise RuntimeError(f"Ollama request failed after {max_retries} attempts: {last_exc}")
 
 async def _ollama_available() -> bool:
-    """Ping /api/tags to detect if Ollama is reachable locally."""
     try:
         async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short_http()) as c:
             r = await c.get(_ollama_url("/api/tags"))
@@ -513,7 +495,6 @@ async def _ollama_available() -> bool:
         return False
 
 async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> str:
-    """Call Ollama /api/generate to turn user text into a compact image prompt."""
     sys = OLLAMA_SYS_PROMPT
     payload = {
         "user_text": (user_text or "").strip(),
@@ -545,18 +526,19 @@ class PipelineState:
     start_ts: float = 0.0
     image_backend_name: str = _env_str("IMAGE_BACKEND", "comfyui").lower()
     allow_cloud: bool = _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0)
+    image_width: int = APP_IMAGE_WIDTH
+    image_height: int = APP_IMAGE_HEIGHT
+    negative_prompt: str = ""
 
 STATE = PipelineState()
 STOP_DEBOUNCE_SEC = float(os.getenv("APP_STOP_DEBOUNCE_SEC", "2.0") or "2.0")
 
-# Image backend instance (injected on startup)
 BACKEND: Optional[ImageBackend] = None
 
 def sse_format(event: str, data: str) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 async def broadcast(event: str, data: str) -> None:
-    """Broadcast an SSE event to all connected listeners."""
     if STATE.shutting_down:
         return
     for q in list(STATE.listeners):
@@ -566,7 +548,6 @@ async def broadcast(event: str, data: str) -> None:
 _context_buffer: deque[str] = deque(maxlen=CONTEXT_MAX_SEGMENTS)
 
 async def _close_sse_listeners(timeout: float = 0.25) -> None:
-    """Signal-close all SSE queues to release HTTP connections quickly."""
     listeners = getattr(STATE, "listeners", None)
     if not listeners:
         return
@@ -582,14 +563,12 @@ async def _close_sse_listeners(timeout: float = 0.25) -> None:
     tasks = [asyncio.create_task(_signal(q)) for q in queues]
     with contextlib.suppress(Exception):
         await asyncio.wait(tasks, timeout=timeout + 0.25)
-
     try:
         listeners.clear()
     except Exception:
         setattr(STATE, "listeners", [])
 
 def update_context_buffer(text: str) -> str:
-    """Append to rolling context and clip to max chars."""
     _context_buffer.append(text)
     ctx = " ".join(_context_buffer)
     if len(ctx) > CONTEXT_MAX_CHARS:
@@ -597,7 +576,6 @@ def update_context_buffer(text: str) -> str:
     return ctx
 
 def _log_effective_config() -> None:
-    """Print compact effective configuration for diagnostics."""
     print(
         "[CONFIG]",
         f"env_file= {ENV_PATH or '(none)'}",
@@ -614,16 +592,12 @@ def _log_effective_config() -> None:
         "| llm:",
         f"interval={LLM_INTERVAL_SEC}s model={OLLAMA_MODEL}",
         "| image:",
-        f"backend={STATE.image_backend_name} allow_cloud={STATE.allow_cloud} out={OUTPUT_DIR}",
+        f"backend={STATE.image_backend_name} allow_cloud={STATE.allow_cloud} out={OUTPUT_DIR} default={APP_IMAGE_WIDTH}x{APP_IMAGE_HEIGHT}",
     )
 
 # ---------- Runtime-aware backend wrapper ----------
 
 def build_image_backend_rt(backend_name: Optional[str] = None, allow_cloud: Optional[bool] = None) -> ImageBackend:
-    """
-    Call the existing env-driven build_image_backend() while overriding
-    backend selection and cloud allowance at runtime via environment variables.
-    """
     wanted_backend = (backend_name or STATE.image_backend_name or _env_str("IMAGE_BACKEND", "comfyui")).lower()
     allowed = (STATE.allow_cloud if allow_cloud is None else bool(allow_cloud))
     old_backend = os.environ.get("IMAGE_BACKEND")
@@ -645,13 +619,7 @@ def build_image_backend_rt(backend_name: Optional[str] = None, allow_cloud: Opti
         else:
             os.environ["ALLOW_CLOUD_IMAGE_BACKEND"] = old_allow
 
-# ---------- UI path helper ----------
-
 def rel_for_ui_path(p: Path) -> str:
-    """
-    Return a relative path for UI. Since /static is mounted to OUTPUT_DIR, we return only the filename.
-    (Kept separate from rel_for_ui to avoid accidental refactoring regressions.)
-    """
     return Path(p).name
 
 # ---------- Audio transcription loop ----------
@@ -690,7 +658,6 @@ async def audio_transcription_loop() -> None:
     q: asyncio.Queue[np.ndarray] = asyncio.Queue(maxsize=100)
 
     def callback(indata, frames, time_info, status):
-        # Audio callback: push frames into the asyncio queue, dropping oldest on overflow
         if status:
             pass
         mono = np.asarray(indata[:, 0], dtype=np.float32)
@@ -769,7 +736,6 @@ async def audio_transcription_loop() -> None:
                         STATE.last_llm_run_ts = time.time()
                         task = asyncio.create_task(run_llm_and_image(ctx))
                         STATE.bg_tasks.add(task)
-
                         def _done_cb(t: asyncio.Task):
                             with contextlib.suppress(Exception):
                                 STATE.bg_tasks.discard(t)
@@ -794,7 +760,6 @@ async def audio_transcription_loop() -> None:
 # ---------- LLM + Image ----------
 
 async def run_llm_and_image(text: str) -> None:
-    """End-to-end: use Ollama to generate an image prompt, then render via backend."""
     if await _ollama_available() is False:
         await broadcast("status", "ollama_unavailable")
         STATE.last_llm_error = "ollama_unavailable"
@@ -814,15 +779,50 @@ async def run_llm_and_image(text: str) -> None:
             await broadcast("llm_prompt", img_prompt)
             await broadcast("status", "llm_ok")
             try:
-                path = await BACKEND.generate(img_prompt)
-                # Ensure final file is inside OUTPUT_DIR, then broadcast filename
+                # Negativen Prompt für ComfyUI spiegeln
+                if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
+                    if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
+                        setattr(BACKEND.cfg, "negative", STATE.negative_prompt or "")
+                path = await _generate_with_negative_support(
+                    prompt=img_prompt,
+                    width=STATE.image_width,
+                    height=STATE.image_height,
+                    negative=STATE.negative_prompt,
+                )
                 path = ensure_in_output_dir(path)
-                await broadcast("image", rel_for_ui_path(path))
+                rel = rel_for_ui_path(path)
+                await broadcast("image", rel)
             except Exception as e:
                 await broadcast("status", f"image_error:{e}")
         except Exception as e:
             STATE.last_llm_error = f"pipeline_error:{e}"
             await broadcast("status", f"pipeline_error:{e}")
+
+# ---------- Helpers: negative prompt passing ----------
+
+def _merge_negative_into_prompt(prompt: str, negative: str) -> str:
+    # Kurzer, neutraler Merge, falls Backend keine native negative_prompt-Option hat.
+    p = (prompt or "").strip()
+    n = (negative or "").strip()
+    if not n:
+        return p
+    # Anhängen in Klammern, eindeutig, ohne den Prompt zu “vergiften”
+    return f"{p}\n-- negative: {n}"
+
+async def _generate_with_negative_support(prompt: str, width: int, height: int, negative: str) -> Path:
+    # Versuche: native Übergabe an Backend.generate(..., negative_prompt=...) falls vorhanden,
+    # sonst Merge in den Prompt als Fallback.
+    if BACKEND is None:
+        raise RuntimeError("image_backend_not_initialized")
+    # ComfyUI: zusätzlich cfg.negative schon vorher gesetzt (oben). Hier kann optional negative_prompt ignoriert werden.
+    kwargs: Dict[str, Any] = {"width": width, "height": height}
+    # Prüfe, ob generate negative_prompt annimmt (duck-typing via signature wäre teuer; einfacher try/except)
+    try:
+        return await BACKEND.generate(prompt, negative_prompt=(negative or ""), **kwargs)  # type: ignore[arg-type]
+    except TypeError:
+        # Backend kennt den Parameter nicht → Prompt-Merge
+        merged = _merge_negative_into_prompt(prompt, negative)
+        return await BACKEND.generate(merged, **kwargs)
 
 # ---------- FastAPI app & lifespan ----------
 
@@ -830,7 +830,6 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """App startup/shutdown lifecycle: init backends, whisper, warmup LLM."""
     print(f"[ENV] loaded from: {ENV_PATH or '(env vars only)'}")
     _log_effective_config()
     init_whisper_model()
@@ -842,6 +841,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         BACKEND = None
         print(f"[BACKEND] initialization failed: {e}")
+
+    STATE.image_width = APP_IMAGE_WIDTH
+    STATE.image_height = APP_IMAGE_HEIGHT
 
     STATE.ollama_ready_at = time.time() + (WARMUP_GRACE_SEC if WARMUP_ENABLE else 0.0)
     warmup_task: Optional[asyncio.Task] = None
@@ -882,7 +884,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Static mounts: serve OUTPUT_DIR directly at /static so clients request /static/<filename>
 app.mount("/static", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="static")
 app.mount("/web", StaticFiles(directory="web", html=True), name="web")
 
@@ -895,16 +896,6 @@ async def root_redirect():
 @app.get("/status")
 async def status():
     return {"ok": True, "running": STATE.running, "shutting_down": STATE.shutting_down}
-
-class HealthReport(BaseModel):
-    ollama_ok: bool
-    image_backend: str
-    allow_cloud: bool
-    output_dir: str
-    output_dir_exists: bool
-    last_prompt: Optional[str] = None
-    last_llm_error: Optional[str] = None
-    pollinations_key_present: bool = False
 
 @app.get("/health", response_model=HealthReport)
 async def health() -> HealthReport:
@@ -935,8 +926,16 @@ async def get_config():
         "text": {"min_chars": TEXT_MIN_CHARS, "min_words": TEXT_MIN_WORDS, "force_meaningful": FORCE_MEANINGFUL_CHECK},
         "context": {"max_segments": CONTEXT_MAX_SEGMENTS, "max_chars": CONTEXT_MAX_CHARS},
         "ollama": {"host": OLLAMA_HOST, "port": OLLAMA_PORT, "model": OLLAMA_MODEL, "temperature": OLLAMA_TEMPERATURE, "timeout_sec": OLLAMA_TIMEOUT_SEC, "interval_sec": LLM_INTERVAL_SEC, "disabled": OLLAMA_DISABLED},
-        # Add UI-friendly defaults for image size
-        "image": {"backend": STATE.image_backend_name, "allow_cloud": STATE.allow_cloud, "output_dir": str(OUTPUT_DIR), "width": APP_IMAGE_WIDTH, "height": APP_IMAGE_HEIGHT},
+        "image": {
+            "backend": STATE.image_backend_name,
+            "allow_cloud": STATE.allow_cloud,
+            "output_dir": str(OUTPUT_DIR),
+            "width_default": APP_IMAGE_WIDTH,
+            "height_default": APP_IMAGE_HEIGHT,
+            "current_width": STATE.image_width,
+            "current_height": STATE.image_height,
+            "negative_prompt": STATE.negative_prompt,
+        },
     }
 
 # ---------- SSE: /events ----------
@@ -1082,7 +1081,7 @@ async def api_ollama_chat(req: OllamaChatRequest):
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
-# ---------- Plan → Prompt (optional width/height forwarded to image backend) ----------
+# ---------- Plan → Prompt ----------
 
 @app.post("/api/plan")
 async def api_plan(req: PlanRequest):
@@ -1105,66 +1104,53 @@ async def api_plan(req: PlanRequest):
                 await broadcast("llm_prompt", out)
                 if BACKEND is not None:
                     try:
-                        path = await BACKEND.generate(out, width=req.width, height=req.height)
+                        if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
+                            if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
+                                setattr(BACKEND.cfg, "negative", STATE.negative_prompt or "")
+                        w = req.width if (req.width and req.width > 0) else STATE.image_width
+                        h = req.height if (req.height and req.height > 0) else STATE.image_height
+                        path = await _generate_with_negative_support(out, width=w, height=h, negative=STATE.negative_prompt)
                         path = ensure_in_output_dir(path)
-                        await broadcast("image", rel_for_ui_path(path))
+                        rel = rel_for_ui_path(path)
+                        await broadcast("image", rel)
                     except Exception as e:
                         await broadcast("status", f"image_error:{e}")
             return {"prompt": out}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
-# ---------- Image: Direct (ComfyUI only) ----------
-
-class DirectImageRequest(BaseModel):
-    prompt: str = Field(min_length=1, max_length=2000)
-    width: int | None = None
-    height: int | None = None
-    negative_prompt: Optional[str] = None
+# ---------- Image: Direct (ComfyUI und Pollinations) ----------
 
 @app.post("/api/image/direct", response_model=ImageResponse)
 async def api_image_direct(req: DirectImageRequest):
+    # UPDATE direct generate: Nutze immer den aktuell gewählten Backend (ComfyUI oder Pollinations)
     if BACKEND is None:
         return JSONResponse({"error": "image_backend_not_initialized"}, status_code=500)
-
-    # Only allow when the concrete backend is a local ComfyUI backend
-    is_local_comfy = LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend)
-    if not is_local_comfy:
-        return JSONResponse({"error": "direct_generate_only_supported_on_comfyui"}, status_code=400)
-
-    neg = (req.negative_prompt or "").strip()
     try:
-        # Duck-typing to push negative prompt into backend config if supported
-        if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
-            setattr(BACKEND.cfg, "negative", neg)
-        path = await BACKEND.generate(req.prompt.strip(), width=req.width, height=req.height)
+        neg = (req.negative_prompt or STATE.negative_prompt or "").strip()
+        # ComfyUI: neg in cfg spiegeln
+        if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
+            if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
+                setattr(BACKEND.cfg, "negative", neg)
+        w = req.width if (req.width and req.width > 0) else STATE.image_width
+        h = req.height if (req.height and req.height > 0) else STATE.image_height
+        path = await _generate_with_negative_support(
+            prompt=req.prompt.strip(),
+            width=w,
+            height=h,
+            negative=neg,
+        )
         path = ensure_in_output_dir(path)
-        return ImageResponse(filename=path.name, relpath=rel_for_ui_path(path), width=req.width, height=req.height)
+        rel = rel_for_ui_path(path)
+        await broadcast("image", rel)
+        return ImageResponse(filename=path.name, relpath=rel, rel=rel, width=w, height=h)
+    except PermissionError as e:
+        # Falls ein Cloud-Backend aktiv wäre, aber nicht erlaubt ist
+        return JSONResponse({"error": f"{e}"}, status_code=403)
     except Exception as e:
         return JSONResponse({"error": f"{e}"}, status_code=502)
 
-# ---------- Image test endpoint (with optional negative_prompt) ----------
-
-class ImageRequest(BaseModel):
-    prompt: str = Field(min_length=0, max_length=2000)
-    width: int | None = Field(default=None)
-    height: int | None = Field(default=None)
-    negative_prompt: Optional[str] = None
-
-    @field_validator("width", "height")
-    @classmethod
-    def _clamp_size(cls, v: int | None) -> int | None:
-        if v is None:
-            return v
-        try:
-            iv = int(v)
-        except Exception:
-            return None
-        if iv < 128:
-            iv = 128
-        if iv > 2048:
-            iv = 2048
-        return iv
+# ---------- Image test endpoint ----------
 
 @app.post("/api/image/test", response_model=ImageResponse)
 async def api_image_test(req: ImageRequest):
@@ -1172,22 +1158,23 @@ async def api_image_test(req: ImageRequest):
         return JSONResponse({"error": "image_backend_not_initialized"}, status_code=500)
     prompt = (req.prompt or "A colorful low-poly fox head, studio lighting, high detail, 3D render").strip()
     try:
+        neg = (req.negative_prompt or STATE.negative_prompt or "").strip()
         if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
-            neg = (req.negative_prompt or "").strip()
             if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
                 setattr(BACKEND.cfg, "negative", neg)
-        path = await BACKEND.generate(prompt, width=req.width, height=req.height)
+        w = req.width if (req.width and req.width > 0) else STATE.image_width
+        h = req.height if (req.height and req.height > 0) else STATE.image_height
+        path = await _generate_with_negative_support(prompt, width=w, height=h, negative=neg)
         path = ensure_in_output_dir(path)
-        return ImageResponse(filename=path.name, relpath=rel_for_ui_path(path), width=req.width, height=req.height)
+        rel = rel_for_ui_path(path)
+        await broadcast("image", rel)
+        return ImageResponse(filename=path.name, relpath=rel, rel=rel, width=w, height=h)
     except Exception as e:
         return JSONResponse({"error": f"{e}"}, status_code=502)
 
 # ---------- Backend switching & cloud toggle ----------
 
 def _rebuild_backend(force_name: Optional[str] = None) -> ImageBackend:
-    """
-    Re-initialize the image backend using runtime overrides (backend name, cloud allow).
-    """
     global BACKEND
     if force_name:
         STATE.image_backend_name = force_name.lower()
@@ -1197,21 +1184,15 @@ def _rebuild_backend(force_name: Optional[str] = None) -> ImageBackend:
 
 @app.post("/api/settings/image_backend")
 async def api_switch_image_backend(req: ImageBackendSwitch):
-    """
-    Runtime switch of image backend with validation and optional secret checks.
-    """
     target = req.backend.lower()
     if target not in {"comfyui", "pollinations"}:
         return JSONResponse({"ok": False, "error": "invalid_backend"}, status_code=400)
-
     if target == "pollinations" and not STATE.allow_cloud:
         return JSONResponse({"ok": False, "error": "not_allowed", "reason": "cloud_blocked"}, status_code=403)
-
     if target == "pollinations":
         secret = _env_str("POLLINATIONS_SECRET", "")
         if not secret:
             return JSONResponse({"ok": False, "error": "missing_secret", "reason": "missing_secret"}, status_code=400)
-
     try:
         _rebuild_backend(force_name=target)
         await broadcast("status", f"image_backend:{target}")
@@ -1225,9 +1206,6 @@ class ImageAllowCloudReq(BaseModel):
 
 @app.post("/api/settings/image_allow_cloud")
 async def api_image_allow_cloud(req: ImageAllowCloudReq):
-    """
-    Toggle permission to use cloud backends. Accept both 'allow' and 'allow_cloud' field names.
-    """
     val = req.allow if req.allow is not None else req.allow_cloud
     if val is None:
         return JSONResponse({"ok": False, "error": "missing_field_allow"}, status_code=400)
@@ -1240,9 +1218,36 @@ async def api_image_allow_cloud(req: ImageAllowCloudReq):
     except Exception as e:
         return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
 
+# ---------- Image size & negative prompt settings ----------
+
+@app.get("/api/settings/image_size")
+async def get_image_size():
+    return {"width": STATE.image_width, "height": STATE.image_height}
+
+@app.post("/api/settings/image_size")
+async def set_image_size(s: ImageSizeSettings):
+    STATE.image_width = int(s.width)
+    STATE.image_height = int(s.height)
+    await broadcast("status", f"image_size:{STATE.image_width}x{STATE.image_height}")
+    return {"ok": True, "width": STATE.image_width, "height": STATE.image_height}
+
+@app.get("/api/settings/negative_prompt")
+async def get_negative_prompt():
+    return {"negative_prompt": STATE.negative_prompt}
+
+@app.post("/api/settings/negative_prompt")
+async def set_negative_prompt(s: NegativePromptSettings):
+    txt = (s.negative_prompt or "").strip()
+    STATE.negative_prompt = txt
+    if BACKEND is not None and LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
+        if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
+            with contextlib.suppress(Exception):
+                setattr(BACKEND.cfg, "negative", txt)
+    await broadcast("status", "negative_prompt:updated")
+    return {"ok": True, "negative_prompt": STATE.negative_prompt}
+
 # ---------- App entry ----------
 
 if __name__ == "__main__":
     import uvicorn
-    # Serve only on localhost for privacy
     uvicorn.run("app:app", host="127.0.0.1", port=8080, reload=False)
