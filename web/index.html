@@ -36,6 +36,7 @@
     }
     button:hover { background: #2a3041; border-color: #3a4052; }
     button:active { transform: translateY(1px); }
+    button:disabled { opacity: .6; cursor: not-allowed; }
     .btn-ok { border-color: #2d4a3b; }
     .btn-danger { border-color: #5a2d2d; color: #ffdada; }
     .status {
@@ -163,14 +164,14 @@
             <button id="btn-plan">Senden</button>
           </div>
 
-          <!-- NEW: Negative Prompt -->
+          <!-- Negative Prompt (jetzt für alle Backends übergeben) -->
           <div class="row" style="margin-bottom:8px;">
-            <textarea id="neg-input" placeholder="Negative Prompt (nur ComfyUI)"></textarea>
+            <textarea id="neg-input" placeholder="Negative Prompt (z.B. low quality, blurry, extra fingers)"></textarea>
           </div>
 
-          <!-- NEW: Direct Generate for ComfyUI -->
+          <!-- Direct Generate (nutzt aktives Backend) -->
           <div class="row" style="margin-bottom:8px;">
-            <button id="btn-direct">Direct Generate (ComfyUI)</button>
+            <button id="btn-direct">Direct Generate</button>
           </div>
 
           <div class="row" style="margin-bottom:8px;">
@@ -602,6 +603,8 @@
     $('#btn-plan').addEventListener('click', async () => {
       const text = $('#plan-input').value.trim();
       if (!text) return;
+      const btn = $('#btn-plan');
+      btn.disabled = true;
       try {
         const size = currentSizePayload();
         const r = await fetch('/api/plan', {
@@ -609,18 +612,21 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text, tags: [], width: size.width, height: size.height })
         });
-        const j = await r.json();
-        if (j.prompt) { log(promptLog, j.prompt); statusEl.textContent = t('prompt_created'); }
-        else if (j.error) { log(statusLog, `plan error: ${j.error}`); }
+        const j = await r.json().catch(() => ({}));
+        if (r.ok && j.prompt) { log(promptLog, j.prompt); statusEl.textContent = t('prompt_created'); }
+        else { log(statusLog, `plan failed: ${j.detail || j.error || r.status}`); }
       } catch (e) { log(statusLog, `plan exception: ${e}`); }
+      finally { btn.disabled = false; }
     });
 
-    // NEW: Direct Generate (ComfyUI)
+    // Direct Generate (nutzt aktives Backend, negativer Prompt wird immer gesendet)
     document.getElementById('btn-direct').addEventListener('click', async () => {
       const prompt = document.getElementById('plan-input').value.trim();
       const negative = document.getElementById('neg-input').value.trim();
       if (!prompt) return;
 
+      const btn = document.getElementById('btn-direct');
+      btn.disabled = true;
       const size = currentSizePayload();
       try {
         const r = await fetch('/api/image/direct', {
@@ -633,7 +639,7 @@
             height: size.height
           })
         });
-        const j = await r.json();
+        const j = await r.json().catch(() => ({}));
         if (r.ok && j.rel) {
           setImage(j.rel, prompt);
           log(statusLog, `direct image: ${j.rel}`);
@@ -643,11 +649,15 @@
         }
       } catch (e) {
         log(statusLog, `direct exception: ${e}`);
+      } finally {
+        btn.disabled = false;
       }
     });
 
     // Testbild mit optionaler Größe und negativem Prompt
     $('#btn-test').addEventListener('click', async () => {
+      const btn = $('#btn-test');
+      btn.disabled = true;
       try {
         const size = currentSizePayload();
         const negative = document.getElementById('neg-input').value.trim();
@@ -660,7 +670,7 @@
             negative_prompt: negative || null
           })
         });
-        const j = await r.json();
+        const j = await r.json().catch(() => ({}));
         if (r.ok && j.rel) {
           setImage(j.rel, `Test ${size.width}×${size.height}`);
           log(statusLog, `test image: ${j.rel}`);
@@ -668,6 +678,7 @@
           log(statusLog, `test failed: ${j.detail || j.error || r.status}`);
         }
       } catch (e) { log(statusLog, `test exception: ${e}`); }
+      finally { btn.disabled = false; }
     });
 
     // Optional: Cloud erlauben, bevor auf Pollinations gewechselt wird
@@ -688,6 +699,7 @@
     btnApplyBackend.addEventListener('click', async () => {
       const backend = backendSelect.value;
       backendWarn.style.display = 'none';
+      btnApplyBackend.disabled = true;
       try {
         if (backend === 'pollinations') {
           const ok = await ensureCloudAllowed();
@@ -715,13 +727,17 @@
         }
       } catch (e) {
         log(statusLog, `${t('backend_switch_failed')}: ${e}`);
+      } finally {
+        btnApplyBackend.disabled = false;
       }
     });
 
-    // Größe anwenden (Client-seitig Anzeige)
+    // Größe anwenden (nur UI, Server nutzt Größe über /api/plan oder /api/image/* Payload)
     btnApplySize.addEventListener('click', async () => {
       try {
         const size = currentSizePayload();
+        widthInput.value = size.width;
+        heightInput.value = size.height;
         updateSizePill();
         statusEl.textContent = t('size_applied_ok');
         log(statusLog, `size applied: ${size.width}×${size.height}`);
@@ -747,7 +763,7 @@
         backendSelect.value = current === 'pollinations' ? 'pollinations' : 'comfyui';
 
         // Warnhinweise
-        const allowCloud = !!(j?.image?.allow_cloud);
+        const allowCloud = !!(j?.allow_cloud ?? j?.image?.allow_cloud);
         if (!allowCloud && backendSelect.value === 'pollinations') {
           backendWarn.textContent = t('backend_warn_cloud_blocked');
           backendWarn.style.display = '';
@@ -755,12 +771,16 @@
           backendWarn.style.display = 'none';
         }
 
-        // Größe initialisieren
-        const w = Number(j?.image?.width) || 512;
-        const h = Number(j?.image?.height) || 512;
+        // Größe initialisieren: bevorzugt current_width/height, fallback auf width_default/height_default
+        const w = Number(j?.image?.current_width ?? j?.image?.width_default ?? 512);
+        const h = Number(j?.image?.current_height ?? j?.image?.height_default ?? 512);
         widthInput.value = w;
         heightInput.value = h;
         updateSizePill();
+
+        // Negativen Prompt initial sichtbar machen (optional)
+        const neg = (j?.image?.negative_prompt || '').trim();
+        if (neg) document.getElementById('neg-input').value = neg;
 
         if (statusEl.dataset.state !== 'connected') {
           statusEl.textContent = t('status_ready');
