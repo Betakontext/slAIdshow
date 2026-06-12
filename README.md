@@ -33,27 +33,41 @@ Note: The app runs without ComfyUI; you will still see status and transcript eve
 
 ### Repository layout
 
-	.
 	├── app.py
-	├── config.py
-	├── mic_check_whisper.py
-	├── models
-	│ └── ggml-base.bin
-	├── outputs
-	│ └── images
-	├── README.md
-	├── requirements.txt
-	├── run.sh
-	├── static
-	└── utils
-	├── audio_test.py
-	└── dev_check.py
+├── comfyui_bridge.py
+├── comfyui.service
+├── image_backend.py
+├── models
+│   ├── ggml-base.bin
+├── outputs
+│   └── images
+├── __pycache__
+├── README.md
+├── requirements.txt
+├── run.sh
+├── static
+├── utils
+│   ├── audio_test.py
+│   ├── dev_check.py
+│   ├── mic_check_whisper.py
+│   ├── test_comfy_local.py
+│   └── verify_runtime.py
+├── web
+│   └── index.html
+└── workflows
+    └── text2img_any45.json
 
 
 
 ---
+### Prerequisites
 
-### Installation (example: ThinkPad X260 / Ubuntu / local)
+- Python 3.9 or newer
+- Local-only services:
+  - Ollama running on 127.0.0.1:11434 (pull your model once)
+  - ComfyUI running on 127.0.0.1:8188 (API enabled)
+
+#### Linux (Debian/Ubuntu)
 
 Install system packages:
 
@@ -63,26 +77,71 @@ BASH
 	sudo apt install -y build-essential cmake pkg-config python3-dev \
 	libportaudio2 libasound2-dev
 
-Prepare project folder:
+Notes:
 
-Put all files from the repo into a new directory, e.g., speechtoimage_ai/
-Open a terminal in this directory
+These are not in requirements.txt; they are OS libraries and headers used by sounddevice/PortAudio and some wheels/builds.
 
-Create and activate a virtual environment:
+
+#### macOS
+
+Install Command Line Tools: xcode-select --install
+Install PortAudio via Homebrew:
 
 BASH
 
-	python3 -m venv .venv
-	source .venv/bin/activate
+	brew install portaudio
 
-Run helper script (optional):
+#### Windows
+
+Recommended: run the PowerShell script below (it creates a venv and installs wheels).
+If you build from source, you may need Microsoft C++ Build Tools.
+If you have trouble with native deps, consider WSL where the Linux steps apply.
+
+
+### Installation (Linux / macOS)
+
+Clone the repository and open a new terminal in the project directory. Run helper script (recommended):
+
+
+Install whisper, create /models folder in the repo and pull Whisper model:
+
+BASH
+
+	pip install --no-cache-dir pywhispercpp
+
+BASH
+
+	mkdir -p models
+	curl -L -o models/ggml-base.bin \
+	https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+	# or tiny:
+	# curl -L -o models/ggml-tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
+
+Linux / macOS:
 
 BASH
 
 	chmod +x run.sh
 	./run.sh
-	
-Start app.py (Server automaticly started)
+
+
+Windows (PowerShell):
+
+BASH
+
+    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+    .\run.ps1
+
+These scripts:
+
+Create/activate a virtual environment
+Upgrade pip and install requirements
+Try to install optional extras (webrtcvad-wheels, pywhispercpp)
+Start the server on 127.0.0.1:8080 (uvicorn)
+
+-----------------------------------------
+
+To start app.py (Server automaticly started)
 
 	python app.py
 	
@@ -91,38 +150,26 @@ Open the browser to use UI:
     http://127.0.0.1:8080
 
 
+Stop via UI in the browser or in terminal via Ctrl+C.
 
 -----------------------------------------
 
 #### Or install dependencies manually (from requirements.txt):
 
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-httpx==0.27.2
-pydantic>=2,<3
-numpy==2.0.1
-sounddevice==0.4.7
-python-dotenv==1.0.1
-setuptools>=68
-wheel>=0.41
-
-Install:
-
 BASH
-
+	python3 -m venv .venv
 	pip install --upgrade pip
 	pip install -r requirements.txt
 	pip install --no-cache-dir webrtcvad-wheels
 	pip install --no-cache-dir pywhispercpp
 
-Load environment from .env:
+To load environment from .env:
 
 BASH
 
 	export $(grep -v '^#' .env | xargs -d '\n')
 
 #### Quick tests
-
 
 Whisper import:
 
@@ -150,7 +197,6 @@ BASH
 	# or tiny:
 	# curl -L -o models/ggml-tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
 
-
 Find audio device:
 
 BASH
@@ -167,18 +213,7 @@ Mic level test:
 
 BASH
 
-	python - <<'PY'
-	import sounddevice as sd, numpy as np
-	sr=48000; dur=3
-	sd.default.samplerate = sr
-	sd.default.channels = 1
-	print(f"Using default input @ {sr} Hz. Please speak for {dur}s…")
-	audio = sd.rec(int(dur*sr), samplerate=sr, channels=1, dtype='float32')
-	sd.wait()
-	x = audio[:,0]
-	peak = float(np.max(np.abs(x))); rms = float(np.sqrt(np.mean(x**2)))
-	print(f"Peak={peak:.3f}, RMS={rms:.3f}, Samples={audio.shape[0]}")
-	PY
+	python utils/audio_test.py
 
 Expected example output when the mic is active:
 
@@ -186,19 +221,7 @@ Using default input @ 48000 Hz. Please speak for 3s…
 Peak=0.368, RMS=0.052
 
 
-
 ####	Whisper setup (pywhispercpp)
-
-Set model path and basic config:
-
-BASH
-
-	export APP_WHISPER_MODEL_PATH="$(pwd)/models/ggml-base.bin"
-	export APP_WHISPER_LANGUAGE="de"        # or "en", or "auto"
-	export APP_WHISPER_THREADS=4
-	export APP_SAMPLE_RATE=48000
-	# Optional: preferred input device by index or exact name
-	# export APP_AUDIO_DEVICE="pulse"        # or exact name/index from sounddevice
 
 Whisper test:
 
@@ -237,8 +260,7 @@ BASH
 Create a Pollinations account and sve your keys, f.e.:
 
 
--> Integrate your key in .env
-
+-> Integrate your key sd ### in .env
 
 
 ####	ComfyUI installation and setup (optional, image generation)

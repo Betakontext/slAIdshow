@@ -1,46 +1,44 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ---- Einstellungen ----
-HOST="${HOST:-127.0.0.1}"         # Nur lokal binden
+# ---- Settings ----
+HOST="${HOST:-127.0.0.1}"         # Bind strictly to localhost
 PORT="${PORT:-8080}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 VENV_DIR="${VENV_DIR:-.venv}"
 REQ_FILE="${REQ_FILE:-requirements.txt}"
-DEV_RELOAD="${DEV_RELOAD:-1}"     # 1 = uvicorn --reload, 0 = ohne reload
-QUIET_PIP="${QUIET_PIP:-0}"       # 1 = weniger Pip-Ausgabe
+DEV_RELOAD="${DEV_RELOAD:-1}"     # 1 = uvicorn --reload, 0 = no reload
+QUIET_PIP="${QUIET_PIP:-0}"       # 1 = quieter pip output
 
-# ---- .env laden (falls vorhanden) ----
-# if [[ -f ".env" ]]; then
-#   set -a
-  # shellcheck disable=SC1090
-#  . "./.env"
-#  set +a
-# fi
-
-# ---- Python-Version prüfen (mindestens 3.9 empfohlen) ----
+# ---- Check Python version (>= 3.9) ----
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
-  echo "[ERROR] ${PYTHON_BIN} nicht gefunden." >&2
+  echo "[ERROR] ${PYTHON_BIN} not found." >&2
   exit 1
 fi
-PY_VER=$("${PYTHON_BIN}" -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-echo "[INFO] Python ${PY_VER} erkannt"
+PY_VER="$("${PYTHON_BIN}" -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+MAJ="$("${PYTHON_BIN}" -c 'import sys;print(sys.version_info.major)')"
+MIN="$("${PYTHON_BIN}" -c 'import sys;print(sys.version_info.minor)')"
+echo "[INFO] Python ${PY_VER} detected"
+if [ "$MAJ" -lt 3 ] || { [ "$MAJ" -eq 3 ] && [ "$MIN" -lt 9 ]; }; then
+  echo "[ERROR] Python >= 3.9 required." >&2
+  exit 1
+fi
 
-# ---- venv anlegen/aktivieren ----
+# ---- Create/activate virtual environment ----
 if [[ ! -d "${VENV_DIR}" ]]; then
   "${PYTHON_BIN}" -m venv "${VENV_DIR}"
 fi
 # shellcheck disable=SC1090
 source "${VENV_DIR}/bin/activate"
 
-# ---- Pip aktualisieren ----
+# ---- Upgrade pip ----
 if [[ "${QUIET_PIP}" == "1" ]]; then
   python -m pip install --upgrade pip -q
 else
   python -m pip install --upgrade pip
 fi
 
-# ---- Requirements installieren (falls vorhanden) ----
+# ---- Install requirements (if present) ----
 if [[ -f "${REQ_FILE}" ]]; then
   if [[ "${QUIET_PIP}" == "1" ]]; then
     pip install -r "${REQ_FILE}" -q
@@ -49,42 +47,65 @@ if [[ -f "${REQ_FILE}" ]]; then
   fi
 fi
 
-# ---- Optional: webrtcvad Wheels (Fallback-freundlich) ----
-# Wenn Installation scheitert, einfach weiter (wir nutzen RMS-VAD in der App)
-if python -c "import webrtcvad" >/dev/null 2>&1; then
-  echo "[INFO] webrtcvad bereits installiert"
+# ---- Optional: webrtcvad fallback wheels (non-fatal) ----
+# If installation fails we proceed; app can use RMS-VAD.
+if python - <<'PY' >/dev/null 2>&1
+import importlib
+importlib.import_module("webrtcvad")
+PY
+then
+  echo "[INFO] webrtcvad already installed"
 else
-  echo "[INFO] versuche Installation: webrtcvad-wheels"
+  echo "[INFO] attempting install: webrtcvad-wheels"
   if ! pip install --no-cache-dir webrtcvad-wheels >/dev/null 2>&1; then
-    echo "[WARN] webrtcvad-wheels Installation fehlgeschlagen – fahre ohne WebRTC VAD fort."
+    echo "[WARN] webrtcvad-wheels install failed – continuing without WebRTC VAD."
   fi
 fi
 
-# ---- pywhispercpp (falls nicht schon in requirements) ----
-if python -c "import pywhispercpp" >/dev/null 2>&1; then
-  echo "[INFO] pywhispercpp bereits installiert"
+# ---- pywhispercpp (if not already available) ----
+if python - <<'PY' >/dev/null 2>&1
+import importlib
+importlib.import_module("pywhispercpp")
+PY
+then
+  echo "[INFO] pywhispercpp already installed"
 else
-  echo "[INFO] installiere pywhispercpp (Wheel bevorzugt)"
+  echo "[INFO] installing pywhispercpp (prefer wheels)"
   if ! pip install --no-cache-dir pywhispercpp; then
-    echo "[ERROR] pywhispercpp konnte nicht installiert werden. Bitte prüfe Plattform/Wheels."
-    echo "        Siehe: https://github.com/absadiki/pywhispercpp"
+    echo "[ERROR] pywhispercpp could not be installed. Please verify platform/wheels."
+    echo "        See: https://github.com/absadiki/pywhispercpp"
     exit 2
   fi
 fi
 
-# ---- Ausgabeverzeichnis anlegen ----
+# ---- Ensure output directory exists ----
 mkdir -p outputs/images
 
-# ---- Preflight-Checks (optional, ohne Abbruch) ----
+# ---- Preflight: local port checks via Python sockets (no /dev/tcp needed) ----
 function check_local() {
   local name="$1" host="$2" port="$3"
-  if timeout 1 bash -c "</dev/tcp/${host}/${port}" 2>/dev/null; then
-    echo "[OK] ${name} erreichbar auf ${host}:${port}"
+  if python - <<PY >/dev/null 2>&1
+import socket
+s=socket.socket()
+s.settimeout(1.0)
+ok=False
+try:
+    s.connect(("${host}", int(${port})))
+    ok=True
+except Exception:
+    ok=False
+finally:
+    s.close()
+print("ok" if ok else "no")
+PY
+  then
+    echo "[OK] ${name} reachable at ${host}:${port}"
   else
-    echo "[WARN] ${name} NICHT erreichbar auf ${host}:${port} – die App startet trotzdem."
+    echo "[WARN] ${name} NOT reachable at ${host}:${port} – continuing anyway."
   fi
 }
-# Ollama und ComfyUI Host/Port aus ENV (Default wie in app.py)
+
+# Ollama & ComfyUI hosts/ports, matching app defaults
 OLLAMA_HOST="${APP_OLLAMA_HOST:-127.0.0.1}"
 OLLAMA_PORT="${APP_OLLAMA_PORT:-11434}"
 COMFY_HOST="${APP_COMFY_HOST:-127.0.0.1}"
@@ -93,11 +114,11 @@ COMFY_PORT="${APP_COMFY_PORT:-8188}"
 check_local "Ollama" "${OLLAMA_HOST}" "${OLLAMA_PORT}"
 check_local "ComfyUI" "${COMFY_HOST}" "${COMFY_PORT}"
 
-# ---- Uvicorn Start ----
+# ---- Start Uvicorn ----
 EXTRA_FLAGS=()
 if [[ "${DEV_RELOAD}" == "1" ]]; then
   EXTRA_FLAGS+=(--reload)
 fi
 
-echo "Starte Server auf http://${HOST}:${PORT}"
+echo "Starting server at http://${HOST}:${PORT}"
 exec uvicorn app:app --host "${HOST}" --port "${PORT}" "${EXTRA_FLAGS[@]}"
