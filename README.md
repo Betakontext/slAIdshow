@@ -243,9 +243,7 @@ Create a Pollinations account and sve your keys, f.e.:
 
 ####	ComfyUI installation and setup (optional, image generation)
 
-Install and start ComfyUI 
-
-Prepare your system:
+To install and start ComfyUI, prepare your system:
 
 BASH
 
@@ -294,9 +292,11 @@ models/clip
 models/unet
 models/ipadapter, models/controlnet etc. (optional)
 
-Copy the comfyui.service into your /etc/systemd/system/ or create the service file in  /etc/systemd/system/comfyui.service:
+Copy the comfyui.service from the repo into your /etc/systemd/system/ or create the service file in  /etc/systemd/system/
 
-	sudo cp -p yourpathto/comfyui.service /etc/systemd/system/ 
+comfyui.service:
+
+	sudo cp -p yourpathto_speechtoimage_ai/comfyui.service /etc/systemd/system/
 
 Addapt the paths to your ComfyUi Installation.
 

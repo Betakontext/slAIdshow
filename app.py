@@ -56,6 +56,26 @@ def _env_bool01(k: str, d: int = 0) -> bool:
     v = (os.getenv(k, str(d)) or "").strip().lower()
     return v in {"1", "true", "yes", "on"}
 
+
+def _backend_default_size(backend_name: str) -> tuple[int, int]:
+    """
+    Liefert backend-spezifische Defaults aus .env:
+    - comfyui: APP_COMFY_WIDTH/HEIGHT, Fallback 128×128
+    - pollinations: POLLINATIONS_WIDTH/HEIGHT, Fallback 1024×1024
+    """
+    b = (backend_name or "comfyui").lower()
+    if b == "pollinations":
+        w = _env_int("POLLINATIONS_WIDTH", 1024)
+        h = _env_int("POLLINATIONS_HEIGHT", 1024)
+    else:
+        w = _env_int("APP_COMFY_WIDTH", 128)
+        h = _env_int("APP_COMFY_HEIGHT", 128)
+    w = max(64, min(2048, w))
+    h = max(64, min(2048, h))
+    return w, h
+
+
+
 # ---------- Optional dotenv loading ----------
 
 ENV_PATH: Optional[str] = None
@@ -835,10 +855,17 @@ async def lifespan(app: FastAPI):
         BACKEND = None
         print(f"[BACKEND] initialization failed: {e}")
 
-    STATE.image_width = APP_IMAGE_WIDTH
-    STATE.image_height = APP_IMAGE_HEIGHT
+    # Backend-spezifische Defaults setzen
+    try:
+        dw, dh = _backend_default_size(STATE.image_backend_name)
+        STATE.image_width = dw
+        STATE.image_height = dh
+    except Exception:
+        STATE.image_width = APP_IMAGE_WIDTH
+        STATE.image_height = APP_IMAGE_HEIGHT
 
     STATE.ollama_ready_at = time.time() + (WARMUP_GRACE_SEC if WARMUP_ENABLE else 0.0)
+
     warmup_task: Optional[asyncio.Task] = None
     if WARMUP_ENABLE:
         async def _silent_ollama_warmup():
@@ -913,12 +940,17 @@ async def health() -> HealthReport:
         pollinations_key_present=bool(_env_str("POLLINATIONS_SECRET", "")),
     )
 
-# ---------- Config endpoint ----------
-
 @app.get("/config")
 async def get_config():
     wpath = WHISPER_MODEL_PATH
     masked = (wpath[:3] + "..." + wpath[-10:]) if wpath and len(wpath) > 16 else wpath
+
+    # Backend-Defaults bestimmen
+    try:
+        def_w, def_h = _backend_default_size(STATE.image_backend_name)
+    except Exception:
+        def_w, def_h = APP_IMAGE_WIDTH, APP_IMAGE_HEIGHT
+
     return {
         "env_file": ENV_PATH or "(env vars only)",
         "audio": {"device_pref": AUDIO_DEVICE_PREF, "sample_rate": SAMPLE_RATE, "frame_ms": FRAME_MS, "stream_latency_sec": APP_STREAM_LATENCY_SEC},
@@ -932,13 +964,41 @@ async def get_config():
             "backend": STATE.image_backend_name,
             "allow_cloud": STATE.allow_cloud,
             "output_dir": str(OUTPUT_DIR),
-            "width_default": APP_IMAGE_WIDTH,
-            "height_default": APP_IMAGE_HEIGHT,
+            "width_default": def_w,
+            "height_default": def_h,
             "current_width": STATE.image_width,
             "current_height": STATE.image_height,
             "negative_prompt": STATE.negative_prompt,
         },
     }
+
+
+# ---------- Config endpoint ----------
+
+@app.post("/api/settings/image_backend")
+async def api_switch_image_backend(req: ImageBackendSwitch):
+    target = req.backend.lower()
+    if target not in {"comfyui", "pollinations"}:
+        return JSONResponse({"ok": False, "error": "invalid_backend"}, status_code=400)
+    if target == "pollinations" and not STATE.allow_cloud:
+        return JSONResponse({"ok": False, "error": "not_allowed", "reason": "cloud_blocked"}, status_code=403)
+    if target == "pollinations":
+        secret = _env_str("POLLINATIONS_SECRET", "")
+        if not secret:
+            return JSONResponse({"ok": False, "error": "missing_secret", "reason": "missing_secret"}, status_code=400)
+    try:
+        _rebuild_backend(force_name=target)
+        # NEU: Laufzeitgröße auf Backend-Defaults zurücksetzen,
+        # damit UI (current_*) sofort die korrekten Werte sieht.
+        def_w, def_h = _backend_default_size(target)
+        STATE.image_width = def_w
+        STATE.image_height = def_h
+
+        await broadcast("status", f"image_backend:{target}")
+        return {"ok": True, "backend": target}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
+
 
 # ---------- SSE: /events ----------
 
