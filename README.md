@@ -353,7 +353,7 @@ Open the UI:
 
 If .env is pushed accidentaly to repository, change your API key and reset it in your local .env
 
-Remove .env from git trecking:
+Remove .env from git tracking:
 
 	# Remove from index (tracking), keep file locally
 	git rm --cached .env
