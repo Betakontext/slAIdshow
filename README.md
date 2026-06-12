@@ -1,361 +1,411 @@
 # speechtoimage_ai
 
-## Pipeline for AI live-illustrations (lokal, Browser-UI)
+## Pipeline for AI Live Illustrations (local, Browser UI)
 
-A local real-time application that listens and periodically generates images. Everything runs on your machine: audio capture from the system microphone, transcription via Whisper (pywhispercpp), prompt optimization via Ollama (optional), and image generation via ComfyUI (optional). A simple browser UI provides Start/Stop and displays a growing gallery of generated images along with live transcript and the latest prompt.
-
-Note: The app runs without ComfyUI; you will still see status and transcript events. ComfyUI can be added later.
+A local real-time application that listens via your system microphone and periodically generates images. Everything runs on your machine: audio capture, transcription via Whisper (pywhispercpp), optional prompt optimization via Ollama, and optional image generation via ComfyUI or Pollinations. A simple browser UI provides Start/Stop and shows a growing gallery of generated images along with live transcript and the latest prompt. The app also runs without ComfyUI; you will still see status and transcript events.
 
 ---
 
 ### Features
 
-- Browser UI (local, FastAPI) with Start/Stop
-- Local audio capture from system device (e.g., PipeWire/PulseAudio)
+- Local Browser UI (FastAPI) with Start/Stop controls
+- Local audio capture from system devices
 - Periodic transcription snapshots (configurable, e.g., every 3–6 s)
 - Optional: Prompt optimization via Ollama (localhost:11434)
-- Optional: Image generation via ComfyUI (localhost:8188)
+- Optional: Image generation via:
+  - ComfyUI (localhost:8188)
+  - Pollinations (cloud; requires API key)
 - Live updates in the browser via Server-Sent Events (SSE)
-- Strictly local connections (127.0.0.1)
+- Strictly local connections for local backends (127.0.0.1)
 
 ---
 
-### System requirements
+### System Requirements
 
 - OS: Linux tested (PipeWire/PulseAudio). macOS/Windows should work with adjusted device names.
-- Python: 3.10 or newer
+- Python: 3.9 or newer (3.10+ recommended)
 - Working microphone
-- pywhispercpp installed and running locally (for audio transcription)
+- pywhispercpp installed locally (for audio transcription)
 - Ollama installed and running locally (for LLM prompt optimization)
-- ComfyUI running locally with API on port 8188 (for image generation)
+- Optional: ComfyUI running locally with API on port 8188 (for image generation)
+- Optional: Pollinations account + API key (for cloud image generation)
 
 ---
 
-### Repository layout
+### Repository Layout
 
-	.
-	├── app.py
-	├── config.py
-	├── mic_check_whisper.py
-	├── models
-	│ └── ggml-base.bin
-	├── outputs
-	│ └── images
-	├── README.md
-	├── requirements.txt
-	├── run.sh
-	├── static
-	└── utils
-	├── audio_test.py
-	└── dev_check.py
-
-
+- app.py
+- comfyui_bridge.py
+- comfyui.service
+- image_backend.py
+- models/
+  - ggml-base.bin
+- outputs/
+  - images/
+- README.md
+- requirements.txt
+- run.sh
+- run.ps1
+- static/
+- utils/
+  - audio_test.py
+  - dev_check.py
+  - mic_check_whisper.py
+  - test_comfy_local.py
+  - verify_runtime.py
+- web/
+  - index.html
+- workflows/
+  - text2img_any45.json
 
 ---
 
-### Installation (example: ThinkPad X260 / Ubuntu / local)
+### Prerequisites
 
-Install system packages:
+Local-only services (optional but recommended):
+- pywhispercpp (create /model folder and pull a model, f.e. ggml-base)
+- Ollama on 127.0.0.1:11434 (pull at least one model, f.e. phi3:mini)
+- ComfyUI on 127.0.0.1:8188 (Model pulled, f.e. anything-v4.5-pruned.safetensors; API enabled)
 
-BASH
+Linux (Debian/Ubuntu) — install OS packages for native dependencies and audio I/O:
 
 	sudo apt update
-	sudo apt install -y build-essential cmake pkg-config python3-dev \
-	libportaudio2 libasound2-dev
+	sudo apt install -y build-essential cmake pkg-config python3-dev libportaudio2 libasound2-dev
+	Note: These are OS libraries and headers used by sounddevice/PortAudio and potential builds. They are not part of requirements.txt.
 
-Prepare project folder:
+macOS:
 
-Put all files from the repo into a new directory, e.g., speechtoimage_ai/
-Open a terminal in this directory
+	xcode-select --install
+	brew install portaudio
 
-Create and activate a virtual environment:
+Windows:
 
-BASH
+- Recommended: Use the PowerShell script below (creates a venv and installs wheels).
+- If building from source, you may need Microsoft C++ Build Tools.
+- If native deps are problematic, consider WSL (use the Linux steps).
 
-	python3 -m venv .venv
-	source .venv/bin/activate
+---
 
-Run helper script (optional):
+### Installation
 
-BASH
+Clone the repository and open a terminal in the project directory.
+
+Create your peronalized .env from .env.example:
+
+	cp .env.example .env
+
+Fill .env with your lokal values, never commit:
+
+	APP_OUTPUT_DIR=./outputs/images
+	APP_COMFY_WORKFLOW=./workflows/text2img_any45.json
+	APP_COMFY_OUTPUT_DIR=/path/to/ComfyUI/output
+	POLLINATIONS_API_KEY=sk-xxxx  #(required if using Pollinations)
+
+
+Option A — Helper Scripts (recommended)
+
+Linux / macOS:
 
 	chmod +x run.sh
 	./run.sh
-	
-Start app.py (Server automaticly started)
 
-	python app.py
-	
-Open the browser to use UI:
+Windows (PowerShell):
 
-    http://127.0.0.1:8080
+	Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+	.\run.ps1
 
+What the scripts do:
+- Create/activate a virtual environment
+- Upgrade pip and install requirements
+- Attempt to install optional extras (webrtcvad-wheels, pywhispercpp)
+- Start the server on 127.0.0.1:8080 (uvicorn)
 
+Open the UI in your browser:
 
------------------------------------------
+- http://127.0.0.1:8080
 
-#### Or install dependencies manually (from requirements.txt):
+Stop via the UI or press Ctrl+C in the terminal.
 
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-httpx==0.27.2
-pydantic>=2,<3
-numpy==2.0.1
-sounddevice==0.4.7
-python-dotenv==1.0.1
-setuptools>=68
-wheel>=0.41
+Option B — Manual Setup
 
-Install:
+Create and activate a virtual environment, then install dependencies:
 
-BASH
+	python3 -m venv .venv
 
-	pip install --upgrade pip
+Linux/macOS:
+
+	source .venv/bin/activate
+
+Windows PowerShell:
+
+	.venv\Scripts\Activate.ps1
+
+	python -m pip install --upgrade pip
 	pip install -r requirements.txt
-	pip install --no-cache-dir webrtcvad-wheels
 	pip install --no-cache-dir pywhispercpp
 
-Load environment from .env:
+Optional VAD (may require source build on some systems):
 
-BASH
+	pip install webrtcvad
 
-	export $(grep -v '^#' .env | xargs -d '\n')
+Alternatively, try wheels:
 
-#### Quick tests
+	pip install --no-cache-dir webrtcvad-wheels
 
+Fetch a Whisper model and place it in ./models:
 
-Whisper import:
+	mkdir -p models
+	curl -L -o models/ggml-base.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+	# or tiny: curl -L -o models/ggml-tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
 
-BASH
+Start the server:
+
+App starts uvicorn from app.py:
+
+	python app.py
+
+Or via uvicorn directly:
+
+	uvicorn app:app --host 127.0.0.1 --port 8080
+
+Open the UI:
+
+- http://127.0.0.1:8080
+
+---
+
+### Quick Tests
+
+Check Whisper import:
 
 	python - <<'PY'
 	from pywhispercpp.model import Model as WhisperModel
 	print("pywhispercpp import OK")
 	PY
 
-If not found, try:
-
-BASH
+If not found:
 
 	pip uninstall -y pywhispercpp
 	pip install --no-cache-dir pywhispercpp
 
-Create /models folder and pull Whisper model:
-
-BASH
-
-	mkdir -p models
-	curl -L -o models/ggml-base.bin \
-	https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
-	# or tiny:
-	# curl -L -o models/ggml-tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
-
-
-Find audio device:
-
-BASH
+Audio device listing:
 
 	python - <<'PY'
 	import sounddevice as sd
 	print(sd.query_devices())
 	PY
 
-Look for an input device (max_input_channels > 0). Use the exact name or index for configuration/tests.
+Look for an input device where max_input_channels > 0. Use the device index/name in your .env if needed.
 
+Microphone level test:
 
-Mic level test:
+	python utils/audio_test.py
 
-BASH
+Whisper live mic test:
 
-	python - <<'PY'
-	import sounddevice as sd, numpy as np
-	sr=48000; dur=3
-	sd.default.samplerate = sr
-	sd.default.channels = 1
-	print(f"Using default input @ {sr} Hz. Please speak for {dur}s…")
-	audio = sd.rec(int(dur*sr), samplerate=sr, channels=1, dtype='float32')
-	sd.wait()
-	x = audio[:,0]
-	peak = float(np.max(np.abs(x))); rms = float(np.sqrt(np.mean(x**2)))
-	print(f"Peak={peak:.3f}, RMS={rms:.3f}, Samples={audio.shape[0]}")
-	PY
+	python utils/mic_check_whisper.py
 
-Expected example output when the mic is active:
+---
 
-Using default input @ 48000 Hz. Please speak for 3s…
-Peak=0.368, RMS=0.052
+### Ollama Setup (Optional LLM)
 
-
-
-Whisper (pywhispercpp)
-
-Set model path and basic config:
-
-BASH
-
-	export APP_WHISPER_MODEL_PATH="$(pwd)/models/ggml-base.bin"
-	export APP_WHISPER_LANGUAGE="de"        # or "en", or "auto"
-	export APP_WHISPER_THREADS=4
-	export APP_SAMPLE_RATE=48000
-	# Optional: preferred input device by index or exact name
-	# export APP_AUDIO_DEVICE="pulse"        # or exact name/index from sounddevice
-
-Whisper test:
-
-BASH
-
-	python mic_check_whisper.py
-
-Tips:
-
-Language can be “de”, “en”, or “auto”
-Tune threads to your CPU
-Very short segments can be choppy → keep rolling window enabled (already in code)
-
-
-Ollama setup (LLM, optional)
-To install Ollama (see official documentation). Then:
-
-BASH
+Install Ollama (see official docs), then:
 
 	ollama serve
-	ollama pull phi3:mini     # or another model (llama3, mistral, phi3, etc.)
-
-Ensure the server listens on 127.0.0.1:11434 (default). Make sure APP_OLLAMA_MODEL matches your pulled model.
+	ollama pull phi3:mini    (or llama3, mistral, etc.)
 
 Sanity check:
 
-BASH
+	curl -s http://127.0.0.1:11434/api/generate -H "Content-Type: application/json" -d '{"model":"phi3:mini","prompt":"Say hello","stream":false,"options":{"temperature":0.2}}'
 
-	curl -s http://127.0.0.1:11434/api/generate \
-	-H "Content-Type: application/json" \
-	-d '{"model":"phi3:mini","prompt":"Say hello","stream":false,"options":{"temperature":0.2}}'
+Ensure APP_OLLAMA_MODEL IN the file .env matches the model you pulled and that Ollama listens on 127.0.0.1:11434.
 
-ComfyUI setup (optional, image generation)
+---
 
-Install and start ComfyUI locally (API at http://127.0.0.1:8188).
-Export your workflow JSON in ComfyUI.
-In app.py, adapt:
-build_comfy_prompt_from_text(): turn the LLM text into your node-graph (prompt/negative prompt, sampler, VAE, SaveImage, etc.).
-comfyui_run_and_wait(): adjust reading the history (filename/subfolder).
+### ComfyUI Setup (Optional Local Image Generation)
 
-Images can be written by ComfyUI to a known folder or copied into ./outputs/images. The UI serves images via /static/... (APP_OUTPUT_DIR). Without ComfyUI, the app remains useful (status/transcript/prompt events).
-Environment variables
+Create a ComfyUI folder, where you want it.
+Install and start ComfyUI locally (API at http://127.0.0.1:8188):
 
-You can use .env or export directly:
+	sudo apt update
+	sudo apt install -y git python3 python3-venv python3-dev build-essential libglib2.0-0 libsm6 libxrender1 libxext6	git clone https://github.com/comfyanonymous/ComfyUI.git
+	cd ComfyUI
+	python3 -m venv .venv
+	source .venv/bin/activate
+	python -m pip install --upgrade pip setuptools wheel
+	pip install -r requirements.txt
+	python main.py --listen 127.0.0.1 --port 8188
 
-BASH
+Models for ComfyUI (checkpoints/VAEs/LoRAs) must be placed under ComfyUI/models as required by your workflow (e.g., models/checkpoints, models/vae, models/clip, models/unet, etc.).
 
-	# Audio
-	export APP_AUDIO_DEVICE=""            # index or exact source name
-	export APP_SAMPLE_RATE="48000"
-	export APP_FRAME_DURATION_MS="20"
-	export APP_DISABLE_VAD="1"            # 1 = disable WebRTC VAD, use RMS gate
-	export APP_VAD_AGGRESSIVENESS="0"     # if WebRTC VAD enabled later: 0–3
-	export APP_RMS_VAD_THRESHOLD="0.012"
-	export APP_MAX_SILENCE_MS="300"
-	export APP_SNAPSHOT_SEC="6.0"         # new snapshot every X seconds
+Optional systemd service (Linux):
 
-	# Whisper
-	export APP_WHISPER_MODEL_PATH="$(pwd)/models/ggml-base.bin"
-	export APP_WHISPER_LANGUAGE="de"
-	export APP_WHISPER_THREADS="4"
-	export APP_WHISPER_TEMPERATURE="0.0"
+Copy comfyui.service to /etc/systemd/system/, adapt paths, then:
 
-	# Ollama (optional)
-	export APP_OLLAMA_HOST="127.0.0.1"
-	export APP_OLLAMA_PORT="11434"
-	export APP_OLLAMA_MODEL="glm-4.7:cloud"
-	export APP_OLLAMA_TEMPERATURE="0.2"
+	sudo systemctl daemon-reload
+	sudo systemctl enable comfyui
+	sudo systemctl start comfyui
+	sudo systemctl status comfyui
 
-	# ComfyUI (optional)
-	export APP_COMFY_HOST="127.0.0.1"
-	export APP_COMFY_PORT="8188"
+CPU-only mode (if no CUDA/GPU available) inside the ComfyUI venv:
 
-	# Output directory for images
-	export APP_OUTPUT_DIR="./outputs/images"
+	pip install --upgrade --force-reinstall --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+	pip uninstall -y xformers triton
+	python - << 'PY'
+	import torch
+	print("torch", torch.__version__, "cuda_available?", torch.cuda.is_available())
+	PY
 
-Start / Stop
+Test the local ComfyUI bridge from this repo (with ComfyUI running on 127.0.0.1:8188):
 
-Load environment variables and start the server:
+	APP_DISABLE_COMFYUI=0 python utils/test_comfy_local.py --workflow ./workflows/text2img_any45.json --prompt "Photorealistic classroom, natural light" --width 512 --height 512 --steps 20 --cfg 6.5 --sampler dpmpp_2m --seed 1234 --timeout 300
 
-BASH
+---
+
+### Pollinations Setup (Optional Cloud Image Generation)
+
+Use Pollinations as an alternative image backend (cloud). This requires an API key and will send prompts to Pollinations’ API.
+
+1) Create a Pollinations account and obtain your API key.
+2) Add the key to your `.env` (example variable names):
+
+   - POLLINATIONS_API_KEY=sk-xxxx
+   - APP_IMAGE_BACKEND=pollinations
+
+3) Optional tuning vars (if supported by your bridge/implementation):
+
+   - POLLINATIONS_MODEL=flux
+   - POLLINATIONS_NOLOGO=1
+   - POLLINATIONS_SEED=1234
+   - POLLINATIONS_USE_V1=1
+   - POLLINATIONS_WIDTH=1024
+   - POLLINATIONS_HEIGHT=1024
+
+4) Start the app; when APP_IMAGE_BACKEND=pollinations is set and the key is present, the app will call Pollinations for image generation instead of ComfyUI.
+
+Notes:
+- Pollinations is a cloud service; prompts and generation requests are sent over the internet.
+- Keep your API key private. Do not commit `.env` to version control.
+
+---
+
+### Environment Variables to be set to your personal setting in (.env)
+
+Create your peronalized .env from .env.example:
+
+	cp .env.example .env
+
+Fill .env with your lokal values, never commit:
+
+	APP_OUTPUT_DIR=./outputs/images
+	APP_COMFY_WORKFLOW=./workflows/text2img_any45.json
+	APP_COMFY_OUTPUT_DIR=/path/to/ComfyUI/output
+	POLLINATIONS_API_KEY=sk-xxxx  #(required if using Pollinations)
+
+Load env and start:
+
+Linux/macOS:
 
 	source .venv/bin/activate
-	# Start server
 	python app.py
-	
-oder
+
+or:
 
 	uvicorn app:app --host 127.0.0.1 --port 8080
-	
-	
-Open the browser to use UI:
 
-    http://127.0.0.1:8080
+Open the UI:
 
---------------------------------------
+- http://127.0.0.1:8080
 
-Click “Start” → Local audio recording begins; status messages appear. Every ~3–6 s (configurable via APP_SNAPSHOT_SEC) a transcript snapshot is produced. The LLM prompt is generated if Ollama is running. If ComfyUI is not available, a clear status is shown and the app continues to function.
+---
 
-Click “Stop” in the UI or stop uvicorn in the terminal (Ctrl+C).
+### Usage
 
---------------------------------------
+- Click “Start” → local audio recording begins; status messages appear. Every ~3–6 s (configurable via APP_SNAPSHOT_SEC) a transcript snapshot is produced. The LLM prompt is generated if Ollama is running. If ComfyUI is not available, a clear status is shown and the app continues to function. If APP_IMAGE_BACKEND=pollinations and a valid key is present, images are generated via the Pollinations API.
 
+- Click “Stop” in the UI or press Ctrl+C in the terminal.
 
-#### Troubleshooting
+---
 
-No transcripts:
+### Troubleshooting
 
-Check audio levels (see test script).
-Ensure the correct device is set (APP_AUDIO_DEVICE).
-Set APP_DISABLE_VAD=1 and tune APP_RMS_VAD_THRESHOLD (e.g., 0.01–0.02).
-
-“comfy_unavailable”:
-
-ComfyUI is not running → OK for now. Start it later or disable ComfyUI code paths.
-
-“pipeline_error: …” for LLM:
-
-Is Ollama running (ollama serve)?
-Is a local model available (ollama pull phi3:mini)?
-Does APP_OLLAMA_MODEL match the pulled model?
-
-Microphone muted:
-
-pavucontrol → Input Devices → unmute and set level ~70–90%
-
-Port conflict on 8080:
-
-Start uvicorn on another port: --port 8081
-
-Windows/macOS:
-
-Device names differ. Use sounddevice.query_devices() to find names/indices. Set APP_AUDIO_DEVICE accordingly.
+- No transcripts:
+  Check audio levels (see utils/audio_test.py).
+  Ensure the correct input device (APP_AUDIO_DEVICE).
+  Try APP_DISABLE_VAD=1 and tune APP_RMS_VAD_THRESHOLD (e.g., 0.01–0.02).
+- “comfy_unavailable”:
+  ComfyUI is not running → OK. Start it later or disable ComfyUI features.
+- “pipeline_error: …” for LLM:
+  Is Ollama running (ollama serve)?
+  Did you pull a local model (e.g., ollama pull phi3:mini)?
+  Does APP_OLLAMA_MODEL match the pulled model?
+- Pollinations errors:
+  Check POLLINATIONS_API_KEY in `.env`.
+  Ensure APP_IMAGE_BACKEND is set to pollinations.
+  Network access is required (cloud service).
+- Microphone muted:
+  On Linux: pavucontrol → Input Devices → unmute and set level ~70–90%.
+- Port conflict on 8080:
+  Start uvicorn on another port: --port 8081.
+- Windows/macOS:
+  Device names differ. Use sounddevice.query_devices() to find names/indices. Set APP_AUDIO_DEVICE accordingly.
 
 
-#### Security and privacy
+If .env is pushed accidentaly to repository, change your API key and reset it in your local .env
 
-All network calls are restricted to 127.0.0.1.
-No external uploads or cloud services.
-Audio is processed in RAM only; no raw audio is saved by default.
-Logs and images remain local.
+Remove .env from git tracking:
+
+	# Remove from index (tracking), keep file locally
+	git rm --cached .env
+	# MAke sure to have .env in .gitignore
+	git add .gitignore
+	# Commit and push
+	git commit -m "Remove .env from repo and stop tracking"
+	git push
 
 
-#### Roadmap
+Install git-filter-repo (to clean history):
 
-Integrate a concrete ComfyUI workflow (prompt mapping, sampler, VAE, SaveImage)
-Improve prompt templates and add age-appropriate guardrails
-UI enhancements: fullscreen slideshow, limit gallery to last N images
-Lower-latency transcription improvements and optional VAD refinements
-Optional GPU acceleration where available
+	pipx install git-filter-repo
 
-License: MIT
+Delete .env from the repo history:
 
-Contact:
+	git filter-repo --path .env --invert-paths
 
-Christoph Medicus
-dev@betakontext.de
-https://dev.betakontext.de
+Force-Push (overwrites online history):
 
-Contributions and issues are welcome. Please open an issue with logs and your environment (.env without secrets) if you need help.
+	git push --force
+
+
+
+---
+
+### Security and Privacy
+
+- All local backends are restricted to 127.0.0.1.
+- Using Pollinations sends prompts to a cloud API; do not include sensitive data in prompts when using cloud generation.
+- Audio is processed in RAM only; no raw audio is saved by default.
+- Logs and images remain local unless you enable a cloud backend.
+
+---
+
+### Roadmap
+
+- Improve prompt templates and add age-appropriate guardrails
+- Lower-latency transcription improvements and optional VAD refinements
+- Optional GPU acceleration where available
+- Expand Pollinations controls (model selection, safety filters)
+
+---
+
+### License
+
+- MIT
+
+---
+
+### Contact
+
+- Christoph Medicus — dev@betakontext.de — https://dev.betakontext.de
+
+- Contributions and issues are welcome. Please open an issue with logs and your environment (.env without secrets) if you need help.

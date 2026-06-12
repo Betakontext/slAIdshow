@@ -1,0 +1,21 @@
+# /etc/systemd/system/comfyui.service
+[Unit]
+Description=ComfyUI (local)
+After=network.target
+
+[Service]
+Type=simple
+# Important: existing username
+User=cm
+Group=cm
+# Installfolder
+WorkingDirectory=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI
+# Python from venv (absoluter path!)
+ExecStart=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/.venv/bin/python main.py --listen 127.0.0.1 --port 8188 --cpu
+# Optional: PATH to venv (mostly not necessary, ExecStart is absolut)
+Environment="PATH=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/.venv/bin:%s"
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
