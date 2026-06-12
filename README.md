@@ -70,7 +70,7 @@ Linux (Debian/Ubuntu) — install OS packages for native dependencies and audio 
 
 	sudo apt update
 	sudo apt install -y build-essential cmake pkg-config python3-dev libportaudio2 libasound2-dev
-	Note: These are OS libraries and headers used by sounddevice/PortAudio and potential builds. They are not part of requirements.txt.
+	# Note: These are OS libraries and headers used by sounddevice/PortAudio and potential builds. They are not part of requirements.txt.
 
 macOS:
 
