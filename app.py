@@ -59,9 +59,9 @@ def _env_bool01(k: str, d: int = 0) -> bool:
 
 def _backend_default_size(backend_name: str) -> tuple[int, int]:
     """
-    Liefert backend-spezifische Defaults aus .env:
-    - comfyui: APP_COMFY_WIDTH/HEIGHT, Fallback 128×128
-    - pollinations: POLLINATIONS_WIDTH/HEIGHT, Fallback 1024×1024
+    Backend-specific default sizes from .env:
+    - comfyui: APP_COMFY_WIDTH/HEIGHT, fallback 128×128
+    - pollinations: POLLINATIONS_WIDTH/HEIGHT, fallback 1024×1024
     """
     b = (backend_name or "comfyui").lower()
     if b == "pollinations":
@@ -141,6 +141,9 @@ def rel_for_ui(p: Path) -> str:
     return Path(p).name
 
 def ensure_in_output_dir(p: Path) -> Path:
+    """
+    Ensure the generated file is placed in OUTPUT_DIR; move/copy if needed.
+    """
     try:
         p = Path(p).resolve()
     except Exception:
@@ -197,6 +200,9 @@ OLLAMA_SYS_PROMPT = _env_str(
 )
 
 def assert_local(host: str) -> None:
+    """
+    Hard safety: do not allow remote hosts for Ollama.
+    """
     if host != "127.0.0.1":
         raise AssertionError(f"Only localhost allowed, got {host}")
 
@@ -296,6 +302,9 @@ class NegativePromptSettings(BaseModel):
 # ---------- Audio utils ----------
 
 def pick_input_device(prefer: Optional[str] = None) -> int:
+    """
+    Select a microphone device with preference heuristic.
+    """
     devs = sd.query_devices()
     if not devs:
         raise RuntimeError("No audio devices found")
@@ -319,12 +328,18 @@ def to_int16(x: np.ndarray) -> np.ndarray:
     return (x * 32767.0).astype(np.int16, copy=False)
 
 def rms_vad(frame: np.ndarray, rms_threshold: float = 0.01) -> bool:
+    """
+    Simple RMS-based voice activity detection.
+    """
     if frame.size == 0:
         return False
     rms = float(np.sqrt(np.mean(np.square(frame, dtype=np.float32), dtype=np.float64)))
     return rms >= rms_threshold
 
 def resample_to_16k(samples: np.ndarray, sr: int) -> np.ndarray:
+    """
+    Lightweight linear resampler to 16 kHz for whisper.cpp.
+    """
     if sr == 16000:
         return samples.astype(np.float32, copy=False)
     target_len = int(samples.shape[0] * (16000.0 / float(sr)))
@@ -349,6 +364,9 @@ except Exception as e:
 _WHISPER_MODEL: Optional[WhisperModel] = None
 
 def init_whisper_model() -> None:
+    """
+    Load whisper.cpp model if available and configured.
+    """
     global _WHISPER_MODEL
     if not WHISPER_AVAILABLE or _WHISPER_MODEL is not None:
         return
@@ -405,6 +423,9 @@ def _parse_whisper_out(raw: object) -> str:
     return s
 
 def clean_transcript(raw: str) -> str:
+    """
+    Normalize transcript and remove short meta/noise tokens.
+    """
     if not raw:
         return ""
     txt = " ".join(raw.split()).strip()
@@ -421,6 +442,9 @@ def is_meaningful_text(t: str, min_chars: int, min_words: int) -> bool:
     return bool(t) and len(t) >= min_chars and len(t.split()) >= min_words and re.search(r"[A-Za-zÄÖÜäöüß]", t)
 
 def transcribe_chunk_with_whisper(samples: np.ndarray, sr: int) -> str:
+    """
+    Run whisper.cpp on a chunk and post-filter the text.
+    """
     if not WHISPER_AVAILABLE or _WHISPER_MODEL is None:
         return ""
     if samples.size == 0:
@@ -484,6 +508,9 @@ def _ollama_options_for_prompt() -> dict:
     }
 
 async def _post_with_retries(client: httpx.AsyncClient, url: str, body: dict, timeout: float) -> dict:
+    """
+    Robust POST with exponential backoff for local Ollama under load.
+    """
     delay = float(_env_float("APP_OLLAMA_RETRY_BASE_DELAY", 0.8))
     max_retries = int(_env_int("APP_OLLAMA_MAX_RETRIES", 4))
     last_exc: Optional[Exception] = None
@@ -506,6 +533,9 @@ async def _post_with_retries(client: httpx.AsyncClient, url: str, body: dict, ti
     raise RuntimeError(f"Ollama request failed after {max_retries} attempts: {last_exc}")
 
 async def _ollama_available() -> bool:
+    """
+    Quick health check against Ollama tags endpoint.
+    """
     try:
         async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short_http()) as c:
             r = await c.get(_ollama_url("/api/tags"))
@@ -515,6 +545,9 @@ async def _ollama_available() -> bool:
         return False
 
 async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> str:
+    """
+    Build a concise image prompt via Ollama /api/generate with a system prompt.
+    """
     sys = OLLAMA_SYS_PROMPT
     payload = {
         "user_text": (user_text or "").strip(),
@@ -530,28 +563,56 @@ async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> s
 
 @dataclass
 class PipelineState:
+    # Audio running flag controls the audio capture + whisper loop only
     running: bool = False
+    # Global shutdown flag for hard shutdown
     shutting_down: bool = False
+    # Main audio task
     task: Optional[asyncio.Task] = None
+    # SSE listeners
     listeners: List[asyncio.Queue] = field(default_factory=list)
+    # Audio metadata
     actual_sr: int = 16000
     device_used_index: Optional[int] = None
     device_used_name: Optional[str] = None
+    # LLM/image bookkeeping
     last_prompt: Optional[str] = None
     last_llm_error: Optional[str] = None
     last_llm_run_ts: float = 0.0
+    # Background tasks (LLM → Image jobs)
     bg_tasks: Set[asyncio.Task] = field(default_factory=set)
     ollama_ready_at: float = 0.0
     last_pending_text: Optional[str] = None
     start_ts: float = 0.0
+    # Image backend config
     image_backend_name: str = _env_str("IMAGE_BACKEND", "comfyui").lower()
     allow_cloud: bool = _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0)
     image_width: int = APP_IMAGE_WIDTH
     image_height: int = APP_IMAGE_HEIGHT
     negative_prompt: str = ""
+    # Audio stream handle and stop event
+    audio_stream: Any = None
+    audio_stopped_broadcasted: bool = False  # ensures single audio stop event
+
 
 STATE = PipelineState()
 STOP_DEBOUNCE_SEC = float(os.getenv("APP_STOP_DEBOUNCE_SEC", "2.0") or "2.0")
+
+async def safe_stop_audio_stream() -> None:
+    """
+    Deterministically stop and close current audio stream and broadcast
+    'audio_stream_stopped' exactly once (idempotent).
+    """
+    if getattr(STATE, "audio_stream", None) is not None:
+        with contextlib.suppress(Exception):
+            STATE.audio_stream.stop()
+        with contextlib.suppress(Exception):
+            STATE.audio_stream.close()
+        STATE.audio_stream = None
+
+    if not STATE.audio_stopped_broadcasted:
+        await broadcast("status", "audio_stream_stopped")
+        STATE.audio_stopped_broadcasted = True
 
 BACKEND: Optional[ImageBackend] = None
 
@@ -559,6 +620,9 @@ def sse_format(event: str, data: str) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 async def broadcast(event: str, data: str) -> None:
+    """
+    Broadcast SSE message to local listeners only; suppressed during shutdown.
+    """
     if STATE.shutting_down:
         return
     for q in list(STATE.listeners):
@@ -568,6 +632,9 @@ async def broadcast(event: str, data: str) -> None:
 _context_buffer: deque[str] = deque(maxlen=CONTEXT_MAX_SEGMENTS)
 
 async def _close_sse_listeners(timeout: float = 0.25) -> None:
+    """
+    Gracefully signal all SSE listeners to end streaming.
+    """
     listeners = getattr(STATE, "listeners", None)
     if not listeners:
         return
@@ -589,6 +656,9 @@ async def _close_sse_listeners(timeout: float = 0.25) -> None:
         setattr(STATE, "listeners", [])
 
 def update_context_buffer(text: str) -> str:
+    """
+    Maintain a rolling context buffer for LLM prompt optimization.
+    """
     _context_buffer.append(text)
     ctx = " ".join(_context_buffer)
     if len(ctx) > CONTEXT_MAX_CHARS:
@@ -618,6 +688,9 @@ def _log_effective_config() -> None:
 # ---------- Runtime-aware backend wrapper ----------
 
 def build_image_backend_rt(backend_name: Optional[str] = None, allow_cloud: Optional[bool] = None) -> ImageBackend:
+    """
+    Recreate image backend with runtime flags without restarting the app.
+    """
     wanted_backend = (backend_name or STATE.image_backend_name or _env_str("IMAGE_BACKEND", "comfyui")).lower()
     allowed = (STATE.allow_cloud if allow_cloud is None else bool(allow_cloud))
     old_backend = os.environ.get("IMAGE_BACKEND")
@@ -645,14 +718,16 @@ def rel_for_ui_path(p: Path) -> str:
 # ---------- Audio transcription loop ----------
 
 async def audio_transcription_loop() -> None:
+    """
+    Main audio capture + whisper transcription loop.
+    Respects STATE.running; on stop, loop exits but image pipeline continues.
+    """
     sr = int(SAMPLE_RATE)
     frame_len = max(1, int(sr * (FRAME_MS / 1000.0)))
-    min_buf_frames = max(1, int(sr * MIN_BUF_SEC))
-    max_segment_frames = max(1, int(sr * MAX_SEGMENT_SEC))
-    snapshot_frames = max(1, int(sr * SNAPSHOT_SEC))
 
-    device_index = None
-    device_name = None
+    # Reset stop broadcast gate on start
+    STATE.audio_stopped_broadcasted = False
+
     try:
         device_index = pick_input_device(AUDIO_DEVICE_PREF)
         sd.default.device = (device_index, None)
@@ -678,16 +753,15 @@ async def audio_transcription_loop() -> None:
     q: asyncio.Queue[np.ndarray] = asyncio.Queue(maxsize=100)
 
     def callback(indata, frames, time_info, status):
-        if status:
-            pass
+        # Push frames only while running to minimize latency post-stop
+        if not STATE.running:
+            return
         mono = np.asarray(indata[:, 0], dtype=np.float32)
         try:
             q.put_nowait(mono.copy())
         except asyncio.QueueFull:
-            try:
+            with contextlib.suppress(Exception):
                 _ = q.get_nowait()
-            except Exception:
-                pass
             with contextlib.suppress(Exception):
                 q.put_nowait(mono.copy())
 
@@ -699,16 +773,21 @@ async def audio_transcription_loop() -> None:
         callback=callback,
         latency=APP_STREAM_LATENCY_SEC,
     )
+    STATE.audio_stream = stream
 
     try:
         stream.start()
         print("[AUDIO] stream started")
         await broadcast("status", "audio_stream_started")
+
         while STATE.running and not STATE.shutting_down:
             try:
-                frame = await asyncio.wait_for(q.get(), timeout=0.5)
+                frame = await asyncio.wait_for(q.get(), timeout=0.25)
             except asyncio.TimeoutError:
                 continue
+
+            if not STATE.running:
+                break
 
             buf = np.concatenate([buf, frame], axis=0)
             now = time.time()
@@ -726,7 +805,6 @@ async def audio_transcription_loop() -> None:
             silence_exceeded = (now - last_voice_ts) * 1000.0 >= MAX_SILENCE_MS
             segment_too_long = buf.size >= int(SAMPLE_RATE * MAX_SEGMENT_SEC)
             first_deadline_hit = now >= first_snapshot_deadline and have_min_buf
-
             should_snapshot = have_min_buf and (silence_exceeded or segment_too_long or first_deadline_hit)
 
             if should_snapshot:
@@ -734,6 +812,9 @@ async def audio_transcription_loop() -> None:
                 buf = np.zeros(0, dtype=np.float32)
                 speaking = False
                 first_snapshot_deadline = now + float(SNAPSHOT_SEC)
+
+                if not STATE.running:
+                    break
 
                 def _do_transcribe(arr: np.ndarray, sample_rate: int) -> str:
                     return transcribe_chunk_with_whisper(arr, sample_rate)
@@ -745,24 +826,27 @@ async def audio_transcription_loop() -> None:
                     text = ""
 
                 text = (text or "").strip()
-                if text:
+                if text and STATE.running:
                     await broadcast("transcript", text)
                     if FORCE_MEANINGFUL_CHECK and not is_meaningful_text(text, TEXT_MIN_CHARS, TEXT_MIN_WORDS):
-                        continue
-                    ctx = update_context_buffer(text)
-                    if OLLAMA_DISABLED:
-                        continue
-                    if (time.time() - STATE.last_llm_run_ts) >= float(LLM_INTERVAL_SEC):
-                        STATE.last_llm_run_ts = time.time()
-                        task = asyncio.create_task(run_llm_and_image(ctx))
-                        STATE.bg_tasks.add(task)
-                        def _done_cb(t: asyncio.Task):
-                            with contextlib.suppress(Exception):
-                                STATE.bg_tasks.discard(t)
-                        task.add_done_callback(_done_cb)
+                        pass
+                    else:
+                        ctx = update_context_buffer(text)
+                        # Gate LLM dispatch by STATE.running to avoid new prompts after stop
+                        if not OLLAMA_DISABLED and (time.time() - STATE.last_llm_run_ts) >= float(LLM_INTERVAL_SEC):
+                            if not STATE.running:
+                                break
+                            STATE.last_llm_run_ts = time.time()
+                            task = asyncio.create_task(run_llm_and_image(ctx))
+                            STATE.bg_tasks.add(task)
+                            def _done_cb(t: asyncio.Task):
+                                with contextlib.suppress(Exception):
+                                    STATE.bg_tasks.discard(t)
+                            task.add_done_callback(_done_cb)
 
-            if buf.size > (int(SAMPLE_RATE * MAX_SEGMENT_SEC) * 2):
-                buf = buf[-int(SAMPLE_RATE * MAX_SEGMENT_SEC):]
+            max_keep = int(SAMPLE_RATE * MAX_SEGMENT_SEC)
+            if buf.size > (max_keep * 2):
+                buf = buf[-max_keep:]
 
         print("[AUDIO] loop exiting")
     except asyncio.CancelledError:
@@ -771,15 +855,16 @@ async def audio_transcription_loop() -> None:
         print(f"[AUDIO] loop crashed: {e}")
         await broadcast("status", f"audio_loop_error:{e}")
     finally:
-        with contextlib.suppress(Exception):
-            stream.stop()
-        with contextlib.suppress(Exception):
-            stream.close()
-        await broadcast("status", "audio_stream_stopped")
+        # Use helper for deterministic stop + event
+        await safe_stop_audio_stream()
 
 # ---------- LLM + Image ----------
 
 async def run_llm_and_image(text: str) -> None:
+    """
+    End-to-end step: LLM prompt generation, then image generation.
+    This runs as a BG task and should not be cancelled by soft /stop.
+    """
     if await _ollama_available() is False:
         await broadcast("status", "ollama_unavailable")
         STATE.last_llm_error = "ollama_unavailable"
@@ -799,7 +884,7 @@ async def run_llm_and_image(text: str) -> None:
             await broadcast("llm_prompt", img_prompt)
             await broadcast("status", "llm_ok")
             try:
-                # Negativen Prompt für ComfyUI spiegeln
+                # Sync negative prompt to LocalComfyBackend if available
                 if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
                     if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
                         setattr(BACKEND.cfg, "negative", STATE.negative_prompt or "")
@@ -828,6 +913,9 @@ def _merge_negative_into_prompt(prompt: str, negative: str) -> str:
     return f"{p}\n-- negative: {n}"
 
 async def _generate_with_negative_support(prompt: str, width: int, height: int, negative: str) -> Path:
+    """
+    Call backend.generate; if it lacks native negative_prompt, merge it manually.
+    """
     if BACKEND is None:
         raise RuntimeError("image_backend_not_initialized")
     kwargs: Dict[str, Any] = {"width": width, "height": height}
@@ -843,6 +931,9 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    Initialize whisper, backend, and optional Ollama warmup; finalize gracefully.
+    """
     print(f"[ENV] loaded from: {ENV_PATH or '(env vars only)'}")
     _log_effective_config()
     init_whisper_model()
@@ -855,7 +946,7 @@ async def lifespan(app: FastAPI):
         BACKEND = None
         print(f"[BACKEND] initialization failed: {e}")
 
-    # Backend-spezifische Defaults setzen
+    # Initialize backend-specific default sizes into state
     try:
         dw, dh = _backend_default_size(STATE.image_backend_name)
         STATE.image_width = dw
@@ -883,6 +974,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Hard shutdown cleanup: stop audio, cancel BG tasks, close SSE
         STATE.shutting_down = True
         STATE.running = False
         if STATE.task:
@@ -912,6 +1004,9 @@ if web_dir.exists():
 
 @app.get("/", include_in_schema=False)
 async def root_redirect():
+    """
+    Redirect to web UI if present; otherwise show a basic JSON message.
+    """
     if web_dir.exists():
         return RedirectResponse(url="/web/index.html", status_code=307)
     return JSONResponse({"ok": True, "msg": "Web UI not found, use /static for images or API endpoints."})
@@ -942,10 +1037,12 @@ async def health() -> HealthReport:
 
 @app.get("/config")
 async def get_config():
+    """
+    Return current runtime configuration for the front-end UI.
+    """
     wpath = WHISPER_MODEL_PATH
     masked = (wpath[:3] + "..." + wpath[-10:]) if wpath and len(wpath) > 16 else wpath
 
-    # Backend-Defaults bestimmen
     try:
         def_w, def_h = _backend_default_size(STATE.image_backend_name)
     except Exception:
@@ -973,37 +1070,13 @@ async def get_config():
     }
 
 
-# ---------- Config endpoint ----------
-
-@app.post("/api/settings/image_backend")
-async def api_switch_image_backend(req: ImageBackendSwitch):
-    target = req.backend.lower()
-    if target not in {"comfyui", "pollinations"}:
-        return JSONResponse({"ok": False, "error": "invalid_backend"}, status_code=400)
-    if target == "pollinations" and not STATE.allow_cloud:
-        return JSONResponse({"ok": False, "error": "not_allowed", "reason": "cloud_blocked"}, status_code=403)
-    if target == "pollinations":
-        secret = _env_str("POLLINATIONS_SECRET", "")
-        if not secret:
-            return JSONResponse({"ok": False, "error": "missing_secret", "reason": "missing_secret"}, status_code=400)
-    try:
-        _rebuild_backend(force_name=target)
-        # NEU: Laufzeitgröße auf Backend-Defaults zurücksetzen,
-        # damit UI (current_*) sofort die korrekten Werte sieht.
-        def_w, def_h = _backend_default_size(target)
-        STATE.image_width = def_w
-        STATE.image_height = def_h
-
-        await broadcast("status", f"image_backend:{target}")
-        return {"ok": True, "backend": target}
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
-
-
 # ---------- SSE: /events ----------
 
 @app.get("/events")
 async def events(request: Request):
+    """
+    Server-Sent Events endpoint that emits status, transcripts, prompts, and images.
+    """
     async def gen():
         q: asyncio.Queue[str] = asyncio.Queue()
         STATE.listeners.append(q)
@@ -1032,6 +1105,9 @@ async def events(request: Request):
 
 @app.get("/audio/devices")
 def audio_devices():
+    """
+    Enumerate input devices for diagnostics and selection.
+    """
     try:
         devs = sd.query_devices()
         ins = [
@@ -1045,6 +1121,9 @@ def audio_devices():
 
 @app.get("/audio/probe")
 def audio_probe():
+    """
+    Record a short snippet to estimate peak and RMS on current device.
+    """
     sr = SAMPLE_RATE
     dur = 0.5
     frames = int(sr * dur)
@@ -1066,6 +1145,9 @@ def audio_probe():
 
 @app.post("/start", response_class=PlainTextResponse)
 async def start_pipeline():
+    """
+    Start audio capture loop; image pipeline remains always enabled.
+    """
     print("[HTTP] /start called")
     if STATE.running:
         print("[HTTP] /start ignored (already running)")
@@ -1080,39 +1162,68 @@ async def start_pipeline():
 
 @app.post("/stop", response_class=PlainTextResponse)
 async def stop_pipeline():
+    """
+    Soft stop: stop audio input and prevent new LLM prompts.
+    Do NOT cancel in-flight or pending image generation tasks.
+    Do NOT broadcast 'server_stopped'; broadcast 'audio_stopped' instead.
+    """
     print("[HTTP] /stop called")
-    now = time.time()
-    if STATE.running and (now - STATE.start_ts) < float(STOP_DEBOUNCE_SEC):
-        msg = f"stop_ignored_debounce({now - STATE.start_ts:.2f}s)"
-        print(f"[HTTP] /stop ignored: {msg}")
-        await broadcast("status", msg)
-        return PlainTextResponse("stop_ignored_debounce", status_code=200)
 
+    # 1) Turn off the audio running flag immediately
     STATE.running = False
+
+    # 2) Deterministically stop audio stream and send status once
+    await safe_stop_audio_stream()
+
+    # 3) Cancel the audio task only; leave BG tasks (LLM/Image) running so that
+    #    already-generated prompts can finish image generation.
     if STATE.task:
         STATE.task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
-            await STATE.task
+            try:
+                await asyncio.wait_for(STATE.task, timeout=1.5)
+            except asyncio.TimeoutError:
+                pass
         STATE.task = None
+
+    # 4) Do NOT cancel STATE.bg_tasks here. Let existing jobs complete.
+    #    New LLM dispatches are naturally prevented because STATE.running is False
+    #    and the audio loop won't schedule new ones.
+
+    # 5) Broadcast a soft-stop status for the UI
+    await broadcast("status", "audio_stopped")
+    print("[HTTP] /stop completed")
+    return PlainTextResponse("stopped")
+
+
+@app.post("/shutdown", response_class=PlainTextResponse)
+async def shutdown_server():
+    """
+    Hard stop: stop audio, cancel all BG tasks, close SSE, and exit the process.
+    """
+    print("[HTTP] /shutdown called")
+    STATE.shutting_down = True
+    # Reuse soft stop for audio
+    try:
+        await stop_pipeline()
+    except Exception:
+        pass
+    # Now cancel BG tasks (LLM/Image) for a hard shutdown
     for t in list(STATE.bg_tasks):
         t.cancel()
     with contextlib.suppress(Exception):
         await asyncio.gather(*list(STATE.bg_tasks), return_exceptions=True)
     STATE.bg_tasks.clear()
+    # Inform clients
     await broadcast("status", "server_stopped")
-    print("[HTTP] /stop completed")
-    return PlainTextResponse("stopped")
-
-@app.post("/shutdown", response_class=PlainTextResponse)
-async def shutdown_server():
-    print("[HTTP] /shutdown called")
-    STATE.shutting_down = True
-    await stop_pipeline()
     await _close_sse_listeners()
     asyncio.create_task(_exit_after_delay())
     return PlainTextResponse("shutting down")
 
 async def _exit_after_delay():
+    """
+    Exit the process shortly after notifying clients.
+    """
     await asyncio.sleep(0.2)
     os._exit(0)
 
@@ -1147,6 +1258,10 @@ async def api_ollama_chat(req: OllamaChatRequest):
 
 @app.post("/api/plan")
 async def api_plan(req: PlanRequest):
+    """
+    Generate an image prompt via Ollama and immediately trigger image generation.
+    This endpoint is independent of the audio loop; it should work even after soft stop.
+    """
     if await _ollama_available() is False:
         return JSONResponse({"error": "ollama_unavailable"}, status_code=503)
     sys = OLLAMA_SYS_PROMPT
@@ -1166,6 +1281,7 @@ async def api_plan(req: PlanRequest):
                 await broadcast("llm_prompt", out)
                 if BACKEND is not None:
                     try:
+                        # Sync negative prompt to LocalComfyBackend
                         if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
                             if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
                                 setattr(BACKEND.cfg, "negative", STATE.negative_prompt or "")
@@ -1185,6 +1301,9 @@ async def api_plan(req: PlanRequest):
 
 @app.post("/api/image/direct", response_model=ImageResponse)
 async def api_image_direct(req: DirectImageRequest):
+    """
+    Generate an image directly from a prompt (independent of audio state).
+    """
     if BACKEND is None:
         return JSONResponse({"error": "image_backend_not_initialized"}, status_code=500)
     try:
@@ -1213,6 +1332,9 @@ async def api_image_direct(req: DirectImageRequest):
 
 @app.post("/api/image/test", response_model=ImageResponse)
 async def api_image_test(req: ImageRequest):
+    """
+    Small test image generation with default prompt.
+    """
     if BACKEND is None:
         return JSONResponse({"error": "image_backend_not_initialized"}, status_code=500)
     prompt = (req.prompt or "A colorful low-poly fox head, studio lighting, high detail, 3D render").strip()
@@ -1234,6 +1356,9 @@ async def api_image_test(req: ImageRequest):
 # ---------- Image backend switching & cloud toggle ----------
 
 def _rebuild_backend(force_name: Optional[str] = None) -> ImageBackend:
+    """
+    Rebuild the image backend and update state.
+    """
     global BACKEND
     if force_name:
         STATE.image_backend_name = force_name.lower()
@@ -1243,6 +1368,9 @@ def _rebuild_backend(force_name: Optional[str] = None) -> ImageBackend:
 
 @app.post("/api/settings/image_backend")
 async def api_switch_image_backend(req: ImageBackendSwitch):
+    """
+    Switch between local ComfyUI and Pollinations backend at runtime.
+    """
     target = req.backend.lower()
     if target not in {"comfyui", "pollinations"}:
         return JSONResponse({"ok": False, "error": "invalid_backend"}, status_code=400)
@@ -1254,10 +1382,15 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
             return JSONResponse({"ok": False, "error": "missing_secret", "reason": "missing_secret"}, status_code=400)
     try:
         _rebuild_backend(force_name=target)
+        # Apply backend-specific defaults
+        def_w, def_h = _backend_default_size(target)
+        STATE.image_width = def_w
+        STATE.image_height = def_h
         await broadcast("status", f"image_backend:{target}")
         return {"ok": True, "backend": target}
     except Exception as e:
         return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
+
 
 class ImageAllowCloudReq(BaseModel):
     allow: Optional[bool] = None
@@ -1265,6 +1398,9 @@ class ImageAllowCloudReq(BaseModel):
 
 @app.post("/api/settings/image_allow_cloud")
 async def api_image_allow_cloud(req: ImageAllowCloudReq):
+    """
+    Toggle allowance for cloud-based image backends.
+    """
     val = req.allow if req.allow is not None else req.allow_cloud
     if val is None:
         return JSONResponse({"ok": False, "error": "missing_field_allow"}, status_code=400)
@@ -1285,6 +1421,9 @@ async def get_image_size():
 
 @app.post("/api/settings/image_size")
 async def set_image_size(s: ImageSizeSettings):
+    """
+    Update image dimensions used by subsequent generations.
+    """
     STATE.image_width = int(s.width)
     STATE.image_height = int(s.height)
     await broadcast("status", f"image_size:{STATE.image_width}x{STATE.image_height}")
@@ -1296,6 +1435,9 @@ async def get_negative_prompt():
 
 @app.post("/api/settings/negative_prompt")
 async def set_negative_prompt(s: NegativePromptSettings):
+    """
+    Update global negative prompt and mirror it to LocalComfyBackend if supported.
+    """
     txt = (s.negative_prompt or "").strip()
     STATE.negative_prompt = txt
     if BACKEND is not None and LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
@@ -1305,15 +1447,15 @@ async def set_negative_prompt(s: NegativePromptSettings):
     await broadcast("status", "negative_prompt:updated")
     return {"ok": True, "negative_prompt": STATE.negative_prompt}
 
-# ---------- Utility: Open-dir hint (UI kann /static öffnen) ----------
+# ---------- Utility: Open-dir hint (UI can open /static) ----------
 
 @app.get("/open_dir_hint")
 async def open_dir_hint():
-    # Rein informativ für die UI
     return {"static_url": "/static/", "path": str(OUTPUT_DIR)}
 
 # ---------- App entry ----------
 
 if __name__ == "__main__":
     import uvicorn
+    # Bind strictly to localhost for privacy
     uvicorn.run("app:app", host="127.0.0.1", port=8080, reload=False)

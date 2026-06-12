@@ -654,6 +654,27 @@
       } catch (e) { log(statusLog, `start error: ${e}`); }
     });
 
+    // >>> STOP-Handler HIER DIREKT DANACH EINFÜGEN <<<
+    document.getElementById('btn-stop').addEventListener('click', async () => {
+      const btn = document.getElementById('btn-stop');
+      btn.disabled = true;
+      try {
+        const r = await fetch('/stop', { method: 'POST' });
+        if (r.ok) {
+          statusEl.textContent = t('stop_ok');
+          log(statusLog, `stop → ${r.status}`);
+        } else {
+          statusEl.textContent = t('stop_fail');
+          log(statusLog, `stop failed: HTTP ${r.status}`);
+        }
+      } catch (e) {
+        statusEl.textContent = t('stop_fail');
+        log(statusLog, `stop exception: ${e}`);
+      } finally {
+        setTimeout(() => { btn.disabled = false; }, 300);
+      }
+    });
+
 
     function currentSizePayload() {
       const w = clampSize(widthInput.value);
