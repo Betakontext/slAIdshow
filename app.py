@@ -74,8 +74,6 @@ def _backend_default_size(backend_name: str) -> tuple[int, int]:
     h = max(64, min(2048, h))
     return w, h
 
-
-
 # ---------- Optional dotenv loading ----------
 
 ENV_PATH: Optional[str] = None
@@ -113,6 +111,10 @@ MIN_BUF_SEC = _env_float("APP_MIN_BUF_SEC", 0.35)
 MAX_SILENCE_MS = _env_int("APP_MAX_SILENCE_MS", 700)
 MAX_SEGMENT_SEC = _env_float("APP_MAX_SEGMENT_SEC", 12.0)
 FIRST_SNAPSHOT_DEADLINE_SEC = _env_float("APP_FIRST_SNAPSHOT_DEADLINE_SEC", 1.2)
+
+# ---------- SSE heartbeat ----------
+
+APP_SSE_TICK_SEC = _env_float("APP_SSE_TICK_SEC", 1.0)
 
 # ---------- Whisper (pywhispercpp) ----------
 
@@ -208,6 +210,22 @@ def assert_local(host: str) -> None:
 
 assert_local(OLLAMA_HOST)
 
+def _assert_image_backend_host() -> None:
+    """
+    Allow remote image backends if explicitly enabled.
+    Blocks remote if not enabled.
+    """
+    allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
+    comfy_host = _env_str("APP_COMFY_HOST", "127.0.0.1")
+    if not allow_remote:
+        # Only localhost allowed
+        if comfy_host not in {"127.0.0.1", "localhost"}:
+            raise AssertionError(f"Remote image backends disabled, got {comfy_host}")
+
+# call this once after reading env and before build_image_backend()
+_assert_image_backend_host()
+
+
 WARMUP_ENABLE = _env_bool01("APP_OLLAMA_WARMUP_ENABLE", 1)
 WARMUP_PROMPT = _env_str("APP_OLLAMA_WARMUP_PROMPT", "Sag Hallo auf Deutsch.")
 WARMUP_TIMEOUT_SEC = _env_float("APP_OLLAMA_WARMUP_TIMEOUT_SEC", 45.0)
@@ -254,6 +272,7 @@ class HealthReport(BaseModel):
 
 class ImageBackendSwitch(BaseModel):
     backend: Literal["comfyui", "pollinations"]
+    reset: bool = False  # if true, apply backend default size after switch
 
 _MIN_SIZE = 128
 _MAX_SIZE = 2048
@@ -683,6 +702,8 @@ def _log_effective_config() -> None:
         f"interval={LLM_INTERVAL_SEC}s model={OLLAMA_MODEL}",
         "| image:",
         f"backend={STATE.image_backend_name} allow_cloud={STATE.allow_cloud} out={OUTPUT_DIR} default={APP_IMAGE_WIDTH}x{APP_IMAGE_HEIGHT}",
+        "| sse:",
+        f"tick={APP_SSE_TICK_SEC}s",
     )
 
 # ---------- Runtime-aware backend wrapper ----------
@@ -940,17 +961,21 @@ async def lifespan(app: FastAPI):
 
     global BACKEND
     try:
+        _assert_image_backend_host()
         BACKEND = build_image_backend_rt()
         print(f"[BACKEND] initialized: {type(BACKEND).__name__}")
     except Exception as e:
         BACKEND = None
         print(f"[BACKEND] initialization failed: {e}")
 
-    # Initialize backend-specific default sizes into state
+    # Initialize backend-specific default sizes into state only on first boot
     try:
         dw, dh = _backend_default_size(STATE.image_backend_name)
-        STATE.image_width = dw
-        STATE.image_height = dh
+        # Only set defaults if UI didn't override via APP_IMAGE_WIDTH/HEIGHT
+        # Keep STATE as provided by env defaults already set during dataclass init
+        # Here we prefer explicit app-level defaults already assigned.
+        STATE.image_width = STATE.image_width or dw
+        STATE.image_height = STATE.image_height or dh
     except Exception:
         STATE.image_width = APP_IMAGE_WIDTH
         STATE.image_height = APP_IMAGE_HEIGHT
@@ -1067,6 +1092,7 @@ async def get_config():
             "current_height": STATE.image_height,
             "negative_prompt": STATE.negative_prompt,
         },
+        "sse": {"tick_sec": APP_SSE_TICK_SEC},
     }
 
 
@@ -1082,11 +1108,12 @@ async def events(request: Request):
         STATE.listeners.append(q)
         try:
             await q.put(sse_format("status", "connected"))
+            hb = max(0.25, float(APP_SSE_TICK_SEC))
             while True:
                 if await request.is_disconnected():
                     break
                 try:
-                    msg = await asyncio.wait_for(q.get(), timeout=15.0)
+                    msg = await asyncio.wait_for(q.get(), timeout=hb)
                 except asyncio.TimeoutError:
                     yield sse_format("status", "hb").encode("utf-8")
                     continue
@@ -1366,32 +1393,6 @@ def _rebuild_backend(force_name: Optional[str] = None) -> ImageBackend:
     BACKEND = new_backend
     return new_backend
 
-@app.post("/api/settings/image_backend")
-async def api_switch_image_backend(req: ImageBackendSwitch):
-    """
-    Switch between local ComfyUI and Pollinations backend at runtime.
-    """
-    target = req.backend.lower()
-    if target not in {"comfyui", "pollinations"}:
-        return JSONResponse({"ok": False, "error": "invalid_backend"}, status_code=400)
-    if target == "pollinations" and not STATE.allow_cloud:
-        return JSONResponse({"ok": False, "error": "not_allowed", "reason": "cloud_blocked"}, status_code=403)
-    if target == "pollinations":
-        secret = _env_str("POLLINATIONS_SECRET", "")
-        if not secret:
-            return JSONResponse({"ok": False, "error": "missing_secret", "reason": "missing_secret"}, status_code=400)
-    try:
-        _rebuild_backend(force_name=target)
-        # Apply backend-specific defaults
-        def_w, def_h = _backend_default_size(target)
-        STATE.image_width = def_w
-        STATE.image_height = def_h
-        await broadcast("status", f"image_backend:{target}")
-        return {"ok": True, "backend": target}
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
-
-
 class ImageAllowCloudReq(BaseModel):
     allow: Optional[bool] = None
     allow_cloud: Optional[bool] = None
@@ -1410,6 +1411,40 @@ async def api_image_allow_cloud(req: ImageAllowCloudReq):
     try:
         _rebuild_backend()
         return {"ok": True, "allow_cloud": STATE.allow_cloud, "backend": STATE.image_backend_name}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
+
+@app.post("/api/settings/image_backend")
+async def api_switch_image_backend(req: ImageBackendSwitch):
+    """
+    Switch between local ComfyUI and Pollinations backend at runtime.
+
+    Behavior:
+    - Preserves current UI-selected image size by default.
+    - If reset=true in request body, sets image size to backend-specific defaults.
+    """
+    target = req.backend.lower()
+    if target not in {"comfyui", "pollinations"}:
+        return JSONResponse({"ok": False, "error": "invalid_backend"}, status_code=400)
+    if target == "pollinations" and not STATE.allow_cloud:
+        return JSONResponse({"ok": False, "error": "not_allowed", "reason": "cloud_blocked"}, status_code=403)
+    if target == "pollinations":
+        secret = _env_str("POLLINATIONS_SECRET", "")
+        if not secret:
+            return JSONResponse({"ok": False, "error": "missing_secret", "reason": "missing_secret"}, status_code=400)
+    try:
+        # Keep current size unless reset requested
+        cur_w, cur_h = STATE.image_width, STATE.image_height
+        _rebuild_backend(force_name=target)
+        if req.reset:
+            def_w, def_h = _backend_default_size(target)
+            STATE.image_width = def_w
+            STATE.image_height = def_h
+        else:
+            STATE.image_width = cur_w
+            STATE.image_height = cur_h
+        await broadcast("status", f"image_backend:{target}")
+        return {"ok": True, "backend": target, "width": STATE.image_width, "height": STATE.image_height, "reset": bool(req.reset)}
     except Exception as e:
         return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
 
@@ -1457,5 +1492,6 @@ async def open_dir_hint():
 
 if __name__ == "__main__":
     import uvicorn
-    # Bind strictly to localhost for privacy
-    uvicorn.run("app:app", host="127.0.0.1", port=8080, reload=False)
+    host = os.getenv("APP_BIND_HOST", "127.0.0.1")
+    port = int(os.getenv("APP_BIND_PORT", "8080"))
+    uvicorn.run("app:app", host=host, port=port, reload=False)
