@@ -61,16 +61,11 @@ A local real-time application that listens via your system microphone and period
 
 ### Prerequisites
 
-Local-only services (optional but recommended):
-- pywhispercpp (create /model folder and pull a model, f.e. ggml-base)
-- Ollama on 127.0.0.1:11434 (pull at least one model, f.e. phi3:mini)
-- ComfyUI on 127.0.0.1:8188 (Model pulled, f.e. anything-v4.5-pruned.safetensors; API enabled)
-
 Linux (Debian/Ubuntu) — install OS packages for native dependencies and audio I/O:
 
 	sudo apt update
 	sudo apt install -y build-essential cmake pkg-config python3-dev libportaudio2 libasound2-dev
-	# Note: These are OS libraries and headers used by sounddevice/PortAudio and potential builds. They are not part of requirements.txt.
+	# Note: These are OS libraries and headers used by sounddevice/PortAudio and potential builds. They are not part of 	requirements.txt.
 
 macOS:
 
@@ -83,25 +78,18 @@ Windows:
 - If building from source, you may need Microsoft C++ Build Tools.
 - If native deps are problematic, consider WSL (use the Linux steps).
 
----
+To use the full combination of Services strictly local, install:
 
-### Installation
+- pywhispercpp (Clone the repository and create /model Folder in speechtoimage_ai and pull a model -> f.e. ggml-base)
+- Ollama on 127.0.0.1:11434 (pull at least one model -> f.e. phi3:mini)
+- ComfyUI on 127.0.0.1:8188 (Model pulled -> f.e. anything-v4.5-pruned.safetensors; API enabled)
 
-Clone the repository and open a terminal in the project directory.
+To switch to Cloud servis (Pollinations)
 
-Create your peronalized .env from .env.example:
+- create Pollinations account and set your key in .env
+-------
 
-	cp .env.example .env
-
-Fill .env with your lokal values, never commit:
-
-	APP_OUTPUT_DIR=./outputs/images
-	APP_COMFY_WORKFLOW=./workflows/text2img_any45.json
-	APP_COMFY_OUTPUT_DIR=/path/to/ComfyUI/output
-	POLLINATIONS_API_KEY=sk-xxxx  #(required if using Pollinations)
-
-
-Option A — Helper Scripts (recommended)
+### Option A — Installation of speechtoimage_ai with Helper Scripts (recommended)
 
 Linux / macOS:
 
@@ -113,11 +101,13 @@ Windows (PowerShell):
 	Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 	.\run.ps1
 
-What the scripts do:
-- Create/activate a virtual environment
-- Upgrade pip and install requirements
-- Attempt to install optional extras (webrtcvad-wheels, pywhispercpp)
-- Start the server on 127.0.0.1:8080 (uvicorn)
+What the scripts create:
+
+- Project virtual environment
+- Requirements installation
+- Optional webrtcvad-wheels, required pywhispercpp
+- Preflight checks for Ollama and ComfyUI
+- Start FastAPI app via uvicorn (app:app)
 
 Open the UI in your browser:
 
@@ -125,7 +115,40 @@ Open the UI in your browser:
 
 Stop via the UI or press Ctrl+C in the terminal.
 
-Option B — Manual Setup
+------------ 
+
+#### Step by step setup: 
+
+1. Clone the repository and open a terminal in the project directory.
+
+2. Create your personalized .env from .env.example:
+
+	cp .env.example .env
+
+3. Create the folder /models and fetch a Whisper-model, f.e. ggml-base.bin in there
+
+4. Install Ollama, pull an LLM model f.e. phi3:mini and 
+   define its usage in -> .env
+
+5. Define the -> path to /ComfyUI/output in -> .env
+   APP_COMFY_OUTPUT_DIR=/yourpath/to/ComfyUI/output
+   APP_COMFY_WORKFLOW=./workflows/text2img_any45.json 	
+   Start ComfyUi from ist main folder with: 
+
+	python main.py --listen 127.0.0.1 --port 8188 --lowvra
+
+6. Pull a diffusion model f.e.: anything-v4.5-pruned and 
+   place it into -> /ComfyUI/models/checkpoints (in ComfyUI main folder, not in speechtoimage_ai)
+
+7. To switch between local and cloud image generation, use Pollinations and 
+   define your Pollinations key: sk-******* in -> .env
+   POLLINATIONS_API_KEY=sk-xxxx  #(required if using Pollinations)
+
+
+
+----------------------------------------------------------------------------------------------
+
+### Option B — Manual Setup of speechtoimage_ai
 
 Create and activate a virtual environment, then install dependencies:
 
@@ -138,7 +161,6 @@ Linux/macOS:
 Windows PowerShell:
 
 	.venv\Scripts\Activate.ps1
-
 	python -m pip install --upgrade pip
 	pip install -r requirements.txt
 	pip install --no-cache-dir pywhispercpp
@@ -153,9 +175,15 @@ Alternatively, try wheels:
 
 Fetch a Whisper model and place it in ./models:
 
+BASH
 	mkdir -p models
 	curl -L -o models/ggml-base.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
 	# or tiny: curl -L -o models/ggml-tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
+
+or in PS
+	mkdir -p models
+	curl.exe -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin?download=true" -o "models/ggml-base.bin"
+	# or tiny: curl.exe -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin?download=true" -o "models/ggml-	tiny.bin 
 
 Start the server:
 
@@ -255,9 +283,54 @@ CPU-only mode (if no CUDA/GPU available) inside the ComfyUI venv:
 	print("torch", torch.__version__, "cuda_available?", torch.cuda.is_available())
 	PY
 
-Test the local ComfyUI bridge from this repo (with ComfyUI running on 127.0.0.1:8188):
+Pull a Diffusion model : Open a terminal in the folder to pull into: /ComfyUI/models/checkpoints and install.
+For manga or anime stylized pictures f.e.
 
-	APP_DISABLE_COMFYUI=0 python utils/test_comfy_local.py --workflow ./workflows/text2img_any45.json --prompt "Photorealistic classroom, natural light" --width 512 --height 512 --steps 20 --cfg 6.5 --sampler dpmpp_2m --seed 1234 --timeout 300
+	curl.exe -fL --retry 5 --retry-delay 3 "https://huggingface.co/shibal1/anything-v4.5-clone/resolve/main/anything-v4.5-	pruned.safetensors?download=true" -o "C:\Users\Administrator\Documents\Arbeiten\0000_DEV\ComfyUI\models\checkpoints\anything-v4.5-	pruned.safetensors"
+
+or for realistc pictures:
+
+	curl.exe -fL --retry 5 --retry-delay 3 "https://huggingface.co/casque/realisticVisionV51_v51VAE/resolve/main/realisticVisionV51_v51VAE.safetensors?download=true" -o "C:\Users\Administrator\Documents\Arbeiten\0000_DEV\ComfyUI\models\checkpoints\realisticVisionV51_v51VAE.safetensors"
+
+
+Get sha after it completes:
+PS
+
+	$dst = "C:\Users\Administrator\Documents\Arbeiten\0000_DEV\ComfyUI\models\checkpoints\anything-v4.5-pruned.safetensors"
+	$hash = (Get-FileHash $dst -Algorithm SHA256).Hash
+	Set-Content "$dst.sha256.txt" $hash
+
+and verify 
+
+(anything-v4.5)
+
+	$dst = "C:\Users\Administrator\Documents\Arbeiten\0000_DEV\ComfyUI\models\checkpoints\anything-v4.5-pruned.safetensors"
+	$expected = Get-Content "$dst.sha256.txt"
+	$current  = (Get-FileHash $dst -Algorithm SHA256).Hash
+	if ($current -eq $expected) { "OK: hash matches" } else { "MISMATCH: file changed!" }
+
+(realisticVision)
+
+	Get-Item "C:\Users\Administrator\Documents\Arbeiten\0000_DEV\ComfyUI\models\checkpoints\realisticVisionV51_v51VAE.safetensors" | Select-Object 	FullName, Length, LastWriteTime
+	Get-FileHash "C:\Users\Administrator\Documents\Arbeiten\0000_DEV\ComfyUI\models\checkpoints\realisticVisionV51_v51VAE.safetensors" -Algorithm SHA256
+
+
+Start ComfyUI
+
+	# Start From your ComfyUI folder
+	python main.py --listen 127.0.0.1 --port 8188 --lowvram
+
+To access ComfyUI from another device in the same local network
+add "--listen 0.0.0.0" in ComfyUIs file run_nvidia_gpu.bat 
+.\python_embeded\python.exe -s ComfyUI\main.py --windows-standalone-build --listen 0.0.0.0
+and start with this command:
+
+	python main.py --listen 0.0.0.0 --port 8188 --lowvram
+
+-> Access from the other device in the browser via: 
+
+	<ip-of-device-ComfyUI-is-running-on>:8188
+
 
 ---
 
@@ -290,7 +363,7 @@ Notes:
 
 ### Environment Variables to be set to your personal setting in (.env)
 
-Create your peronalized .env from .env.example:
+Create your personalized .env from .env.example:
 
 	cp .env.example .env
 
@@ -306,6 +379,11 @@ Load env and start:
 Linux/macOS:
 
 	source .venv/bin/activate
+	python app.py
+
+Windows:
+
+	 .venv\Scripts\Activate.ps1
 	python app.py
 
 or:
@@ -374,8 +452,6 @@ Delete .env from the repo history:
 Force-Push (overwrites online history):
 
 	git push --force
-
-
 
 ---
 
