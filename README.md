@@ -34,29 +34,28 @@ A local real-time application that listens via your system microphone and period
 
 ### Repository Layout
 
-- app.py
-- comfyui_bridge.py
-- comfyui.service
-- image_backend.py
-- models/
-  - ggml-base.bin
-- outputs/
-  - images/
-- README.md
-- requirements.txt
-- run.sh
-- run.ps1
-- static/
-- utils/
-  - audio_test.py
-  - dev_check.py
-  - mic_check_whisper.py
-  - test_comfy_local.py
-  - verify_runtime.py
-- web/
-  - index.html
-- workflows/
-  - text2img_any45.json
+	├── app.py
+	├── comfyui_bridge.py
+	├── comfyui.service
+	├── image_backend.py
+	├── outputs
+	│   └── images
+	├── README.md
+	├── requirements.txt
+	├── run.ps1
+	├── run.sh
+	├── static
+	├── utils
+	│   ├── audio_test.py
+	│   ├── dev_check.py
+	│   ├── mic_check_whisper.py
+	│   ├── test_comfy_local.py
+	│   └── verify_runtime.py
+	├── web
+	│   └── index.html
+	└── workflows
+		└── text2img_any45.json
+
 
 ---
 
@@ -71,7 +70,7 @@ Linux (Debian/Ubuntu) — install OS packages for native dependencies and audio 
 
 	sudo apt update
 	sudo apt install -y build-essential cmake pkg-config python3-dev libportaudio2 libasound2-dev
-	Note: These are OS libraries and headers used by sounddevice/PortAudio and potential builds. They are not part of requirements.txt.
+	# Note: These are OS libraries and headers used by sounddevice/PortAudio and potential builds. They are not part of requirements.txt.
 
 macOS:
 
