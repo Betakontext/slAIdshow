@@ -179,6 +179,12 @@ def ensure_in_output_dir(p: Path) -> Path:
 APP_IMAGE_WIDTH = _env_int("APP_IMAGE_WIDTH", 512)
 APP_IMAGE_HEIGHT = _env_int("APP_IMAGE_HEIGHT", 512)
 
+# ---------- Workflows (ComfyUI) ----------
+
+# Root folder for ComfyUI workflow JSON files
+WORKFLOWS_DIR = Path(os.getenv("WORKFLOWS_DIR", "workflows")).resolve()
+WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
+
 # ---------- Ollama ----------
 
 OLLAMA_HOST = _env_str("APP_OLLAMA_HOST", "127.0.0.1")
@@ -318,6 +324,29 @@ class ImageSizeSettings(BaseModel):
 class NegativePromptSettings(BaseModel):
     negative_prompt: str = Field(default="", max_length=4000)
 
+# Workflows API payloads
+class WorkflowItem(BaseModel):
+    name: str = Field(..., description="Display name (stem)")
+    filename: str = Field(..., description="Base filename ending with .json")
+
+class WorkflowList(BaseModel):
+    items: List[WorkflowItem]
+
+class WorkflowSelect(BaseModel):
+    filename: str = Field(..., description="Base filename ending with .json")
+
+    @field_validator("filename")
+    @classmethod
+    def safe_filename(cls, v: str) -> str:
+        # Allow only simple base filenames with safe characters and .json suffix
+        if "/" in v or "\\" in v:
+            raise ValueError("Invalid filename")
+        if not v.endswith(".json"):
+            raise ValueError("Must end with .json")
+        if not re.fullmatch(r"[A-Za-z0-9._\-]+", v):
+            raise ValueError("Illegal characters in filename")
+        return v
+
 # ---------- Audio utils ----------
 
 def pick_input_device(prefer: Optional[str] = None) -> int:
@@ -438,7 +467,7 @@ def _parse_whisper_out(raw: object) -> str:
                 if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
                     t = t[1:-1]
                 cleaned.append(t.strip())
-            return " ".join(cleaned).strip()
+            return " " .join(cleaned).strip()
     return s
 
 def clean_transcript(raw: str) -> str:
@@ -609,6 +638,8 @@ class PipelineState:
     image_width: int = APP_IMAGE_WIDTH
     image_height: int = APP_IMAGE_HEIGHT
     negative_prompt: str = ""
+    # Workflow selection (filename like "text2img_any45.json")
+    active_workflow: Optional[str] = None
     # Audio stream handle and stop event
     audio_stream: Any = None
     audio_stopped_broadcasted: bool = False  # ensures single audio stop event
@@ -735,6 +766,57 @@ def build_image_backend_rt(backend_name: Optional[str] = None, allow_cloud: Opti
 
 def rel_for_ui_path(p: Path) -> str:
     return Path(p).name
+
+# ---------- Workflow helpers ----------
+
+def _list_workflow_files() -> List[WorkflowItem]:
+    """Scan WORKFLOWS_DIR for .json files and return as WorkflowItem list."""
+    items: List[WorkflowItem] = []
+    if not WORKFLOWS_DIR.exists():
+        return items
+    for p in WORKFLOWS_DIR.iterdir():
+        if p.is_file() and p.suffix.lower() == ".json":
+            items.append(WorkflowItem(name=p.stem, filename=p.name))
+    items.sort(key=lambda it: it.name.lower())
+    return items
+
+def _ensure_workflow_exists(filename: str) -> Path:
+    """Validate that filename refers to an existing file within WORKFLOWS_DIR."""
+    candidate = (WORKFLOWS_DIR / filename).resolve()
+    # Enforce directory containment
+    if WORKFLOWS_DIR not in candidate.parents and candidate != WORKFLOWS_DIR:
+        raise FileNotFoundError("Invalid workflow path")
+    if not candidate.exists() or not candidate.is_file():
+        raise FileNotFoundError("Workflow not found")
+    return candidate
+
+def _apply_active_workflow_if_local() -> None:
+    """
+    If LocalComfyBackend is active and a STATE.active_workflow is set,
+    point the backend's cfg.workflow_path to ./workflows/<filename>.
+    """
+    if LocalComfyBackend is None or BACKEND is None:
+        return
+    if not isinstance(BACKEND, LocalComfyBackend):
+        return
+    fname = getattr(STATE, "active_workflow", None)
+    if not fname:
+        return
+    # Resolve path under WORKFLOWS_DIR and ensure containment
+    wf_path = (WORKFLOWS_DIR / fname).resolve()
+    if not wf_path.exists() or not wf_path.is_file():
+        print(f"[WF] active_workflow missing on disk: {wf_path}")
+        return
+    try:
+        # Sicherheitsnetz: verify containment
+        if WORKFLOWS_DIR not in wf_path.parents and wf_path != WORKFLOWS_DIR:
+            print(f"[WF] invalid workflow path escape blocked: {wf_path}")
+            return
+        # Apply to backend config
+        BACKEND.cfg.workflow_path = wf_path  # type: ignore[attr-defined]
+        print(f"[WF] applied workflow to LocalComfyBackend: {wf_path.name}")
+    except Exception as e:
+        print(f"[WF] failed to apply active workflow: {e}")
 
 # ---------- Audio transcription loop ----------
 
@@ -939,6 +1021,13 @@ async def _generate_with_negative_support(prompt: str, width: int, height: int, 
     """
     if BACKEND is None:
         raise RuntimeError("image_backend_not_initialized")
+
+    # Ensure active workflow is applied for LocalComfyBackend
+    try:
+        _apply_active_workflow_if_local()
+    except Exception as e:
+        print(f"[WF] apply before generate failed: {e}")
+
     kwargs: Dict[str, Any] = {"width": width, "height": height}
     try:
         return await BACKEND.generate(prompt, negative_prompt=(negative or ""), **kwargs)  # type: ignore[arg-type]
@@ -971,9 +1060,6 @@ async def lifespan(app: FastAPI):
     # Initialize backend-specific default sizes into state only on first boot
     try:
         dw, dh = _backend_default_size(STATE.image_backend_name)
-        # Only set defaults if UI didn't override via APP_IMAGE_WIDTH/HEIGHT
-        # Keep STATE as provided by env defaults already set during dataclass init
-        # Here we prefer explicit app-level defaults already assigned.
         STATE.image_width = STATE.image_width or dw
         STATE.image_height = STATE.image_height or dh
     except Exception:
@@ -1023,6 +1109,10 @@ app = FastAPI(lifespan=lifespan)
 
 # Static mounts
 app.mount("/static", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="static")
+# Expose ./workflows as read-only static for UI preview
+if not any(route for route in app.router.routes if getattr(route, "path", "") == "/workflows"):
+    app.mount("/workflows", StaticFiles(directory=str(WORKFLOWS_DIR), html=False), name="workflows")
+
 web_dir = Path("web").resolve()
 if web_dir.exists():
     app.mount("/web", StaticFiles(directory=str(web_dir), html=True), name="web")
@@ -1073,6 +1163,13 @@ async def get_config():
     except Exception:
         def_w, def_h = APP_IMAGE_WIDTH, APP_IMAGE_HEIGHT
 
+    # Determine if ComfyUI is the active, enabled backend
+    backend_lower = (STATE.image_backend_name or "").strip().lower()
+    is_comfy = backend_lower == "comfyui"
+    app_disable_comfy_env = os.getenv("APP_DISABLE_COMFYUI", "1").strip().lower()
+    comfy_disabled = app_disable_comfy_env in {"1", "true", "yes", "on"}
+    show_workflow_selector = bool(is_comfy and not comfy_disabled)
+
     return {
         "env_file": ENV_PATH or "(env vars only)",
         "audio": {"device_pref": AUDIO_DEVICE_PREF, "sample_rate": SAMPLE_RATE, "frame_ms": FRAME_MS, "stream_latency_sec": APP_STREAM_LATENCY_SEC},
@@ -1091,10 +1188,49 @@ async def get_config():
             "current_width": STATE.image_width,
             "current_height": STATE.image_height,
             "negative_prompt": STATE.negative_prompt,
+            "active_workflow": STATE.active_workflow,
+            "show_workflow_selector": show_workflow_selector,
+            "comfy": {
+                "enabled": bool(is_comfy and not comfy_disabled),
+                "disabled_via_env": comfy_disabled
+            }
         },
         "sse": {"tick_sec": APP_SSE_TICK_SEC},
     }
 
+# ---------- Workflows API ----------
+
+@app.get("/api/workflows", response_model=WorkflowList)
+async def api_list_workflows() -> WorkflowList:
+    """
+    Return available workflow JSON files under ./workflows.
+    """
+    items = _list_workflow_files()
+    return WorkflowList(items=items)
+
+@app.post("/api/settings/workflow")
+async def api_select_workflow(payload: WorkflowSelect):
+    """
+    Select active workflow by filename; validates against ./workflows and applies to LocalComfyBackend.
+    """
+    try:
+        _ensure_workflow_exists(payload.filename)
+    except FileNotFoundError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    # Persist in state
+    STATE.active_workflow = payload.filename
+
+    # Hot-apply to LocalComfyBackend if active
+    try:
+        _apply_active_workflow_if_local()
+    except Exception as e:
+        print(f"[WF] hot-apply error: {e}")
+
+    await broadcast("status", f"workflow:{STATE.active_workflow}")
+    return {"ok": True, "active_workflow": STATE.active_workflow}
 
 # ---------- SSE: /events ----------
 
@@ -1410,6 +1546,11 @@ async def api_image_allow_cloud(req: ImageAllowCloudReq):
         STATE.image_backend_name = "comfyui"
     try:
         _rebuild_backend()
+        # Re-apply selected workflow if we are on LocalComfyBackend
+        try:
+            _apply_active_workflow_if_local()
+        except Exception as e:
+            print(f"[WF] apply after allow_cloud switch failed: {e}")
         return {"ok": True, "allow_cloud": STATE.allow_cloud, "backend": STATE.image_backend_name}
     except Exception as e:
         return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
@@ -1443,6 +1584,13 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
         else:
             STATE.image_width = cur_w
             STATE.image_height = cur_h
+
+        # Re-apply selected workflow if we are on LocalComfyBackend
+        try:
+            _apply_active_workflow_if_local()
+        except Exception as e:
+            print(f"[WF] apply after backend switch failed: {e}")
+
         await broadcast("status", f"image_backend:{target}")
         return {"ok": True, "backend": target, "width": STATE.image_width, "height": STATE.image_height, "reset": bool(req.reset)}
     except Exception as e:
