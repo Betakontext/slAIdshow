@@ -33,7 +33,9 @@ Thumbs.db
 *.local.json
 
 # Model weights (Whisper, large files; don't version control)
-models/
+.models/ggml-base.bin
+.models/ggml-tiny.bin
+
 # If you need to keep documentation in models/, whitelist it:
 # !models/README.md
 
