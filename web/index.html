@@ -42,11 +42,12 @@
     .status {
       color: var(--muted); font-size: 13px; padding: 4px 8px; border-radius: 6px; background: #11141a; border: 1px solid var(--border);
     }
-    main { padding: 16px; display: grid; gap: 16px; grid-template-columns: 1fr; }
+    main { padding: 16px; padding-bottom: 56px; display: grid; gap: 16px; grid-template-columns: 1fr; }
     .grid {
       display: grid; gap: 16px;
       grid-template-columns: 1.3fr .7fr;
     }
+
     @media (max-width: 1000px) {
       .grid { grid-template-columns: 1fr; }
     }
@@ -96,6 +97,34 @@
     }
     .warn { color: #ffd966; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 11px; }
+
+    /* Footer: bottom-left support/contact links */
+    .footer-hud {
+      position: fixed;
+      left: 10px;
+      bottom: 10px;
+      z-index: 20;
+      font-size: 12px;
+      color: var(--muted);
+      background: rgba(0,0,0,0.35);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 10px;
+      backdrop-filter: blur(6px);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      pointer-events: auto;
+    }
+    .footer-hud a {
+      color: #9ecbff; /* leichtes Blau für Links */
+      text-decoration: none;
+    }
+    .footer-hud a:hover {
+      text-decoration: underline;
+    }
+
+    }
   </style>
 </head>
 <body>
@@ -211,6 +240,8 @@
       </aside>
     </div>
   </main>
+
+
 
   <script>
     // --- All comments strictly in English ---
@@ -1072,5 +1103,12 @@
       }
     })();
   </script>
+
+  <!-- Bottom-left support/contact links -->
+  <div class="footer-hud" aria-label="Support & Kontakt">
+    <span>SUPPORT: <a href="https://buymeacoffee.com/betakontext" target="_blank" rel="noopener">buymeacoffee.com/betakontext</a></span>
+    <span>CONTACT: Christoph Medicus | <a href="mailto:dev@betakontext.de">dev@betakontext.de</a> | <a href="https://dev.betakontext.de" target="_blank" rel="noopener">dev.betakontext.de</a></span>
+  </div>
+
 </body>
 </html>
