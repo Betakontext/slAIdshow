@@ -36,6 +36,7 @@ A local real-time application that listens via your system microphone and period
 	├── comfyui_bridge.py
 	├── comfyui.service
 	├── image_backend.py
+	├── models
 	├── outputs
 	│   └── images
 	├── README.md
@@ -52,7 +53,7 @@ A local real-time application that listens via your system microphone and period
 	├── web
 	│   └── index.html
 	└── workflows
-		└── text2img_any45.json
+		└── text2img_SD15-FP16.json
 
 
 ---
