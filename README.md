@@ -1,8 +1,8 @@
-# slAIdshow | speechtoimage_ai
+# slAIdshow | local AI speech to image generator
 
 ## Whisper-Ollama-ComfyUI Pipeline for AI Live Illustrations (local, Browser UI)
 
-A local real-time application that listens via your system microphone and periodically generates images. Everything runs on your machine: audio transcription via Whisper (https://github.com/openai/whisper), prompt optimization via Ollama (https://github.com/ollama/ollama), and local image generation via ComfyUI (https://github.com/comfy-org/comfyui) or online via Pollinations (https://github.com/pollinations/pollinations). A simple browser UI provides Start/Stop of audio input, Text input, Prompt optimization via Ollama and workflow selection for ComfyUI. It shows generated images every 6-10 seconds, along with live transcript and the latest prompt.
+A local real-time application that listens via your system microphone and periodically generates images. Everything runs on your machine via Whisper (https://github.com/openai/whisper) as backend for audio transcriptions, local LLM prompt optimizations via Ollama (https://github.com/ollama/ollama), and image generations via ComfyUI (https://github.com/comfy-org/comfyui) locally, or online if switched to Pollinations cloud services (https://github.com/pollinations/pollinations). A simple browser UI provides Start/Stop of audio input, text input field for direct prompts, optional prompt optimizations via Ollama and a workflow selector for custom ComfyUI workflows. With the default setup, delivered in this repository, it shows the generated images every 6-10 seconds, along with live transcripts and the latest prompts. The runs flawless on a RTX3060 GPU with 6GP VRAM, and slows down a bit if run with CPU only.
 
 ---
 
@@ -282,42 +282,14 @@ CPU-only mode (if no CUDA/GPU available) inside the ComfyUI venv:
 	print("torch", torch.__version__, "cuda_available?", torch.cuda.is_available())
 	PY
 
-Pull a Diffusion model : Open a terminal in the folder to pull into: /ComfyUI/models/checkpoints and install.
-For manga or anime stylized pictures f.e.
-
-	curl.exe -fL --retry 5 --retry-delay 3 "https://huggingface.co/shibal1/anything-v4.5-clone/resolve/main/anything-v4.5-	pruned.safetensors?download=true" -o "C:\Users\Administrator\Documents\Arbeiten\0000_DEV\ComfyUI\models\checkpoints\anything-v4.5-	pruned.safetensors"
-
-or for realistc pictures:
-
-	curl.exe -fL --retry 5 --retry-delay 3 "https://huggingface.co/casque/realisticVisionV51_v51VAE/resolve/main/realisticVisionV51_v51VAE.safetensors?download=true" -o "C:\Users\Administrator\Documents\Arbeiten\0000_DEV\ComfyUI\models\checkpoints\realisticVisionV51_v51VAE.safetensors"
-
-
-Get sha after it completes:
-PS
-
-	$dst = "C:\Users\Administrator\Documents\Arbeiten\0000_DEV\ComfyUI\models\checkpoints\anything-v4.5-pruned.safetensors"
-	$hash = (Get-FileHash $dst -Algorithm SHA256).Hash
-	Set-Content "$dst.sha256.txt" $hash
-
-and verify 
-
-(anything-v4.5)
-
-	$dst = "C:\Users\Administrator\Documents\Arbeiten\0000_DEV\ComfyUI\models\checkpoints\anything-v4.5-pruned.safetensors"
-	$expected = Get-Content "$dst.sha256.txt"
-	$current  = (Get-FileHash $dst -Algorithm SHA256).Hash
-	if ($current -eq $expected) { "OK: hash matches" } else { "MISMATCH: file changed!" }
-
-(realisticVision)
-
-	Get-Item "C:\Users\Administrator\Documents\Arbeiten\0000_DEV\ComfyUI\models\checkpoints\realisticVisionV51_v51VAE.safetensors" | Select-Object 	FullName, Length, LastWriteTime
-	Get-FileHash "C:\Users\Administrator\Documents\Arbeiten\0000_DEV\ComfyUI\models\checkpoints\realisticVisionV51_v51VAE.safetensors" -Algorithm SHA256
-
+Pull a Diffusion model and place it into: /ComfyUI/models/checkpoints and install.
 
 Start ComfyUI
 
 	# Start From your ComfyUI folder
 	python main.py --listen 127.0.0.1 --port 8188 --lowvram
+	# If you only have a CPU available:
+	# python main.py --listen 127.0.0.1 --port 8188 --CPU
 
 To access ComfyUI from another device in the same local network
 add "--listen 0.0.0.0" in ComfyUIs file run_nvidia_gpu.bat 
@@ -325,11 +297,12 @@ add "--listen 0.0.0.0" in ComfyUIs file run_nvidia_gpu.bat
 and start with this command:
 
 	python main.py --listen 0.0.0.0 --port 8188 --lowvram
+	# If you only have a CPU available:
+	# python main.py --listen 0.0.0.0 --port 8188 --CPU
 
--> Access from the other device in the browser via: 
+-> If you want to access the ComfyUI GUI from the other device in the browser via:
 
 	<ip-of-device-ComfyUI-is-running-on>:8188
-
 
 ---
 
