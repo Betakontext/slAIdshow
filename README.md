@@ -1,8 +1,8 @@
-# speechtoimage_ai
+# slAIdshow | speechtoimage_ai
 
-## Pipeline for AI Live Illustrations (local, Browser UI)
+## Whisper-Ollama-ComfyUI Pipeline for AI Live Illustrations (local, Browser UI)
 
-A local real-time application that listens via your system microphone and periodically generates images. Everything runs on your machine: audio capture, transcription via Whisper (pywhispercpp), optional prompt optimization via Ollama, and optional image generation via ComfyUI or Pollinations. A simple browser UI provides Start/Stop and shows a growing gallery of generated images along with live transcript and the latest prompt. The app also runs without ComfyUI; you will still see status and transcript events.
+A local real-time application that listens via your system microphone and periodically generates images. Everything runs on your machine: audio capture, transcription via Whisper (pywhispercpp), optional prompt optimization via Ollama, and optional image generation via ComfyUI (local) or Pollinations (cloud). A simple browser UI provides Start/Stop of audio input, Text input, Prompt optimization via Ollama and workflow selection for ComfyUI. It shows generated images every 6-10 seconds, along with live transcript and the latest prompt.
 
 ---
 
@@ -10,13 +10,11 @@ A local real-time application that listens via your system microphone and period
 
 - Local Browser UI (FastAPI) with Start/Stop controls
 - Local audio capture from system devices
-- Periodic transcription snapshots (configurable, e.g., every 3–6 s)
-- Optional: Prompt optimization via Ollama (localhost:11434)
-- Optional: Image generation via:
-  - ComfyUI (localhost:8188)
-  - Pollinations (cloud; requires API key)
+- Periodic transcription snapshots via Whisper (configurable, e.g., every 3–6 s)
+- Optional: 	Prompt optimization via Ollama (localhost:11434)
+				Image generation via ComfyUI (localhost:8188) or Pollinations (cloud; requires API key)
 - Live updates in the browser via Server-Sent Events (SSE)
-- Strictly local connections for local backends (127.0.0.1)
+- Strictly local connections for local backends (127.0.0.1) or LAN availability via 0.0.0.0
 
 ---
 
@@ -27,7 +25,7 @@ A local real-time application that listens via your system microphone and period
 - Working microphone
 - pywhispercpp installed locally (for audio transcription)
 - Ollama installed and running locally (for LLM prompt optimization)
-- Optional: ComfyUI running locally with API on port 8188 (for image generation)
+- ComfyUI running locally with API on port 8188 (for local image generation)
 - Optional: Pollinations account + API key (for cloud image generation)
 
 ---
@@ -122,13 +120,13 @@ Stop via the UI or press Ctrl+C in the terminal.
 1. Clone the repository and open a terminal in the project directory.
 
 2. Create your personalized .env from .env.example:
-
+	
+	# f.e. BASH
 	cp .env.example .env
 
-3. Create the folder /models and fetch a Whisper-model, f.e. ggml-base.bin in there
+3. Create the folder /models , fetch a Whisper-model, f.e. ggml-base.bin place it in there
 
-4. Install Ollama, pull an LLM model f.e. phi3:mini and 
-   define its usage in -> .env
+4. Install Ollama, pull an LLM model f.e. gemma3:1b (default in .env) and define its usage in -> .env
 
 5. Define the -> path to /ComfyUI/output in -> .env
    APP_COMFY_OUTPUT_DIR=/yourpath/to/ComfyUI/output
@@ -475,12 +473,16 @@ Force-Push (overwrites online history):
 
 ### License
 
-- MIT
+- MIT Licence
 
 ---
 
 ### Contact
 
-- Christoph Medicus — dev@betakontext.de — https://dev.betakontext.de
+- Betakontext | Christoph Medicus — dev@betakontext.de — https://dev.betakontext.de
 
 - Contributions and issues are welcome. Please open an issue with logs and your environment (.env without secrets) if you need help.
+
+### Support 
+
+Buy me a coffee on https://buymeacoffee.com/betakontext

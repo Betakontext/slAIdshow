@@ -1,21 +1,26 @@
 # /etc/systemd/system/comfyui.service
 [Unit]
 Description=ComfyUI (local)
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-# Important: existing username
 User=cm
 Group=cm
-# Installfolder
 WorkingDirectory=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI
-# Python from venv (absoluter path!)
+# Absolute Python aus venv
 ExecStart=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/.venv/bin/python main.py --listen 127.0.0.1 --port 8188 --cpu
-# Optional: PATH to venv (mostly not necessary, ExecStart is absolut)
-Environment="PATH=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/.venv/bin:%s"
+# Optional: PATH setzen (nicht zwingend nötig, da ExecStart absolut ist)
+Environment="PATH=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+# Dateien/Logs: Limit erhöhen, sauberer Kill
 Restart=on-failure
 RestartSec=3
+TimeoutStopSec=20
+# Journald-Log-Limits (optional, je nach Bedarf)
+# StandardOutput=journal
+# StandardError=journal
+# Nice=5
 
 [Install]
 WantedBy=multi-user.target
