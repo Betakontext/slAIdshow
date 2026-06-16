@@ -2,7 +2,7 @@
 
 ## Whisper-Ollama-ComfyUI Pipeline for AI Live Illustrations (local, Browser UI)
 
-A local real-time application that listens via your system microphone and periodically generates images. Everything runs on your machine: audio capture, transcription via Whisper (pywhispercpp), optional prompt optimization via Ollama, and optional image generation via ComfyUI (local) or Pollinations (cloud). A simple browser UI provides Start/Stop of audio input, Text input, Prompt optimization via Ollama and workflow selection for ComfyUI. It shows generated images every 6-10 seconds, along with live transcript and the latest prompt.
+A local real-time application that listens via your system microphone and periodically generates images. Everything runs on your machine: audio transcription via Whisper (https://github.com/openai/whisper), prompt optimization via Ollama (https://github.com/ollama/ollama), and local image generation via ComfyUI (https://github.com/comfy-org/comfyui) or online via Pollinations (https://github.com/pollinations/pollinations). A simple browser UI provides Start/Stop of audio input, Text input, Prompt optimization via Ollama and workflow selection for ComfyUI. It shows generated images every 6-10 seconds, along with live transcript and the latest prompt.
 
 ---
 
