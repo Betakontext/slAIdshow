@@ -33,16 +33,14 @@ Thumbs.db
 *.local.json
 
 # Model weights (Whisper, large files; don't version control)
-.models/ggml-base.bin
-.models/ggml-tiny.bin
+models/*.bin
 
 # If you need to keep documentation in models/, whitelist it:
 # !models/README.md
 
 # ComfyUI workflows
-.workflows/text2img_any45.json
-.workflows/text2img_ema15.json
-.workflows/text2img_rV15.json
+workflows/*.json
+!workflows/text2img_SD15-FP16.json
 
 # Generated outputs (images, artifacts)
 outputs/

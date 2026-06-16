@@ -9,12 +9,11 @@ A local real-time application that listens via your system microphone and period
 ### Features
 
 - Local Browser UI (FastAPI) with Start/Stop controls
-- Local audio capture from system devices
-- Periodic transcription snapshots via Whisper (configurable, e.g., every 3–6 s)
-- Optional: 	Prompt optimization via Ollama (localhost:11434)
-				Image generation via ComfyUI (localhost:8188) or Pollinations (cloud; requires API key)
+- Audio capture from system devices with periodic transcription snapshots via Whisper (configurable, e.g., every 3–6 s)
+- Prompt optimizations for picture generation from those transcripts via Ollama (localhost:11434)
+- Image generations via ComfyUI (localhost:8188) and/or Pollinations (cloud; requires API key)
 - Live updates in the browser via Server-Sent Events (SSE)
-- Strictly local connections for local backends (127.0.0.1) or LAN availability via 0.0.0.0
+- Strictly local connections for local backends (127.0.0.1) and LAN availability via 0.0.0.0
 
 ---
 
@@ -79,23 +78,61 @@ Windows:
 
 To use the full combination of Services strictly local, install:
 
-- pywhispercpp (Clone the repository and create /model Folder in speechtoimage_ai and pull a model -> f.e. ggml-base)
-- Ollama on 127.0.0.1:11434 (pull at least one model -> f.e. phi3:mini)
-- ComfyUI on 127.0.0.1:8188 (Model pulled -> f.e. anything-v4.5-pruned.safetensors; API enabled)
-
-To switch to Cloud servis (Pollinations)
-
-- create Pollinations account and set your key in .env
 -------
 
-### Option A — Installation of speechtoimage_ai with Helper Scripts (recommended)
+#### Step by step setup:
+
+To use the full combination of services:
+
+1. Clone the repository and open a terminal in the project directory.
+
+2. Create your personalized .env from .env.example:
+
+BASH
+
+	cp .env.example .env
+
+3. Fetch a Whisper-model, f.e. ggml-base.bin (default definition in .env) and place it in /models folder. Redefine it in .env if you use another model.
+
+4. Install Ollama, pull an LLM model f.e. gemma3:1b (default in .env). Redefine it in .env if you use another model.
+
+5. Install ComfyUI and pull a diffusion model. anything-v4.5-pruned and place it into -> /ComfyUI/models/checkpoints (in ComfyUI main folder, not in speechtoimage_ai. Define yourpathto/ComfyUI/output in -> .env if you use ComfyUI on the same device. If you use over LAN switch to 0.0.0.0 in .env -> APP_COMFY_OUTPUT_DIR=/yourpath/to/ComfyUI/output. Put your customized ComfyUI workflows into /workflows. You can switch between workflows in the UI. Start ComfyUi from it's main folder with:
+
+BASH
+
+	# With f.e. 6GB VRAM GPU
+	python main.py --listen 127.0.0.1 --port 8188 --lowvram
+	# With CPU
+	# python main.py --listen 127.0.0.1 --port 8188 --CPU
+	# To open it to your local network via LAN
+	# python main.py --listen 0.0.0.0 --port 8188 --lowvram # --CPU
+
+To open ComfyUI in the browser:
+
+	# strictly local
+	http://127.0.0.1:8188
+	# to reach over LAN, if running on another device
+	http://<ipadress-of-device-with-ComfyUI-running>:8188
+
+
+6. If you want use the integrated option to switch to cloud image generations, Signup to Pollinations and get your Pollinations key. Set it up in -> .env -> POLLINATIONS_API_KEY=sk_*************
+
+### slAIdshow Installation:
+
+#### Option A — via Helper Scripts (recommended)
+
+Open a terminal in the main folder of the repo:
 
 Linux / macOS:
+
+BASH
 
 	chmod +x run.sh
 	./run.sh
 
 Windows (PowerShell):
+
+BASH
 
 	Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 	.\run.ps1
@@ -114,40 +151,47 @@ Open the UI in your browser:
 
 Stop via the UI or press Ctrl+C in the terminal.
 
------------- 
+Summary:
 
-#### Step by step setup: 
+It is important to fill .env with your lokal values:
 
-1. Clone the repository and open a terminal in the project directory.
+	APP_OUTPUT_DIR=./outputs/images
+	APP_COMFY_WORKFLOW=./workflows/text2img_SD15-FP16.json
+	APP_COMFY_OUTPUT_DIR=/**yourpathto**/ComfyUI/output
+	POLLINATIONS_API_KEY=sk_xxxx  #(required if using Pollinations)
 
-2. Create your personalized .env from .env.example:
-	
-	# f.e. BASH
-	cp .env.example .env
+Load env and start:
 
-3. Create the folder /models , fetch a Whisper-model, f.e. ggml-base.bin place it in there
+Linux/macOS:
 
-4. Install Ollama, pull an LLM model f.e. gemma3:1b (default in .env) and define its usage in -> .env
+	source .venv/bin/activate
+	python app.py
 
-5. Define the -> path to /ComfyUI/output in -> .env
-   APP_COMFY_OUTPUT_DIR=/yourpath/to/ComfyUI/output
-   APP_COMFY_WORKFLOW=./workflows/text2img_any45.json 	
-   Start ComfyUi from ist main folder with: 
+Windows:
 
-	python main.py --listen 127.0.0.1 --port 8188 --lowvra
+	 .venv\Scripts\Activate.ps1
+	python app.py
 
-6. Pull a diffusion model f.e.: anything-v4.5-pruned and 
-   place it into -> /ComfyUI/models/checkpoints (in ComfyUI main folder, not in speechtoimage_ai)
+or:
 
-7. To switch between local and cloud image generation, use Pollinations and 
-   define your Pollinations key: sk-******* in -> .env
-   POLLINATIONS_API_KEY=sk-xxxx  #(required if using Pollinations)
+	uvicorn app:app --host 127.0.0.1 --port 8080
 
+Open the UI:
+
+- http://127.0.0.1:8080
+
+---
 
 
 ----------------------------------------------------------------------------------------------
 
-### Option B — Manual Setup of speechtoimage_ai
+#### Option B — Manual Setup of slAIdshow
+
+Create your personalized .env from .env.example:
+
+BASH
+
+	cp .env.example .env
 
 Create and activate a virtual environment, then install dependencies:
 
@@ -162,6 +206,7 @@ Windows PowerShell:
 	.venv\Scripts\Activate.ps1
 	python -m pip install --upgrade pip
 	pip install -r requirements.txt
+	# Pywhisper installation:
 	pip install --no-cache-dir pywhispercpp
 
 Optional VAD (may require source build on some systems):
@@ -172,17 +217,17 @@ Alternatively, try wheels:
 
 	pip install --no-cache-dir webrtcvad-wheels
 
-Fetch a Whisper model and place it in ./models:
+Fetch a Whisper model and place it in ./models. ggml-base.bin is default in .env
 
 BASH
-	mkdir -p models
+
 	curl -L -o models/ggml-base.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
 	# or tiny: curl -L -o models/ggml-tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
 
 or in PS
-	mkdir -p models
+
 	curl.exe -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin?download=true" -o "models/ggml-base.bin"
-	# or tiny: curl.exe -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin?download=true" -o "models/ggml-	tiny.bin 
+	# or tiny: curl.exe -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin?download=true" -o "models/ggml-base.bin
 
 Start the server:
 
@@ -200,7 +245,7 @@ Open the UI:
 
 ---
 
-### Quick Tests
+### Tests
 
 Check Whisper import:
 
@@ -233,16 +278,16 @@ Whisper live mic test:
 
 ---
 
-### Ollama Setup (Optional LLM)
+### Ollama Setup hints (LLM backend for automized image prompts)
 
 Install Ollama (see official docs), then:
 
 	ollama serve
-	ollama pull phi3:mini    (or llama3, mistral, etc.)
+	ollama pull gemma3:1b # or phi3:mini llama3, mistral, ... dependent from your resources
 
 Sanity check:
 
-	curl -s http://127.0.0.1:11434/api/generate -H "Content-Type: application/json" -d '{"model":"phi3:mini","prompt":"Say hello","stream":false,"options":{"temperature":0.2}}'
+	curl -s http://127.0.0.1:11434/api/generate -H "Content-Type: application/json" -d '{"model":"gemma3:1b","prompt":"Say hello","stream":false,"options":{"temperature":0.2}}'
 
 Ensure APP_OLLAMA_MODEL IN the file .env matches the model you pulled and that Ollama listens on 127.0.0.1:11434.
 
@@ -282,17 +327,16 @@ CPU-only mode (if no CUDA/GPU available) inside the ComfyUI venv:
 	print("torch", torch.__version__, "cuda_available?", torch.cuda.is_available())
 	PY
 
-Pull a Diffusion model and place it into: /ComfyUI/models/checkpoints and install.
+Pull a diffusion model f.e. via huggingface and place it into: /ComfyUI/models/checkpoints and install. ComfyUI by default suggests: v1-5-pruned-emaonly-fp16.safetensors which can be downloaded from inside Comfy GUI.Make sure to place it in <yourpathto>/ComfyUI/models/checkpoints
 
 Start ComfyUI
 
-	# Start From your ComfyUI folder
+	# Start from inside your ComfyUI main folder
 	python main.py --listen 127.0.0.1 --port 8188 --lowvram
 	# If you only have a CPU available:
 	# python main.py --listen 127.0.0.1 --port 8188 --CPU
 
-To access ComfyUI from another device in the same local network
-add "--listen 0.0.0.0" in ComfyUIs file run_nvidia_gpu.bat 
+To access ComfyUI from another device in the same local network add "--listen 0.0.0.0" in ComfyUIs file run_nvidia_gpu.bat
 .\python_embeded\python.exe -s ComfyUI\main.py --windows-standalone-build --listen 0.0.0.0
 and start with this command:
 
@@ -313,8 +357,7 @@ Use Pollinations as an alternative image backend (cloud). This requires an API k
 1) Create a Pollinations account and obtain your API key.
 2) Add the key to your `.env` (example variable names):
 
-   - POLLINATIONS_API_KEY=sk-xxxx
-   - APP_IMAGE_BACKEND=pollinations
+   - POLLINATIONS_API_KEY=sk_xxxx
 
 3) Optional tuning vars (if supported by your bridge/implementation):
 
@@ -325,48 +368,12 @@ Use Pollinations as an alternative image backend (cloud). This requires an API k
    - POLLINATIONS_WIDTH=1024
    - POLLINATIONS_HEIGHT=1024
 
-4) Start the app; when APP_IMAGE_BACKEND=pollinations is set and the key is present, the app will call Pollinations for image generation instead of ComfyUI.
+4) If the key is set and the key is present, the app will allow you to switch to Pollinations cloud service as backend for image generation instead of ComfyUI.
 
 Notes:
 - Pollinations is a cloud service; prompts and generation requests are sent over the internet.
 - Keep your API key private. Do not commit `.env` to version control.
 
----
-
-### Environment Variables to be set to your personal setting in (.env)
-
-Create your personalized .env from .env.example:
-
-	cp .env.example .env
-
-Fill .env with your lokal values, never commit:
-
-	APP_OUTPUT_DIR=./outputs/images
-	APP_COMFY_WORKFLOW=./workflows/text2img_any45.json
-	APP_COMFY_OUTPUT_DIR=/path/to/ComfyUI/output
-	POLLINATIONS_API_KEY=sk-xxxx  #(required if using Pollinations)
-
-Load env and start:
-
-Linux/macOS:
-
-	source .venv/bin/activate
-	python app.py
-
-Windows:
-
-	 .venv\Scripts\Activate.ps1
-	python app.py
-
-or:
-
-	uvicorn app:app --host 127.0.0.1 --port 8080
-
-Open the UI:
-
-- http://127.0.0.1:8080
-
----
 
 ### Usage
 
