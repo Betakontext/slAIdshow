@@ -364,7 +364,7 @@ class ComfyConfig(BaseModel):
     """Runtime configuration for the local ComfyUI backend."""
     host: str = Field(default_factory=lambda: _env_str("APP_COMFY_HOST", "127.0.0.1"))
     port: int = Field(default_factory=lambda: _env_int("APP_COMFY_PORT", 8188))
-    workflow_path: Path = Field(default_factory=lambda: Path(_env_str("APP_COMFY_WORKFLOW", "./workflows/text2img_any45.json")).resolve())
+    workflow_path: Path = Field(default_factory=lambda: Path(_env_str("APP_COMFY_WORKFLOW", "./workflows/text2img_SD15-FP16.json")).resolve())
     width: int = Field(default_factory=lambda: _env_int("APP_COMFY_WIDTH", int(_env_str("APP_IMAGE_WIDTH", "512") or "512")))
     height: int = Field(default_factory=lambda: _env_int("APP_COMFY_HEIGHT", int(_env_str("APP_IMAGE_HEIGHT", "512") or "512")))
     steps: int = Field(default_factory=lambda: _env_int("APP_COMFY_STEPS", 20))

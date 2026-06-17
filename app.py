@@ -638,7 +638,7 @@ class PipelineState:
     image_width: int = APP_IMAGE_WIDTH
     image_height: int = APP_IMAGE_HEIGHT
     negative_prompt: str = ""
-    # Workflow selection (filename like "text2img_any45.json")
+    # Workflow selection (filename like "text2img_SD15-FP16.json")
     active_workflow: Optional[str] = None
     # Audio stream handle and stop event
     audio_stream: Any = None
