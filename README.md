@@ -97,7 +97,14 @@ BASH
 
 4. Install Ollama, pull an LLM model f.e. gemma3:1b (default in .env). Redefine it in .env if you use another model.
 
-5. Install ComfyUI and pull a diffusion model. anything-v4.5-pruned and place it into -> /ComfyUI/models/checkpoints (in ComfyUI main folder, not in speechtoimage_ai. Define yourpathto/ComfyUI/output in -> .env if you use ComfyUI on the same device. If you use over LAN switch to 0.0.0.0 in .env -> APP_COMFY_OUTPUT_DIR=/yourpath/to/ComfyUI/output. Put your customized ComfyUI workflows into /workflows. You can switch between workflows in the UI. Start ComfyUi from it's main folder with:
+5. Install ComfyUI and pull a diffusion model. 
+
+ComfyUI by default suggests: v1-5-pruned-emaonly-fp16.safetensors. Place it into -> /ComfyUI/models/checkpoints (in ComfyUI main folder, not in speechtoimage_ai!).If you want to download it f.e. directly form hugginface you can use a direkt link to the wished model. In this case: dreamshaper-8-1.5.safetensors:
+
+	curl -L -O "https://huggingface.co/datasets/tyDiffusion/Diffusion/resolve/7f894348dd1cb8a86a81f48d426277cf6d810af1/dreamshaper-8-1.5.safetensors"   
+	
+
+Define yourpathto/ComfyUI/output in slAIDshow -> .env if you use ComfyUI on the same device. If you use over LAN switch to 0.0.0.0 in .env -> APP_COMFY_OUTPUT_DIR=/yourpath/to/ComfyUI/output. Put your customized ComfyUI workflows into /workflows. You can switch between workflows in the UI. Start ComfyUi from it's main folder with:
 
 BASH
 
