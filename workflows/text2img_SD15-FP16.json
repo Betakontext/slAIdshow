@@ -1,7 +1,7 @@
 {
   "1": {
     "inputs": {
-      "ckpt_name": "anything-v4.5-pruned.safetensors"
+        "ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors"
     },
     "class_type": "CheckpointLoaderSimple",
     "_meta": {
@@ -10,7 +10,7 @@
   },
   "2": {
     "inputs": {
-      "text": "\"Zwei Störche brüten auf dem Dach einer futuristischen Fabrik\"",
+      "text": "\"Kinder spielen in einem Schwimmbad an der Küste. Felsen gltzern im Sonenlicht.\"",
       "clip": [
         "1",
         1

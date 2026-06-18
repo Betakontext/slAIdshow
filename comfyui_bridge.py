@@ -4,16 +4,67 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Iterable
+from urllib.parse import urlencode, quote
 
 import httpx
 from pydantic import BaseModel, Field
 
+# -----------------------------
+# Env helpers & host policy
+# -----------------------------
+
+def _env_str(k: str, d: str = "") -> str:
+    return (os.getenv(k, d) or "").strip()
+
+def _env_bool01(k: str, d: int = 0) -> bool:
+    v = (os.getenv(k, str(d)) or "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
+    try:
+        ip_addr = ipaddress.ip_address(ip)
+    except Exception:
+        return False
+    parts = [p.strip() for p in (subnets_str or "").replace(",", " ").split() if p.strip()]
+    for cidr in parts:
+        try:
+            net = ipaddress.ip_network(cidr, strict=False)
+            if ip_addr in net:
+                return True
+        except Exception:
+            continue
+    return False
+
+def _assert_image_backend_host_policy(host: str) -> None:
+    """
+    Privacy policy:
+    - Always allow loopback.
+    - Remote only if APP_ALLOW_REMOTE_BACKENDS=1 and optional subnets allowlist matches.
+    """
+    if host in {"127.0.0.1", "localhost"}:
+        return
+    allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
+    if not allow_remote:
+        raise AssertionError(f"Only localhost allowed, got {host}")
+    subnets = _env_str("APP_ALLOWED_SUBNETS", "")
+    if not subnets:
+        return
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if not _is_in_allowed_subnets(host, subnets):
+        raise AssertionError(f"Remote host {host} not in allowed subnets ({subnets})")
+
+# Optional filesystem fallback when /view is unavailable or unsuitable (mounted output dir).
+_COMFY_OUTPUT_DIR: Optional[Path] = Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).resolve() if _env_str("APP_COMFY_OUTPUT_DIR", "") else None
 
 # -----------------------------
 # Connection / helpers
@@ -25,74 +76,56 @@ class ComfyConnection(BaseModel):
 
     @property
     def base(self) -> str:
-        # Restrict to localhost for privacy/safety
-        if self.host not in {"127.0.0.1", "localhost"}:
-            raise AssertionError(f"Only localhost allowed, got {self.host}")
+        _assert_image_backend_host_policy(self.host)
         return f"http://{self.host}:{self.port}"
 
-
 def _limits() -> httpx.Limits:
-    # Reasonable connection pool for a local service
     return httpx.Limits(max_keepalive_connections=8, max_connections=16, keepalive_expiry=30.0)
 
-
 def _timeout(total: float = 150.0) -> httpx.Timeout:
-    # Total read timeout is the dominant factor for image generation
     total = max(30.0, min(total, 300.0))
     return httpx.Timeout(connect=5.0, read=total, write=8.0, pool=8.0)
 
-
 def _clamp_dim(v: Optional[int]) -> Optional[int]:
-    # Keep image dims in a safe range; many nodes require multiples of 8
     if v is None:
         return None
     x = int(v)
     x = max(64, min(2048, x))
     return x - (x % 8)
 
-
-def _env_str(k: str, d: str = "") -> str:
-    return (os.getenv(k, d) or "").strip()
-
-
-# Optional filesystem fallback when /view is unavailable
-_COMFY_OUTPUT_DIR: Optional[Path] = Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).resolve() if _env_str("APP_COMFY_OUTPUT_DIR", "") else None
-
+def _select_view_mode(host: str) -> str:
+    """
+    Decide view mode: 'path' for local, 'query' for remote.
+    Override via APP_COMFY_FORCE_VIEW_MODE in {'auto','path','query'}.
+    """
+    override = _env_str("APP_COMFY_FORCE_VIEW_MODE", "auto").lower()
+    if override in {"path", "query"}:
+        return override
+    # auto
+    if host in {"127.0.0.1", "localhost"}:
+        return "path"
+    return "query"
 
 # -----------------------------
 # Prompt manipulation
 # -----------------------------
 
 def _ensure_api_prompt_dict(body: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Ensure the payload has a top-level 'prompt' dict in ComfyUI API format.
-    - If body already contains 'prompt' as a dict, return as-is.
-    - If body itself is a node mapping (id -> node with 'class_type'), wrap it into {'prompt': body}.
-    - Otherwise raise for invalid shape.
-    """
     if isinstance(body, dict) and "prompt" in body and isinstance(body["prompt"], dict):
         return body
     if isinstance(body, dict) and body:
-        # Heuristic: all keys are strings and all values are dicts with 'class_type'
         if all(isinstance(k, str) and isinstance(v, dict) and "class_type" in v for k, v in body.items()):
             return {"prompt": body}
     raise RuntimeError("invalid_prompt_format: expected a 'prompt' dict or a node mapping")
-
 
 def _get_node(prompt: Dict[str, Any], node_id: str) -> Optional[Dict[str, Any]]:
     n = prompt.get(node_id)
     return n if isinstance(n, dict) else None
 
-
 def _set_input_if_present(node: Dict[str, Any], key: str, value: Any) -> None:
-    """
-    Modify 'inputs' map only if it exists and contains the key.
-    This avoids creating invalid node structures.
-    """
     ins = node.get("inputs")
     if isinstance(ins, dict) and key in ins:
         ins[key] = value
-
 
 def override_prompt_inplace(
     body: Dict[str, Any],
@@ -107,23 +140,14 @@ def override_prompt_inplace(
     scheduler: Optional[str] = None,
     denoise: Optional[float] = None,
     seed: Optional[int] = None,
-    # Node IDs for your shared workflow (adjust if your workflow differs)
     node_id_positive: str = "2",
     node_id_negative: str = "3",
     node_id_latent: str = "4",
     node_id_ksampler: str = "5",
 ) -> Dict[str, Any]:
-    """
-    Apply safe in-place overrides for the given API prompt structure:
-    - text on CLIPTextEncode (positive/negative)
-    - width/height on EmptyLatentImage
-    - steps/cfg/sampler/scheduler/denoise/seed on KSampler
-    The function is idempotent and only sets keys that already exist in the node's inputs.
-    """
     payload = _ensure_api_prompt_dict(body)
     prompt: Dict[str, Any] = payload["prompt"]
 
-    # Positive/negative prompts
     if positive_text is not None:
         n2 = _get_node(prompt, node_id_positive)
         if n2:
@@ -133,7 +157,6 @@ def override_prompt_inplace(
         if n3:
             _set_input_if_present(n3, "text", negative_text)
 
-    # Latent size (EmptyLatentImage)
     w = _clamp_dim(width) if width is not None else None
     h = _clamp_dim(height) if height is not None else None
     if w is not None or h is not None:
@@ -144,7 +167,6 @@ def override_prompt_inplace(
             if h is not None:
                 _set_input_if_present(n4, "height", int(h))
 
-    # Sampler params
     n5 = _get_node(prompt, node_id_ksampler)
     if n5:
         if steps is not None:
@@ -162,7 +184,6 @@ def override_prompt_inplace(
 
     return payload
 
-
 # -----------------------------
 # HTTP calls
 # -----------------------------
@@ -172,17 +193,12 @@ async def _post_prompt(
     base_url: str,
     body: Dict[str, Any],
 ) -> str:
-    """
-    Post to /prompt with retry on transient failures.
-    Provides short diagnostic on HTTP 400 (bad request), including first 300 chars of response.
-    """
     delay = 0.8
     last_exc: Optional[Exception] = None
     for attempt in range(1, 5):
         try:
             r = await client.post(f"{base_url}/prompt", json=body)
             if r.status_code == 400:
-                # Include short server message for easier debugging
                 text = r.text[:300].replace("\n", " ")
                 raise RuntimeError(f"comfy_400: {text}")
             r.raise_for_status()
@@ -192,6 +208,7 @@ async def _post_prompt(
             pid = j.get("prompt_id") or j.get("promptId") or j.get("id")
             if not pid:
                 raise RuntimeError("comfy_no_prompt_id")
+            print(f"DEBUG comfy prompt_id: {pid}")
             return str(pid)
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
             last_exc = e
@@ -201,36 +218,20 @@ async def _post_prompt(
                 continue
             break
         except Exception:
-            # Do not retry on schema errors/400 diagnostics
             raise
     raise RuntimeError(f"comfy_post_prompt_failed: {last_exc}")
 
-
 def _node_maps_from_history_obj(history_json: Dict[str, Any], prompt_id: str) -> List[Dict[str, Any]]:
-    """
-    Normalize different history response shapes into a list of node maps:
-    - Some builds return { "<prompt_id>": { ... node map or entry ... } }
-    - Others may return the node map directly.
-    We collect plausible node maps (dicts whose values are dicts).
-    """
     node_maps: List[Dict[str, Any]] = []
-
-    # Direct map possibility
     if isinstance(history_json, dict) and all(isinstance(v, dict) for v in history_json.values()):
         node_maps.append(history_json)
-
-    # Wrapped by prompt_id
     entry = history_json.get(prompt_id)
     if isinstance(entry, dict) and all(isinstance(v, dict) for v in entry.values()):
         node_maps.append(entry)
-
-    # Some responses may nest an "outputs" layer within the entry
     if isinstance(entry, dict):
         outputs = entry.get("outputs")
         if isinstance(outputs, dict) and all(isinstance(v, dict) for v in outputs.values()):
             node_maps.append(outputs)
-
-    # De-duplicate while preserving order
     seen_ids = set()
     deduped: List[Dict[str, Any]] = []
     for m in node_maps:
@@ -240,11 +241,7 @@ def _node_maps_from_history_obj(history_json: Dict[str, Any], prompt_id: str) ->
         deduped.append(m)
     return deduped
 
-
 def _any_images_in_node_maps(node_maps: Iterable[Dict[str, Any]]) -> bool:
-    """
-    Return True if any node map contains an output with an 'images' list.
-    """
     for node_map in node_maps:
         for _, node in node_map.items():
             if not isinstance(node, dict):
@@ -257,7 +254,6 @@ def _any_images_in_node_maps(node_maps: Iterable[Dict[str, Any]]) -> bool:
                     return True
     return False
 
-
 async def _poll_history_ready(
     client: httpx.AsyncClient,
     base_url: str,
@@ -265,13 +261,8 @@ async def _poll_history_ready(
     max_wait_sec: float = 150.0,
     poll_interval: float = 1.0,
 ) -> Dict[str, Any]:
-    """
-    Poll /history/{prompt_id} until at least one output contains a non-empty 'images' list.
-    Returns the history JSON object.
-    """
     deadline = time.time() + max_wait_sec
     last_payload: Optional[Dict[str, Any]] = None
-
     while time.time() < deadline:
         r = await client.get(f"{base_url}/history/{prompt_id}")
         if r.status_code == 404:
@@ -287,14 +278,16 @@ async def _poll_history_ready(
         if maps and _any_images_in_node_maps(maps):
             return j
         await asyncio.sleep(poll_interval)
-
-    raise TimeoutError(f"comfy_history_timeout (last_payload_keys={list(last_payload.keys()) if isinstance(last_payload, dict) else 'n/a'})")
-
+    try:
+        keys = list(last_payload.keys()) if isinstance(last_payload, dict) else "n/a"
+        print("DEBUG comfy history keys:", keys)
+        sample = json.dumps(last_payload or {}, ensure_ascii=False)[:2000]
+        print("DEBUG comfy history sample:", sample)
+    except Exception:
+        pass
+    raise TimeoutError(f"comfy_history_timeout (last_payload_keys={keys if isinstance(keys, list) else keys})")
 
 def _iter_image_descriptors_from_history(history_obj: Dict[str, Any], prompt_id: str) -> Iterable[Dict[str, Any]]:
-    """
-    Yield each 'output' dict that contains an 'images' list from the normalized node maps.
-    """
     maps = _node_maps_from_history_obj(history_obj, prompt_id)
     for node_map in maps:
         for _, node in node_map.items():
@@ -307,8 +300,31 @@ def _iter_image_descriptors_from_history(history_obj: Dict[str, Any], prompt_id:
                 if isinstance(outv, dict) and isinstance(outv.get("images"), list):
                     yield outv
 
+def _build_view_candidates(folder_type: str, subfolder: str, filename: str) -> List[Tuple[str, str, str]]:
+    """
+    Build alternative (type, subfolder, filename) triples to try.
+    Used by both path and query modes.
+    """
+    sub = (subfolder or "").strip().strip("/")
+    candidates: List[Tuple[str, str, str]] = []
+    candidates.append((folder_type or "output", sub, filename))
+    if sub:
+        candidates.append((folder_type or "output", "", filename))
+    candidates.append(("temp", sub, filename))
+    if sub:
+        candidates.append(("temp", "", filename))
+    candidates.append(("output", "", filename))
+    seen = set()
+    uniq: List[Tuple[str, str, str]] = []
+    for t, s, f in candidates:
+        key = (t, s, f)
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(key)
+    return uniq
 
-async def _download_via_view(
+async def _download_via_view_path(
     client: httpx.AsyncClient,
     base_url: str,
     folder_type: str,
@@ -316,26 +332,88 @@ async def _download_via_view(
     filename: str,
 ) -> bytes:
     """
-    Download a single image via ComfyUI /view endpoint.
-    Uses path style: /view/{type}/{subfolder?}/{filename}
+    Download via legacy path style: /view/{type}/{subfolder}/{filename}
+    Tries multiple candidates; URL-encodes each segment.
     """
-    # Build /view path defensively
-    path = f"/view/{folder_type}"
-    subfolder = (subfolder or "").strip().strip("/")
-    if subfolder:
-        path += f"/{subfolder}"
-    path += f"/{filename}"
-    url = f"{base_url}{path}"
-    r = await client.get(url)
-    r.raise_for_status()
-    return r.content
+    filename = filename.strip().lstrip("/")
+    candidates = _build_view_candidates(folder_type, subfolder, filename)
+    last_exc: Optional[Exception] = None
+    for idx, (t, s, f) in enumerate(candidates, start=1):
+        seg_t = quote((t or "").strip(), safe="")
+        seg_s = quote((s or "").strip(), safe="") if s else ""
+        seg_f = quote((f or "").strip(), safe="")
+        path = f"/view/{seg_t}"
+        if seg_s:
+            path += f"/{seg_s}"
+        path += f"/{seg_f}"
+        url = f"{base_url}{path}"
+        delay = 0.2
+        for attempt in range(1, 3):
+            try:
+                print(f"DEBUG comfy GET[path] try#{attempt} cand#{idx}: {url}")
+                r = await client.get(url)
+                print(f"DEBUG comfy GET[path] status={r.status_code} bytes={len(r.content) if r.content else 0}")
+                r.raise_for_status()
+                data = r.content
+                if not data or len(data) < 256:
+                    raise RuntimeError("image_download_too_small")
+                return data
+            except Exception as e:
+                last_exc = e
+                if attempt < 2:
+                    await asyncio.sleep(delay)
+                    delay *= 2.0
+                else:
+                    break
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("image_download_failed_unknown_path")
 
+async def _download_via_view_query(
+    client: httpx.AsyncClient,
+    base_url: str,
+    folder_type: str,
+    subfolder: str,
+    filename: str,
+) -> bytes:
+    """
+    Download via query style: /api/view?filename=...&type=...&subfolder=...
+    Tries multiple (type,subfolder,filename) candidates; parameters are URL-encoded via urlencode.
+    """
+    filename = (filename or "").strip().lstrip("/")
+    candidates = _build_view_candidates(folder_type, subfolder, filename)
+    last_exc: Optional[Exception] = None
+    for idx, (t, s, f) in enumerate(candidates, start=1):
+        params = {
+            "filename": f,
+            "type": (t or "output"),
+            "subfolder": (s or ""),
+        }
+        qs = urlencode(params, safe="/")
+        url = f"{base_url}/api/view?{qs}"
+        delay = 0.2
+        for attempt in range(1, 3):
+            try:
+                print(f"DEBUG comfy GET[query] try#{attempt} cand#{idx}: {url}")
+                r = await client.get(url)
+                print(f"DEBUG comfy GET[query] status={r.status_code} bytes={len(r.content) if r.content else 0}")
+                r.raise_for_status()
+                data = r.content
+                if not data or len(data) < 256:
+                    raise RuntimeError("image_download_too_small")
+                return data
+            except Exception as e:
+                last_exc = e
+                if attempt < 2:
+                    await asyncio.sleep(delay)
+                    delay *= 2.0
+                else:
+                    break
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("image_download_failed_unknown_query")
 
 def _fs_fallback_read(folder_type: str, subfolder: str, filename: str) -> Optional[bytes]:
-    """
-    Optional filesystem fallback using APP_COMFY_OUTPUT_DIR when /view is unavailable.
-    Only applies for type='output' by default ComfyUI behavior.
-    """
     if _COMFY_OUTPUT_DIR is None:
         return None
     base = _COMFY_OUTPUT_DIR
@@ -350,59 +428,58 @@ def _fs_fallback_read(folder_type: str, subfolder: str, filename: str) -> Option
         return None
     return None
 
-
 async def _download_images(
     client: httpx.AsyncClient,
     base_url: str,
     history_obj: Dict[str, Any],
     prompt_id: str,
     out_dir: Path,
+    view_mode: str,
 ) -> List[Path]:
     """
-    Scan history for image outputs and download them via /view,
-    with a filesystem fallback when configured.
+    Download images from history using either 'path' or 'query' mode.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     saved: List[Path] = []
+    found_any = False
 
     for outv in _iter_image_descriptors_from_history(history_obj, prompt_id):
         images = outv.get("images", [])
         if not isinstance(images, list) or not images:
             continue
+        found_any = True
         for item in images:
             if not isinstance(item, dict):
                 continue
-            filename = item.get("filename")
+            filename = (item.get("filename") or "").strip()
             subfolder = item.get("subfolder", "")
             folder_type = item.get("type", "output")
-            if not filename or not isinstance(filename, str):
+            if not filename:
                 continue
 
-            # Try to download with small retry loop
             delay = 0.8
             data: Optional[bytes] = None
-            for attempt in range(1, 5):
+            for attempt in range(1, 3):
                 try:
-                    # Prefer /view
-                    data = await _download_via_view(client, base_url, folder_type, subfolder, filename)
-                    if not data or len(data) < 256:  # sanity check
-                        raise RuntimeError("image_download_too_small")
+                    if view_mode == "query":
+                        data = await _download_via_view_query(client, base_url, folder_type, subfolder, filename)
+                    else:
+                        data = await _download_via_view_path(client, base_url, folder_type, subfolder, filename)
                     break
                 except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError):
-                    if attempt < 4:
+                    if attempt < 2:
                         await asyncio.sleep(delay)
                         delay *= 1.7
                         continue
-                    # last attempt failed -> try fs fallback
                 except Exception:
-                    # fall through to fs fallback below
+                    # Fall through to FS fallback
                     pass
 
             if data is None:
                 data = _fs_fallback_read(folder_type, subfolder, filename)
 
             if data is None:
-                # Could not obtain this image; continue with others
+                print(f"DEBUG comfy: skip missing image filename='{filename}' type='{folder_type}' subfolder='{subfolder}'")
                 continue
 
             suffix = Path(filename).suffix or ".png"
@@ -410,8 +487,10 @@ async def _download_images(
             target.write_bytes(data)
             saved.append(target)
 
-    return saved
+    if not found_any:
+        print("DEBUG comfy: no images found in history object (iter yielded none).")
 
+    return saved
 
 # -----------------------------
 # Public entry point
@@ -437,9 +516,8 @@ async def generate_from_prompt_dict(
     poll_interval: float = 1.0,
 ) -> List[Path]:
     """
-    Submit a ready-to-use ComfyUI API prompt dict (mapping node_id -> node).
-    Applies safe in-place overrides for text/size/sampler params, then posts to /prompt and downloads images.
-    Returns a list of saved Paths in out_dir.
+    Submit a ComfyUI API prompt dict, poll history, and download images to out_dir.
+    Selects view mode automatically (path for local, query for remote) or via env override.
     """
     payload = override_prompt_inplace(
         body=prompt_dict,
@@ -457,9 +535,11 @@ async def generate_from_prompt_dict(
 
     conn = ComfyConnection(host=host, port=port)
     base = conn.base
+    view_mode = _select_view_mode(conn.host)
+    print(f"[COMFY VIEW MODE] {view_mode} (host={conn.host})")
 
     async with httpx.AsyncClient(limits=_limits(), timeout=_timeout(max_wait_sec + 30)) as client:
         prompt_id = await _post_prompt(client, base, payload)
         history_obj = await _poll_history_ready(client, base, prompt_id, max_wait_sec=max_wait_sec, poll_interval=poll_interval)
-        images = await _download_images(client, base, history_obj, prompt_id, out_dir=Path(out_dir))
+        images = await _download_images(client, base, history_obj, prompt_id, out_dir=Path(out_dir), view_mode=view_mode)
     return images

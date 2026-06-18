@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Optional, Set, Any
+from typing import Optional, Set, Any, Tuple
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
@@ -60,7 +61,7 @@ def _timeout_long(total: float) -> httpx.Timeout:
     return httpx.Timeout(connect=8.0, read=total, write=8.0, pool=8.0)
 
 def _assert_local_host(host: str) -> None:
-    """Enforce localhost-only connectivity for privacy compliance."""
+    """Legacy: enforce localhost-only connectivity (kept for LLM/Ollama use)."""
     if host not in {"127.0.0.1", "localhost"}:
         raise AssertionError(f"Only localhost allowed, got {host}")
 
@@ -74,6 +75,104 @@ def _clamp_dim(v: Optional[int]) -> Optional[int]:
 def _now() -> float:
     """Current timestamp used to filter fresh files in output directories."""
     return time.time()
+
+def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
+    """
+    Return True if the given IP lies inside any of the provided CIDR subnets.
+    subnets_str may contain multiple subnets separated by commas or whitespace.
+    """
+    try:
+        ip_addr = ipaddress.ip_address(ip)
+    except Exception:
+        return False
+    parts = [p.strip() for p in (subnets_str or "").replace(",", " ").split() if p.strip()]
+    for cidr in parts:
+        try:
+            net = ipaddress.ip_network(cidr, strict=False)
+            if ip_addr in net:
+                return True
+        except Exception:
+            continue
+    return False
+
+def _assert_image_backend_host_policy(host: str) -> None:
+    """
+    Image backend host policy:
+    - Always allow loopback (127.0.0.1, localhost).
+    - Allow remote only if APP_ALLOW_REMOTE_BACKENDS=1|true|yes|on.
+    - If APP_ALLOWED_SUBNETS is set, the host (if an IP) must be inside one of the subnets.
+    """
+    if host in {"127.0.0.1", "localhost"}:
+        return
+    allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
+    if not allow_remote:
+        raise AssertionError(f"Only localhost allowed, got {host}")
+    subnets = _env_str("APP_ALLOWED_SUBNETS", "")
+    if not subnets:
+        return
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if not _is_in_allowed_subnets(host, subnets):
+        raise AssertionError(f"Remote host {host} not in allowed subnets ({subnets})")
+
+
+# ---------------------------
+# Unified size resolution helpers (env-driven)
+# ---------------------------
+
+def _clamp8(v: int) -> int:
+    """Clamp to [64, 4096] and align to multiples of 8 for SD/Comfy stability."""
+    v = max(64, min(4096, int(v)))
+    return v - (v % 8)
+
+def _env_opt_int(name: str) -> Optional[int]:
+    """Read an optional int from environment; return None if unset/invalid."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+def _resolve_size_for_backend(backend_name: str, req_w: Optional[int], req_h: Optional[int]) -> tuple[Optional[int], Optional[int]]:
+    """
+    Unified size precedence across backends:
+      1) Request width/height when both are present (>0)
+      2) Global defaults: APP_IMAGE_WIDTH/APP_IMAGE_HEIGHT
+      3) Backend-specific defaults:
+         - ComfyUI: APP_COMFY_WIDTH/APP_COMFY_HEIGHT
+         - Pollinations: POLLINATIONS_WIDTH/POLLINATIONS_HEIGHT
+      4) None (backend will rely on its own internal defaults)
+    Note: We intentionally do not touch POLLINATIONS_SIZE here to preserve your GET/v1 behavior.
+    """
+    # 1) Request overrides
+    if isinstance(req_w, int) and req_w > 0 and isinstance(req_h, int) and req_h > 0:
+        return _clamp8(req_w), _clamp8(req_h)
+
+    # 2) Global defaults (shared for both backends)
+    gw = _env_opt_int("APP_IMAGE_WIDTH")
+    gh = _env_opt_int("APP_IMAGE_HEIGHT")
+    if gw and gh:
+        return _clamp8(gw), _clamp8(gh)
+
+    # 3) Backend-specific fallbacks
+    b = (backend_name or "").strip().lower()
+    if b == "comfyui":
+        cw = _env_opt_int("APP_COMFY_WIDTH")
+        ch = _env_opt_int("APP_COMFY_HEIGHT")
+        if cw and ch:
+            return _clamp8(cw), _clamp8(ch)
+    elif b == "pollinations":
+        pw = _env_opt_int("POLLINATIONS_WIDTH")
+        ph = _env_opt_int("POLLINATIONS_HEIGHT")
+        if pw and ph:
+            return _clamp8(pw), _clamp8(ph)
+
+    # 4) No decision → let backend defaults apply
+    return None, None
 
 
 # ---------------------------
@@ -242,13 +341,19 @@ class PollinationsBackend(ImageBackend):
         """Public generate method with v1 try-first fallback to GET."""
         if not self.cfg.allow_cloud:
             raise RuntimeError("Cloud image backend disabled (ALLOW_CLOUD_IMAGE_BACKEND=0)")
+
+        # Resolve sizes with unified precedence so switching backends does not reset dimensions
+        rw, rh = _resolve_size_for_backend("pollinations", width, height)
+        eff_w = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
+        eff_h = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
+
         if self.cfg.use_v1:
             try:
-                return await self._fetch_v1(prompt, width, height)
+                return await self._fetch_v1(prompt, eff_w, eff_h)
             except Exception:
-                return await self._fetch_get(prompt, width, height)
+                return await self._fetch_get(prompt, eff_w, eff_h)
         else:
-            return await self._fetch_get(prompt, width, height)
+            return await self._fetch_get(prompt, eff_w, eff_h)
 
 
 # ---------------------------
@@ -259,7 +364,7 @@ class ComfyConfig(BaseModel):
     """Runtime configuration for the local ComfyUI backend."""
     host: str = Field(default_factory=lambda: _env_str("APP_COMFY_HOST", "127.0.0.1"))
     port: int = Field(default_factory=lambda: _env_int("APP_COMFY_PORT", 8188))
-    workflow_path: Path = Field(default_factory=lambda: Path(_env_str("APP_COMFY_WORKFLOW", "./workflows/text2img_any45.json")).resolve())
+    workflow_path: Path = Field(default_factory=lambda: Path(_env_str("APP_COMFY_WORKFLOW", "./workflows/text2img_SD15-FP16.json")).resolve())
     width: int = Field(default_factory=lambda: _env_int("APP_COMFY_WIDTH", int(_env_str("APP_IMAGE_WIDTH", "512") or "512")))
     height: int = Field(default_factory=lambda: _env_int("APP_COMFY_HEIGHT", int(_env_str("APP_IMAGE_HEIGHT", "512") or "512")))
     steps: int = Field(default_factory=lambda: _env_int("APP_COMFY_STEPS", 20))
@@ -276,8 +381,11 @@ class ComfyConfig(BaseModel):
     node_id_latent: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_LATENT", "4"))
 
     def assert_local(self) -> None:
-        """Verify localhost-only policy."""
-        _assert_local_host(self.host)
+        """
+        Verify image-backend host policy for privacy.
+        For image backends, allow remote only if explicitly enabled via APP_ALLOW_REMOTE_BACKENDS.
+        """
+        _assert_image_backend_host_policy(self.host)
 
 class LocalComfyBackend(ImageBackend):
     """
@@ -473,9 +581,12 @@ class LocalComfyBackend(ImageBackend):
         if not ok:
             raise RuntimeError("comfy_unavailable")
 
-        # Clamp UI-requested dimensions or use configured defaults
-        w = _clamp_dim(width if (width and width > 0) else self.cfg.width)
-        h = _clamp_dim(height if (height and height > 0) else self.cfg.height)
+        # Unified size resolution using request, global, or backend defaults
+        rw, rh = _resolve_size_for_backend("comfyui", width, height)
+        w_eff = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
+        h_eff = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
+        w = _clamp_dim(w_eff)
+        h = _clamp_dim(h_eff)
 
         # Validate/normalize sampler against ComfyUI choices (kept for future extension)
         valid_samplers = await self._fetch_valid_samplers()
@@ -534,7 +645,7 @@ class BackendEnv(BaseModel):
 def build_image_backend() -> ImageBackend:
     """
     Backend factory:
-    - comfyui (default): local privacy-preserving pipeline
+    - comfyui (default): local privacy-preserving pipeline; LAN allowed if APP_ALLOW_REMOTE_BACKENDS=1
     - pollinations: optional cloud backend (requires explicit env opt-in)
     """
     env = BackendEnv()

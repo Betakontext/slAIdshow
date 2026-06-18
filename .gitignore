@@ -32,10 +32,15 @@ Thumbs.db
 .env.*.local
 *.local.json
 
-# Model weights (large files; don't version control)
-models/
+# Model weights (Whisper, large files; don't version control)
+models/*.bin
+
 # If you need to keep documentation in models/, whitelist it:
 # !models/README.md
+
+# ComfyUI workflows
+workflows/*.json
+!workflows/text2img_SD15-FP16.json
 
 # Generated outputs (images, artifacts)
 outputs/

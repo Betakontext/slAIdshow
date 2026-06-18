@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
   <meta charset="utf-8" />
-  <title>Local Speech-to-Image Pipeline</title>
+  <title>slAIdshow | Local Speech-to-Image Pipeline</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
@@ -42,11 +42,12 @@
     .status {
       color: var(--muted); font-size: 13px; padding: 4px 8px; border-radius: 6px; background: #11141a; border: 1px solid var(--border);
     }
-    main { padding: 16px; display: grid; gap: 16px; grid-template-columns: 1fr; }
+    main { padding: 16px; padding-bottom: 56px; display: grid; gap: 16px; grid-template-columns: 1fr; }
     .grid {
       display: grid; gap: 16px;
       grid-template-columns: 1.3fr .7fr;
     }
+
     @media (max-width: 1000px) {
       .grid { grid-template-columns: 1fr; }
     }
@@ -95,11 +96,40 @@
       background: var(--btn); color: var(--text); border: 1px solid #2c3140; border-radius: 8px; padding: 6px 10px;
     }
     .warn { color: #ffd966; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 11px; }
+
+    /* Footer: bottom-left support/contact links */
+    .footer-hud {
+      position: fixed;
+      left: 10px;
+      bottom: 10px;
+      z-index: 20;
+      font-size: 12px;
+      color: var(--muted);
+      background: rgba(0,0,0,0.35);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 10px;
+      backdrop-filter: blur(6px);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      pointer-events: auto;
+    }
+    .footer-hud a {
+      color: #9ecbff; /* leichtes Blau für Links */
+      text-decoration: none;
+    }
+    .footer-hud a:hover {
+      text-decoration: underline;
+    }
+
+    }
   </style>
 </head>
 <body>
   <header>
-    <div class="brand" id="brand-title">Lokale Speech-to-Image Pipeline</div>
+    <div class="brand" id="brand-title">slAIdshow | Lokale Speech-to-Image Pipeline</div>
     <div class="toolbar">
       <span class="status" id="status">Verbinde…</span>
       <select id="lang-select" class="lang" title="Language">
@@ -138,7 +168,7 @@
       <aside class="card">
         <h3 id="title-controls">Steuerung & Logs</h3>
         <div class="body">
-          <!-- Backend switcher -->
+          <!-- Image backend switcher -->
           <div class="row" style="margin-bottom:8px;">
             <label for="backend-select" style="min-width:120px;" id="label-backend">Image-Backend</label>
             <select id="backend-select" title="Image-Backend wählen">
@@ -147,6 +177,22 @@
             </select>
             <button id="btn-apply-backend">Anwenden</button>
             <span id="backend-warn" class="warn" style="display:none;"></span>
+          </div>
+
+          <!-- Workflow switcher (wrapped to toggle visibility when backend is ComfyUI only) -->
+          <div id="workflow-block" style="display:none;">
+            <div class="row" style="margin-bottom:8px;">
+              <label for="workflow-select" style="min-width:120px;" id="label-workflow">Workflow</label>
+              <select id="workflow-select" title="ComfyUI workflow (*.json)"></select>
+              <button id="btn-apply-workflow" title="Apply selected workflow">Übernehmen</button>
+              <span id="wf-warn" class="warn" style="display:none;"></span>
+            </div>
+            <div class="row" style="margin-bottom:8px;">
+              <details style="width:100%;">
+                <summary>Workflow preview</summary>
+                <pre id="workflow-preview" class="log mono" style="max-height:180px; overflow:auto;"></pre>
+              </details>
+            </div>
           </div>
 
           <!-- Size controls -->
@@ -167,6 +213,7 @@
           <!-- Negative Prompt -->
           <div class="row" style="margin-bottom:8px;">
             <textarea id="neg-input" placeholder="Negative Prompt (z.B. low quality, blurry, extra fingers)"></textarea>
+            <button id="btn-apply-neg" title="Apply negative prompt">Übernehmen</button>
           </div>
 
           <!-- Direct Generate -->
@@ -194,11 +241,15 @@
     </div>
   </main>
 
+
+
   <script>
+    // --- All comments strictly in English ---
+
     // ---------- i18n dictionary ----------
     const I18N = {
       de: {
-        brand: "Lokale Speech-to-Image Pipeline",
+        brand: "slAIdshow | Lokale Speech-to-Image Pipeline",
         status_connecting: "Verbinde…",
         status_connected: "Verbunden",
         status_ready: "Bereit",
@@ -216,9 +267,12 @@
         btn_direct: "Direkt generieren",
         btn_apply_backend: "Anwenden",
         btn_apply_size: "Übernehmen",
+        btn_apply_neg: "Übernehmen",
+        btn_apply_workflow: "Übernehmen",
         label_backend: "Image-Backend",
         label_width: "Breite",
         label_height: "Höhe",
+        label_workflow: "Workflow",
         ph_plan: "Text eingeben → Prompt erzeugen und Bild generieren",
         ph_neg: "Negative Prompt (z.B. low quality, blurry, extra fingers)",
         label_last_prompt: "Letzter Prompt",
@@ -249,9 +303,14 @@
         backend_switch_failed: "Umschalten fehlgeschlagen.",
         size_applied_ok: "Größe übernommen.",
         size_applied_fail: "Größe konnte nicht übernommen werden。",
+        neg_applied_ok: "Negativer Prompt gespeichert.",
+        neg_applied_fail: "Negativer Prompt konnte nicht gespeichert werden。",
+        wf_applied_ok: "Workflow übernommen.",
+        wf_applied_fail: "Workflow-Übernahme fehlgeschlagen。",
+        wf_list_fail: "Workflows konnten nicht geladen werden。",
       },
       en: {
-        brand: "Local Speech-to-Image Pipeline",
+        brand: "slAIdshow | Local Speech-to-Image Pipeline",
         status_connecting: "Connecting…",
         status_connected: "Connected",
         status_ready: "Ready",
@@ -269,9 +328,12 @@
         btn_direct: "Direct Generate",
         btn_apply_backend: "Apply",
         btn_apply_size: "Apply",
+        btn_apply_neg: "Apply",
+        btn_apply_workflow: "Apply",
         label_backend: "Image backend",
         label_width: "Width",
         label_height: "Height",
+        label_workflow: "Workflow",
         ph_plan: "Enter text → create prompt and generate image",
         ph_neg: "Negative prompt (e.g., low quality, blurry, extra fingers)",
         label_last_prompt: "Last Prompt",
@@ -302,6 +364,11 @@
         backend_switch_failed: "Switch failed.",
         size_applied_ok: "Size applied.",
         size_applied_fail: "Failed to apply size。",
+        neg_applied_ok: "Negative prompt saved.",
+        neg_applied_fail: "Failed to save negative prompt。",
+        wf_applied_ok: "Workflow applied.",
+        wf_applied_fail: "Failed to apply workflow。",
+        wf_list_fail: "Failed to load workflows。",
       }
     };
 
@@ -325,20 +392,24 @@
       document.getElementById('btn-direct').textContent = t('btn_direct');
       document.getElementById('btn-apply-backend').textContent = t('btn_apply_backend');
       document.getElementById('btn-apply-size').textContent = t('btn_apply_size');
+      document.getElementById('btn-apply-neg').textContent = t('btn_apply_neg');
+      // Ensure workflow button is localized as well
+      const wfBtn = document.getElementById('btn-apply-workflow');
+      if (wfBtn) wfBtn.textContent = t('btn_apply_workflow');
+
       document.getElementById('label-last-prompt').textContent = t('label_last_prompt');
       document.getElementById('label-transcripts').textContent = t('label_transcripts');
       document.getElementById('label-status').textContent = t('label_status');
       document.getElementById('label-backend').textContent = t('label_backend');
       document.getElementById('label-width').textContent = t('label_width');
       document.getElementById('label-height').textContent = t('label_height');
+      document.getElementById('label-workflow').textContent = t('label_workflow');
 
-      // Placeholder aktualisieren
-      const planInput = document.getElementById('plan-input');
-      planInput.placeholder = t('ph_plan');
-      const negInput = document.getElementById('neg-input');
-      negInput.placeholder = t('ph_neg');
+      // Placeholder updates
+      document.getElementById('plan-input').placeholder = t('ph_plan');
+      document.getElementById('neg-input').placeholder = t('ph_neg');
 
-      // Shutdown/Reconnect Button
+      // Shutdown/Reconnect button text
       const btnShutdown = document.getElementById('btn-shutdown');
       if (btnShutdown.dataset.mode === 'reconnect') {
         btnShutdown.textContent = t('reconnect');
@@ -350,11 +421,9 @@
         btnShutdown.classList.add('btn-danger');
       }
 
-      // Statusanzeige im Header wenn im Connecting-State
+      // Header status if in connecting state
       const statusEl = document.getElementById('status');
-      if (statusEl.dataset.state === 'connecting') {
-        statusEl.textContent = t('status_connecting');
-      }
+      if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
     }
 
     langSelect.addEventListener('change', () => {
@@ -377,6 +446,12 @@
     const backendWarn = $('#backend-warn');
     const btnApplyBackend = $('#btn-apply-backend');
 
+    const workflowBlock = document.getElementById('workflow-block'); // container to toggle visibility
+    const workflowSelect = $('#workflow-select');
+    const workflowPreview = $('#workflow-preview');
+    const wfWarn = $('#wf-warn');
+    const btnApplyWorkflow = $('#btn-apply-workflow');
+
     const widthInput = $('#width-input');
     const heightInput = $('#height-input');
     const btnApplySize = $('#btn-apply-size');
@@ -387,12 +462,10 @@
       el.textContent = `[${ts}] ${msg}\n` + el.textContent;
       if (el.textContent.length > 20000) el.textContent = el.textContent.slice(0, 20000);
     }
-
     function clampSize(v) {
       const n = Math.round(Number(v) || 0);
       return Math.max(64, Math.min(2048, n));
     }
-
     function updateSizePill() {
       const w = Number(widthInput.value) || '?';
       const h = Number(heightInput.value) || '?';
@@ -404,6 +477,7 @@
 
     img.addEventListener('load', () => img.classList.add('loaded'));
     function setImage(filenameRel, captionText) {
+      // Always serve from local static folder
       const url = filenameRel.startsWith('/static/') ? filenameRel : `/static/${filenameRel.replace(/^\/+/, '')}`;
       img.classList.remove('loaded');
       img.src = url;
@@ -417,7 +491,15 @@
     const fsLabel = $('#fs-label');
 
     function isInFullscreenFor(el) { return document.fullscreenElement === el; }
-    async function enterFullscreen(el) { try { if (!document.fullscreenElement) await el.requestFullscreen(); else if (document.fullscreenElement !== el) { await document.exitFullscreen(); await el.requestFullscreen(); } } catch (e) { console.warn('enterFullscreen failed', e); } }
+    async function enterFullscreen(el) {
+      try {
+        if (!document.fullscreenElement) await el.requestFullscreen();
+        else if (document.fullscreenElement !== el) {
+          await document.exitFullscreen();
+          await el.requestFullscreen();
+        }
+      } catch (e) { console.warn('enterFullscreen failed', e); }
+    }
     async function exitFullscreen() { try { if (document.fullscreenElement) await document.exitFullscreen(); } catch (e) { console.warn('exitFullscreen failed', e); } }
     async function toggleFullscreenFor(el) { isInFullscreenFor(el) ? await exitFullscreen() : await enterFullscreen(el); }
     function syncFullscreenUI() {
@@ -444,12 +526,8 @@
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       console.debug('[SSE]', reason, '→ connection closed');
     }
-
     function scheduleReconnect() {
-      if (!wantAutoReconnect) {
-        console.debug('[SSE] auto-reconnect disabled');
-        return;
-      }
+      if (!wantAutoReconnect) return;
       if (reconnectTimer) return;
       const delay = backoffMs;
       log(statusLog, `SSE-Reconnect in ${Math.round(delay/1000)}s`);
@@ -460,7 +538,7 @@
       backoffMs = Math.min(backoffMs * 2, 15000);
     }
 
-    // NEU: Debounced Size Sync auf den Server
+    // Debounced image size sync to server
     let sizeSyncTimer = null;
     function scheduleSizeSync() {
       if (sizeSyncTimer) clearTimeout(sizeSyncTimer);
@@ -472,10 +550,6 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(size)
           });
-          if (!r.ok) {
-            // Optionaler Fallback, falls dein Backend dieses Endpoint nicht hat:
-            // await fetch('/api/plan', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text:"", tags:[], width:size.width, height:size.height })});
-          }
           log(statusLog, `size sync: ${size.width}×${size.height} (${r.status})`);
         } catch (e) {
           log(statusLog, `size sync error: ${e}`);
@@ -492,7 +566,7 @@
       log(statusLog, t('sse_connecting'));
       console.debug('[SSE] connecting to /events');
 
-      try { sse = new EventSource('/events'); }
+    try { sse = new EventSource('/events'); }
       catch (e) { console.debug('[SSE] EventSource ctor error:', e); connecting = false; scheduleReconnect(); return; }
 
       sse.onopen = () => {
@@ -519,27 +593,22 @@
       sse.addEventListener('status', (ev) => {
         if (ev?.data) { statusEl.textContent = ev.data; log(statusLog, ev.data); }
       });
-
       sse.addEventListener('transcript', (ev) => { if (ev?.data) log(transcriptLog, ev.data); });
-
       sse.addEventListener('llm_prompt', (ev) => {
         if (ev?.data) {
           log(promptLog, ev.data);
           caption.textContent = ev.data;
-          // NEU: Beim finalen Prompt sofort Größe mit dem Server synchronisieren
           scheduleSizeSync();
         }
       });
-
       sse.addEventListener('image', (ev) => {
         const rel = (ev?.data || '').trim();
         if (rel) setImage(rel, caption.textContent || rel);
       });
     }
-
     connectSSE();
 
-    // ---------- Health/Status helpers ----------
+    // ---------- Health helpers ----------
     async function isServerUp() {
       try {
         const r = await fetch('/status', { cache: 'no-store' });
@@ -548,7 +617,6 @@
         return !!j.ok;
       } catch { return false; }
     }
-
     async function manualReconnect() {
       wantAutoReconnect = false;
       closeSSE('manual-reconnect');
@@ -569,7 +637,7 @@
       }
     }
 
-    // Shutdown/Connect button
+    // ---------- Shutdown/Connect button ----------
     const btnShutdown = document.getElementById('btn-shutdown');
     function setShutdownMode(connected) {
       if (connected) {
@@ -624,17 +692,14 @@
         statusEl.textContent = t('shutdown_error');
       } finally {
         btnShutdown.disabled = false;
-        if (btnShutdown.dataset.mode !== 'shutdown') {
-          btnShutdown.textContent = t('reconnect');
-        } else {
-          btnShutdown.textContent = oldTxt;
-        }
+        if (btnShutdown.dataset.mode !== 'shutdown') btnShutdown.textContent = t('reconnect');
+        else btnShutdown.textContent = oldTxt;
       }
     });
 
-    // ---------- Backend Controls ----------
+    // ---------- Start/Stop ----------
     $('#btn-start').addEventListener('click', async () => {
-      // Vor dem Start sicherstellen, dass der Server die aktuelle Größe hat
+      // Ensure server knows current size before starting
       try {
         const size = currentSizePayload();
         await fetch('/api/settings/image_size', {
@@ -646,7 +711,6 @@
       } catch (e) {
         log(statusLog, `pre-start size sync error: ${e}`);
       }
-
       try {
         const r = await fetch('/start', { method: 'POST' });
         statusEl.textContent = r.ok ? t('start_ok') : t('start_fail');
@@ -654,7 +718,6 @@
       } catch (e) { log(statusLog, `start error: ${e}`); }
     });
 
-    // >>> STOP-Handler HIER DIREKT DANACH EINFÜGEN <<<
     document.getElementById('btn-stop').addEventListener('click', async () => {
       const btn = document.getElementById('btn-stop');
       btn.disabled = true;
@@ -675,14 +738,13 @@
       }
     });
 
-
     function currentSizePayload() {
       const w = clampSize(widthInput.value);
       const h = clampSize(heightInput.value);
       return { width: w, height: h };
     }
 
-    // Plan mit optionaler Größe
+    // ---------- Plan ----------
     $('#btn-plan').addEventListener('click', async () => {
       const text = $('#plan-input').value.trim();
       if (!text) return;
@@ -702,7 +764,7 @@
       finally { btn.disabled = false; }
     });
 
-    // Direct Generate
+    // ---------- Direct Generate ----------
     document.getElementById('btn-direct').addEventListener('click', async () => {
       const prompt = document.getElementById('plan-input').value.trim();
       const negative = document.getElementById('neg-input').value.trim();
@@ -737,7 +799,25 @@
       }
     });
 
-    // Optional: Cloud erlauben, bevor auf Pollinations gewechselt wird
+    // ---------- Negative prompt apply ----------
+    document.getElementById('btn-apply-neg').addEventListener('click', async () => {
+      const txt = document.getElementById('neg-input').value.trim();
+      try {
+        const r = await fetch('/api/settings/negative_prompt', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ negative_prompt: txt })
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        statusEl.textContent = t('neg_applied_ok');
+        log(statusLog, `negative prompt updated`);
+      } catch (e) {
+        statusEl.textContent = t('neg_applied_fail');
+        log(statusLog, `negative prompt update error: ${e}`);
+      }
+    });
+
+    // ---------- Cloud allow helper for Pollinations ----------
     async function ensureCloudAllowed() {
       try {
         const r = await fetch('/api/settings/image_allow_cloud', {
@@ -746,12 +826,10 @@
           body: JSON.stringify({ allow: true })
         });
         return r.ok;
-      } catch {
-        return false;
-      }
+      } catch { return false; }
     }
 
-    // Apply backend switch (mit Cloud-Enable, wenn nötig)
+    // ---------- Backend switch ----------
     btnApplyBackend.addEventListener('click', async () => {
       const backend = backendSelect.value;
       backendWarn.style.display = 'none';
@@ -759,7 +837,7 @@
       try {
         if (backend === 'pollinations') {
           const ok = await ensureCloudAllowed();
-          if (!ok) log(statusLog, 'Cloud konnte nicht aktiviert werden.');
+          if (!ok) log(statusLog, 'Could not enable cloud.');
         }
         const r = await fetch('/api/settings/image_backend', {
           method: 'POST',
@@ -769,7 +847,16 @@
         const j = await r.json().catch(() => ({}));
         if (r.ok && j.ok) {
           log(statusLog, t('backend_switched_ok'));
+          // Pull fresh config (server decides show_workflow_selector)
           await refreshConfig();
+          // Only refresh workflows if the UI block is visible, otherwise clear stale UI
+          if (workflowBlock.style.display !== 'none') {
+            await refreshWorkflowList();
+          } else {
+            workflowSelect.innerHTML = '';
+            workflowPreview.textContent = '';
+            wfWarn.style.display = 'none';
+          }
         } else {
           const err = j?.error || `${r.status}`;
           log(statusLog, `${t('backend_switch_failed')}: ${err}`);
@@ -788,7 +875,7 @@
       }
     });
 
-    // Größe anwenden (Server-sync statt nur UI)
+    // ---------- Size apply ----------
     btnApplySize.addEventListener('click', async () => {
       const size = currentSizePayload();
       widthInput.value = size.width;
@@ -810,6 +897,148 @@
       }
     });
 
+    // ---------- Workflow switching ----------
+    // This expects:
+    // - Static files under /workflows/*.json
+    // - Optional server endpoints:
+    //   GET /api/workflows -> { items: [{name, filename}] }
+    //   POST /api/settings/workflow { filename } -> apply on server
+    async function listWorkflowsFromServer() {
+      // Preferred: server provides list (allows server-side validation/ordering)
+      try {
+        const r = await fetch('/api/workflows', { cache: 'no-store' });
+        if (r.ok) {
+          const j = await r.json();
+          if (j && Array.isArray(j.items)) return j.items;
+        }
+      } catch {}
+      return null;
+    }
+    async function listWorkflowsByIndexJson() {
+      // Fallback: try to load a local index.json that enumerates available workflows
+      try {
+        const r = await fetch('/workflows/index.json', { cache: 'no-store' });
+        if (!r.ok) return [];
+        const j = await r.json();
+        if (Array.isArray(j)) {
+          return j.map(x => (typeof x === 'string' ? { name: x.replace(/\.json$/,''), filename: x } : x))
+        } else if (j && Array.isArray(j.items)) {
+          return j.items;
+        }
+      } catch {}
+      return [];
+    }
+    async function refreshWorkflowList() {
+      // Do not attempt to list workflows when the UI block is hidden
+      if (workflowBlock.style.display === 'none') {
+        workflowSelect.innerHTML = '';
+        workflowPreview.textContent = '';
+        wfWarn.style.display = 'none';
+        return;
+      }
+
+      wfWarn.style.display = 'none';
+      let items = await listWorkflowsFromServer();
+      if (!items) items = await listWorkflowsByIndexJson();
+
+      // If still empty, show warning
+      if (!items || items.length === 0) {
+        wfWarn.textContent = t('wf_list_fail');
+        wfWarn.style.display = '';
+        workflowSelect.innerHTML = '';
+        workflowPreview.textContent = '';
+        return;
+      }
+
+      // Populate select safely (no path traversal, only base filenames ending in .json)
+      workflowSelect.innerHTML = '';
+      const stored = localStorage.getItem('active_workflow') || '';
+      let foundStored = false;
+      for (const it of items) {
+        const fn = String(it.filename || '').replace(/[^A-Za-z0-9._-]/g, '');
+        if (!fn.endsWith('.json')) continue;
+        const name = it.name || fn.replace(/\.json$/,'');
+        const opt = document.createElement('option');
+        opt.value = fn;
+        opt.textContent = name;
+        if (stored && stored === fn) { opt.selected = true; foundStored = true; }
+        workflowSelect.appendChild(opt);
+      }
+      if (!foundStored && workflowSelect.options.length > 0) {
+        // Select first by default
+        workflowSelect.selectedIndex = 0;
+      }
+      // Load preview for selected
+      const cur = workflowSelect.value;
+      if (cur) await loadWorkflowPreview(cur);
+    }
+
+    async function loadWorkflowPreview(filename) {
+      // Preview JSON for user confirmation; does not execute anything
+      workflowPreview.textContent = '';
+      if (!filename || !/^[A-Za-z0-9._-]+$/.test(filename) || !filename.endsWith('.json')) return;
+      try {
+        const r = await fetch(`/workflows/${filename}`, { cache: 'no-store' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const txt = await r.text();
+        // Try to pretty-print JSON
+        try {
+          const obj = JSON.parse(txt);
+          workflowPreview.textContent = JSON.stringify(obj, null, 2);
+        } catch {
+          workflowPreview.textContent = txt;
+        }
+      } catch (e) {
+        workflowPreview.textContent = `Failed to load: ${e}`;
+      }
+    }
+
+    workflowSelect.addEventListener('change', async () => {
+      const v = workflowSelect.value;
+      localStorage.setItem('active_workflow', v);
+      await loadWorkflowPreview(v);
+    });
+
+    btnApplyWorkflow.addEventListener('click', async () => {
+      const filename = workflowSelect.value;
+      if (!filename) return;
+      btnApplyWorkflow.disabled = true;
+      try {
+        // Inform server about desired workflow
+        const r = await fetch('/api/settings/workflow', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename })
+        });
+        if (r.ok) {
+          statusEl.textContent = t('wf_applied_ok');
+          log(statusLog, `workflow applied: ${filename}`);
+          localStorage.setItem('active_workflow', filename);
+          await refreshConfig();
+        } else {
+          statusEl.textContent = t('wf_applied_fail');
+          const txt = await r.text().catch(()=> '');
+          log(statusLog, `workflow apply failed: HTTP ${r.status} ${txt}`);
+        }
+      } catch (e) {
+        statusEl.textContent = t('wf_applied_fail');
+        log(statusLog, `workflow apply exception: ${e}`);
+      } finally {
+        btnApplyWorkflow.disabled = false;
+      }
+    });
+
+    // ---------- Open dir hint ----------
+    document.getElementById('btn-open-dir').addEventListener('click', async () => {
+      try {
+        const r = await fetch('/open_dir_hint');
+        if (!r.ok) return;
+        const j = await r.json();
+        // In a browser we cannot open file system paths directly; we can open static URL instead
+        window.open(j?.static_url || '/static/', '_blank');
+      } catch {}
+    });
+
     // ---------- Initial config ----------
     async function refreshConfig() {
       try {
@@ -821,33 +1050,41 @@
         $('#poll-pill').textContent = `Images: ${j?.image?.backend || '?'}`;
         $('#sr-pill').textContent = `SR: ${j?.audio?.sample_rate || '?'}`;
 
-        // Backend select
+        // Image backend select
         const current = (j?.image?.backend || 'comfyui').toLowerCase();
         backendSelect.value = current === 'pollinations' ? 'pollinations' : 'comfyui';
 
-        // Warnhinweise
-        const allowCloud = !!(j?.allow_cloud ?? j?.image?.allow_cloud);
-        if (!allowCloud && backendSelect.value === 'pollinations') {
-          backendWarn.textContent = t('backend_warn_cloud_blocked');
-          backendWarn.style.display = '';
-        } else {
-          backendWarn.style.display = 'none';
-        }
-
-        // Größe initialisieren
+        // Size fields
         const w = Number(j?.image?.current_width ?? j?.image?.width_default ?? 512);
         const h = Number(j?.image?.current_height ?? j?.image?.height_default ?? 512);
         widthInput.value = w;
         heightInput.value = h;
         updateSizePill();
 
-        // Negativer Prompt aus Config (optional)
+        // Negative prompt (if server exposes)
         const neg = (j?.image?.negative_prompt || '').trim();
         if (neg) document.getElementById('neg-input').value = neg;
 
-        if (statusEl.dataset.state !== 'connected') {
-          statusEl.textContent = t('status_ready');
+        // Toggle visibility of workflow block based on server flag
+        // Server should set image.show_workflow_selector=true only when ComfyUI backend is active
+        const showWF = !!(j?.image?.show_workflow_selector);
+        workflowBlock.style.display = showWF ? '' : 'none';
+
+        // Sync active workflow when visible; clear stale UI when hidden
+        if (showWF) {
+          const activeWF = j?.image?.active_workflow || localStorage.getItem('active_workflow') || '';
+          if (activeWF) {
+            const opt = Array.from(workflowSelect.options).find(o => o.value === activeWF);
+            if (opt) { workflowSelect.value = activeWF; await loadWorkflowPreview(activeWF); }
+            localStorage.setItem('active_workflow', activeWF);
+          }
+        } else {
+          workflowSelect.innerHTML = '';
+          workflowPreview.textContent = '';
+          wfWarn.style.display = 'none';
         }
+
+        if (statusEl.dataset.state !== 'connected') statusEl.textContent = t('status_ready');
       } catch (e) {
         log(statusLog, `config error: ${e}`);
         statusEl.textContent = t('config_error');
@@ -857,16 +1094,21 @@
     (async function init() {
       applyI18N();
       await refreshConfig();
-
-      function onSizeInputChange() {
-        updateSizePill();
-        // debounce-POST an /api/settings/image_size
-        scheduleSizeSync();
-      }
-
+      function onSizeInputChange() { updateSizePill(); scheduleSizeSync(); }
       widthInput.addEventListener('input', onSizeInputChange);
       heightInput.addEventListener('input', onSizeInputChange);
+      // Only load workflows when block is visible (ComfyUI)
+      if (document.getElementById('workflow-block').style.display !== 'none') {
+        await refreshWorkflowList();
+      }
     })();
-    </script>
+  </script>
+
+  <!-- Bottom-left support/contact links -->
+  <div class="footer-hud" aria-label="Support & Kontakt">
+    <span>SUPPORT: <a href="https://buymeacoffee.com/betakontext" target="_blank" rel="noopener">buymeacoffee.com/betakontext</a></span>
+    <span>CONTACT: Christoph Medicus | <a href="mailto:dev@betakontext.de">dev@betakontext.de</a> | <a href="https://dev.betakontext.de" target="_blank" rel="noopener">dev.betakontext.de</a></span>
+  </div>
+
 </body>
 </html>
