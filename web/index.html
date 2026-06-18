@@ -78,13 +78,26 @@
     #image-viewer:fullscreen { background: #000; }
     #image-viewer:fullscreen #current-image { max-width: 100vw; max-height: 100vh; cursor: zoom-out; }
     .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    input[type="text"], input[type="number"], textarea, select {
+    input[type="text"], input[type="number"], textarea, select, input[type="file"] {
       background: #0e1118; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
       outline: none;
     }
     input[type="text"], textarea { width: 100%; }
     input[type="number"] { width: 110px; }
     textarea { min-height: 80px; resize: vertical; }
+    input[type="range"] {
+      width: 160px;
+      appearance: none;
+      height: 6px;
+      border-radius: 4px;
+      background: #2a3041;
+      outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      appearance: none;
+      width: 14px; height: 14px; border-radius: 50%; background: var(--accent); cursor: pointer;
+      border: 1px solid #0a0d14;
+    }
     .log {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       font-size: 12px; color: #c5cad6; background: #0d1016; border: 1px solid var(--border);
@@ -98,7 +111,7 @@
     .warn { color: #ffd966; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 11px; }
 
-    /* Footer: bottom-left support/contact links */
+    /* Footer HUD */
     .footer-hud {
       position: fixed;
       left: 10px;
@@ -116,15 +129,8 @@
       align-items: center;
       pointer-events: auto;
     }
-    .footer-hud a {
-      color: #9ecbff; /* leichtes Blau für Links */
-      text-decoration: none;
-    }
-    .footer-hud a:hover {
-      text-decoration: underline;
-    }
-
-    }
+    .footer-hud a { color: #9ecbff; text-decoration: none; }
+    .footer-hud a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -179,7 +185,7 @@
             <span id="backend-warn" class="warn" style="display:none;"></span>
           </div>
 
-          <!-- Workflow switcher (wrapped to toggle visibility when backend is ComfyUI only) -->
+          <!-- Workflow switcher (ComfyUI only) -->
           <div id="workflow-block" style="display:none;">
             <div class="row" style="margin-bottom:8px;">
               <label for="workflow-select" style="min-width:120px;" id="label-workflow">Workflow</label>
@@ -192,6 +198,32 @@
                 <summary>Workflow preview</summary>
                 <pre id="workflow-preview" class="log mono" style="max-height:180px; overflow:auto;"></pre>
               </details>
+            </div>
+          </div>
+
+          <!-- Style block (reference image + strength) -->
+          <div id="style-block" class="card" style="background:#141821; border-color:#273042; margin-bottom:10px;">
+            <h3 id="title-style">Style (Reference & Strength)</h3>
+            <div class="body">
+              <div class="row" style="margin-bottom:8px;">
+                <label for="style-enabled" style="min-width:120px;" id="label-style-enabled">Enabled</label>
+                <select id="style-enabled" title="Enable or disable style reference">
+                  <option value="off">Off</option>
+                  <option value="on">On</option>
+                </select>
+                <label for="style-strength" style="min-width:80px;" id="label-style-strength">Strength</label>
+                <input id="style-strength" type="range" min="0" max="1" step="0.05" />
+                <span id="style-strength-val" class="pill">0.60</span>
+                <button id="btn-apply-style">Apply</button>
+              </div>
+              <div class="row" style="margin-bottom:8px;">
+                <input id="style-file" type="file" accept="image/*" title="Upload reference image" />
+                <button id="btn-upload-style">Upload</button>
+                <button id="btn-clear-style" class="btn-danger">Clear</button>
+              </div>
+              <div class="row" style="margin-bottom:8px;">
+                <span id="style-current" class="mono" style="font-size:12px; color:#cfd6e6;">No reference</span>
+              </div>
             </div>
           </div>
 
@@ -241,8 +273,6 @@
     </div>
   </main>
 
-
-
   <script>
     // --- All comments strictly in English ---
 
@@ -257,6 +287,7 @@
         status_fullscreen_off: "Bereit",
         title_viewer: "Bildanzeige",
         title_controls: "Steuerung & Logs",
+        title_style: "Stil (Referenz & Stärke)",
         caption_none: "Kein Bild",
         fs_enter: "Vollbild",
         fs_exit: "Verkleinern",
@@ -269,15 +300,28 @@
         btn_apply_size: "Übernehmen",
         btn_apply_neg: "Übernehmen",
         btn_apply_workflow: "Übernehmen",
+        btn_apply_style: "Übernehmen",
+        btn_upload_style: "Hochladen",
+        btn_clear_style: "Löschen",
         label_backend: "Image-Backend",
         label_width: "Breite",
         label_height: "Höhe",
         label_workflow: "Workflow",
+        label_style_enabled: "Aktiv",
+        label_style_strength: "Stärke",
         ph_plan: "Text eingeben → Prompt erzeugen und Bild generieren",
         ph_neg: "Negative Prompt (z.B. low quality, blurry, extra fingers)",
         label_last_prompt: "Letzter Prompt",
         label_transcripts: "Transkripte",
         label_status: "Status",
+        style_no_ref: "Keine Referenz",
+        style_current: "Referenz:",
+        style_applied_ok: "Stil aktualisiert.",
+        style_applied_fail: "Stil konnte nicht aktualisiert werden。",
+        style_upload_ok: "Stil-Referenz hochgeladen.",
+        style_upload_fail: "Upload fehlgeschlagen。",
+        style_cleared_ok: "Stil-Referenz entfernt.",
+        style_cleared_fail: "Referenz konnte nicht entfernt werden。",
         shutdown: "Server beenden",
         reconnect: "Server verbinden",
         reconnecting: "Verbinde…",
@@ -318,6 +362,7 @@
         status_fullscreen_off: "Ready",
         title_viewer: "Image Viewer",
         title_controls: "Controls & Logs",
+        title_style: "Style (Reference & Strength)",
         caption_none: "No image",
         fs_enter: "Fullscreen",
         fs_exit: "Exit",
@@ -330,15 +375,28 @@
         btn_apply_size: "Apply",
         btn_apply_neg: "Apply",
         btn_apply_workflow: "Apply",
+        btn_apply_style: "Apply",
+        btn_upload_style: "Upload",
+        btn_clear_style: "Clear",
         label_backend: "Image backend",
         label_width: "Width",
         label_height: "Height",
         label_workflow: "Workflow",
+        label_style_enabled: "Enabled",
+        label_style_strength: "Strength",
         ph_plan: "Enter text → create prompt and generate image",
         ph_neg: "Negative prompt (e.g., low quality, blurry, extra fingers)",
         label_last_prompt: "Last Prompt",
         label_transcripts: "Transcripts",
         label_status: "Status",
+        style_no_ref: "No reference",
+        style_current: "Reference:",
+        style_applied_ok: "Style updated.",
+        style_applied_fail: "Failed to update style。",
+        style_upload_ok: "Style reference uploaded.",
+        style_upload_fail: "Upload failed。",
+        style_cleared_ok: "Style reference cleared.",
+        style_cleared_fail: "Failed to clear reference。",
         shutdown: "Shut down server",
         reconnect: "Connect to server",
         reconnecting: "Connecting…",
@@ -382,6 +440,7 @@
       document.getElementById('brand-title').textContent = t('brand');
       document.getElementById('title-viewer').textContent = t('title_viewer');
       document.getElementById('title-controls').textContent = t('title_controls');
+      document.getElementById('title-style').textContent = t('title_style');
       document.getElementById('img-caption').textContent = t('caption_none');
       document.getElementById('fs-label').textContent = t('fs_enter');
       document.getElementById('btn-open-dir').textContent = t('btn_open_dir');
@@ -393,9 +452,11 @@
       document.getElementById('btn-apply-backend').textContent = t('btn_apply_backend');
       document.getElementById('btn-apply-size').textContent = t('btn_apply_size');
       document.getElementById('btn-apply-neg').textContent = t('btn_apply_neg');
-      // Ensure workflow button is localized as well
       const wfBtn = document.getElementById('btn-apply-workflow');
       if (wfBtn) wfBtn.textContent = t('btn_apply_workflow');
+      document.getElementById('btn-apply-style').textContent = t('btn_apply_style');
+      document.getElementById('btn-upload-style').textContent = t('btn_upload_style');
+      document.getElementById('btn-clear-style').textContent = t('btn_clear_style');
 
       document.getElementById('label-last-prompt').textContent = t('label_last_prompt');
       document.getElementById('label-transcripts').textContent = t('label_transcripts');
@@ -404,12 +465,12 @@
       document.getElementById('label-width').textContent = t('label_width');
       document.getElementById('label-height').textContent = t('label_height');
       document.getElementById('label-workflow').textContent = t('label_workflow');
+      document.getElementById('label-style-enabled').textContent = t('label_style_enabled');
+      document.getElementById('label-style-strength').textContent = t('label_style_strength');
 
-      // Placeholder updates
       document.getElementById('plan-input').placeholder = t('ph_plan');
       document.getElementById('neg-input').placeholder = t('ph_neg');
 
-      // Shutdown/Reconnect button text
       const btnShutdown = document.getElementById('btn-shutdown');
       if (btnShutdown.dataset.mode === 'reconnect') {
         btnShutdown.textContent = t('reconnect');
@@ -421,7 +482,6 @@
         btnShutdown.classList.add('btn-danger');
       }
 
-      // Header status if in connecting state
       const statusEl = document.getElementById('status');
       if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
     }
@@ -446,7 +506,7 @@
     const backendWarn = $('#backend-warn');
     const btnApplyBackend = $('#btn-apply-backend');
 
-    const workflowBlock = document.getElementById('workflow-block'); // container to toggle visibility
+    const workflowBlock = document.getElementById('workflow-block');
     const workflowSelect = $('#workflow-select');
     const workflowPreview = $('#workflow-preview');
     const wfWarn = $('#wf-warn');
@@ -456,6 +516,17 @@
     const heightInput = $('#height-input');
     const btnApplySize = $('#btn-apply-size');
     const sizePill = $('#size-pill');
+
+    // Style controls
+    const styleBlock = $('#style-block');
+    const styleEnabled = $('#style-enabled');
+    const styleStrength = $('#style-strength');
+    const styleStrengthVal = $('#style-strength-val');
+    const btnApplyStyle = $('#btn-apply-style');
+    const styleFile = $('#style-file');
+    const btnUploadStyle = $('#btn-upload-style');
+    const btnClearStyle = $('#btn-clear-style');
+    const styleCurrent = $('#style-current');
 
     function log(el, msg) {
       const ts = new Date().toLocaleTimeString();
@@ -477,7 +548,6 @@
 
     img.addEventListener('load', () => img.classList.add('loaded'));
     function setImage(filenameRel, captionText) {
-      // Always serve from local static folder
       const url = filenameRel.startsWith('/static/') ? filenameRel : `/static/${filenameRel.replace(/^\/+/, '')}`;
       img.classList.remove('loaded');
       img.src = url;
@@ -566,7 +636,7 @@
       log(statusLog, t('sse_connecting'));
       console.debug('[SSE] connecting to /events');
 
-    try { sse = new EventSource('/events'); }
+      try { sse = new EventSource('/events'); }
       catch (e) { console.debug('[SSE] EventSource ctor error:', e); connecting = false; scheduleReconnect(); return; }
 
       sse.onopen = () => {
@@ -699,7 +769,6 @@
 
     // ---------- Start/Stop ----------
     $('#btn-start').addEventListener('click', async () => {
-      // Ensure server knows current size before starting
       try {
         const size = currentSizePayload();
         await fetch('/api/settings/image_size', {
@@ -817,6 +886,91 @@
       }
     });
 
+    // ---------- Style: load/apply/upload/clear ----------
+    function styleStrengthToText(v) { return Number(v).toFixed(2); }
+    styleStrength.addEventListener('input', () => {
+      styleStrengthVal.textContent = styleStrengthToText(styleStrength.value);
+    });
+
+    async function refreshStyle() {
+      try {
+        const r = await fetch('/api/style', { cache: 'no-store' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = await r.json();
+        // enabled
+        styleEnabled.value = j?.enabled ? 'on' : 'off';
+        // strength (guard rails 0..1)
+        const s = Math.max(0, Math.min(1, Number(j?.strength ?? 0.6)));
+        styleStrength.value = s;
+        styleStrengthVal.textContent = styleStrengthToText(s);
+        // current reference (use rel URL for preview)
+        if (j?.rel) {
+          styleCurrent.textContent = `${t('style_current')} ${j.rel}`;
+        } else {
+          styleCurrent.textContent = t('style_no_ref');
+        }
+      } catch (e) {
+        log(statusLog, `style fetch error: ${e}`);
+      }
+    }
+
+    btnApplyStyle.addEventListener('click', async () => {
+      const enabled = styleEnabled.value === 'on';
+      const strength = Math.max(0, Math.min(1, Number(styleStrength.value || 0.6)));
+      try {
+        const r = await fetch('/api/style', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled, strength })
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        statusEl.textContent = t('style_applied_ok');
+        log(statusLog, `style applied: enabled=${enabled} strength=${strength}`);
+        await refreshStyle();
+      } catch (e) {
+        statusEl.textContent = t('style_applied_fail');
+        log(statusLog, `style apply error: ${e}`);
+      }
+    });
+
+    btnUploadStyle.addEventListener('click', async () => {
+      const f = styleFile.files && styleFile.files[0];
+      if (!f) return;
+      // Basic client-side check; server must enforce final validation
+      if (!/^image\//.test(f.type)) {
+        log(statusLog, `style upload blocked (not an image)`);
+        return;
+      }
+      const fd = new FormData();
+      fd.append('file', f);
+      try {
+        const r = await fetch('/api/style/upload', { method: 'POST', body: fd });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = await r.json().catch(()=> ({}));
+        statusEl.textContent = t('style_upload_ok');
+        log(statusLog, `style upload ok: ${j?.rel || f.name}`);
+        await refreshStyle();
+      } catch (e) {
+        statusEl.textContent = t('style_upload_fail');
+        log(statusLog, `style upload error: ${e}`);
+      } finally {
+        styleFile.value = '';
+      }
+    });
+
+    btnClearStyle.addEventListener('click', async () => {
+      try {
+        const r = await fetch('/api/style', { method: 'DELETE' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        statusEl.textContent = t('style_cleared_ok');
+        log(statusLog, `style cleared`);
+        await refreshStyle();
+      } catch (e) {
+        statusEl.textContent = t('style_cleared_fail');
+        log(statusLog, `style clear error: ${e}`);
+      }
+    });
+
     // ---------- Cloud allow helper for Pollinations ----------
     async function ensureCloudAllowed() {
       try {
@@ -847,9 +1001,7 @@
         const j = await r.json().catch(() => ({}));
         if (r.ok && j.ok) {
           log(statusLog, t('backend_switched_ok'));
-          // Pull fresh config (server decides show_workflow_selector)
           await refreshConfig();
-          // Only refresh workflows if the UI block is visible, otherwise clear stale UI
           if (workflowBlock.style.display !== 'none') {
             await refreshWorkflowList();
           } else {
@@ -898,13 +1050,7 @@
     });
 
     // ---------- Workflow switching ----------
-    // This expects:
-    // - Static files under /workflows/*.json
-    // - Optional server endpoints:
-    //   GET /api/workflows -> { items: [{name, filename}] }
-    //   POST /api/settings/workflow { filename } -> apply on server
     async function listWorkflowsFromServer() {
-      // Preferred: server provides list (allows server-side validation/ordering)
       try {
         const r = await fetch('/api/workflows', { cache: 'no-store' });
         if (r.ok) {
@@ -915,7 +1061,6 @@
       return null;
     }
     async function listWorkflowsByIndexJson() {
-      // Fallback: try to load a local index.json that enumerates available workflows
       try {
         const r = await fetch('/workflows/index.json', { cache: 'no-store' });
         if (!r.ok) return [];
@@ -929,7 +1074,6 @@
       return [];
     }
     async function refreshWorkflowList() {
-      // Do not attempt to list workflows when the UI block is hidden
       if (workflowBlock.style.display === 'none') {
         workflowSelect.innerHTML = '';
         workflowPreview.textContent = '';
@@ -941,7 +1085,6 @@
       let items = await listWorkflowsFromServer();
       if (!items) items = await listWorkflowsByIndexJson();
 
-      // If still empty, show warning
       if (!items || items.length === 0) {
         wfWarn.textContent = t('wf_list_fail');
         wfWarn.style.display = '';
@@ -950,7 +1093,6 @@
         return;
       }
 
-      // Populate select safely (no path traversal, only base filenames ending in .json)
       workflowSelect.innerHTML = '';
       const stored = localStorage.getItem('active_workflow') || '';
       let foundStored = false;
@@ -965,23 +1107,19 @@
         workflowSelect.appendChild(opt);
       }
       if (!foundStored && workflowSelect.options.length > 0) {
-        // Select first by default
         workflowSelect.selectedIndex = 0;
       }
-      // Load preview for selected
       const cur = workflowSelect.value;
       if (cur) await loadWorkflowPreview(cur);
     }
 
     async function loadWorkflowPreview(filename) {
-      // Preview JSON for user confirmation; does not execute anything
       workflowPreview.textContent = '';
       if (!filename || !/^[A-Za-z0-9._-]+$/.test(filename) || !filename.endsWith('.json')) return;
       try {
         const r = await fetch(`/workflows/${filename}`, { cache: 'no-store' });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const txt = await r.text();
-        // Try to pretty-print JSON
         try {
           const obj = JSON.parse(txt);
           workflowPreview.textContent = JSON.stringify(obj, null, 2);
@@ -1004,7 +1142,6 @@
       if (!filename) return;
       btnApplyWorkflow.disabled = true;
       try {
-        // Inform server about desired workflow
         const r = await fetch('/api/settings/workflow', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1034,7 +1171,6 @@
         const r = await fetch('/open_dir_hint');
         if (!r.ok) return;
         const j = await r.json();
-        // In a browser we cannot open file system paths directly; we can open static URL instead
         window.open(j?.static_url || '/static/', '_blank');
       } catch {}
     });
@@ -1050,39 +1186,35 @@
         $('#poll-pill').textContent = `Images: ${j?.image?.backend || '?'}`;
         $('#sr-pill').textContent = `SR: ${j?.audio?.sample_rate || '?'}`;
 
-        // Image backend select
         const current = (j?.image?.backend || 'comfyui').toLowerCase();
         backendSelect.value = current === 'pollinations' ? 'pollinations' : 'comfyui';
 
-        // Size fields
         const w = Number(j?.image?.current_width ?? j?.image?.width_default ?? 512);
         const h = Number(j?.image?.current_height ?? j?.image?.height_default ?? 512);
-        widthInput.value = w;
-        heightInput.value = h;
-        updateSizePill();
+        widthInput.value = w; heightInput.value = h; updateSizePill();
 
-        // Negative prompt (if server exposes)
         const neg = (j?.image?.negative_prompt || '').trim();
         if (neg) document.getElementById('neg-input').value = neg;
 
-        // Toggle visibility of workflow block based on server flag
-        // Server should set image.show_workflow_selector=true only when ComfyUI backend is active
         const showWF = !!(j?.image?.show_workflow_selector);
         workflowBlock.style.display = showWF ? '' : 'none';
-
-        // Sync active workflow when visible; clear stale UI when hidden
         if (showWF) {
           const activeWF = j?.image?.active_workflow || localStorage.getItem('active_workflow') || '';
           if (activeWF) {
             const opt = Array.from(workflowSelect.options).find(o => o.value === activeWF);
             if (opt) { workflowSelect.value = activeWF; await loadWorkflowPreview(activeWF); }
             localStorage.setItem('active_workflow', activeWF);
+          } else {
+            await refreshWorkflowList();
           }
         } else {
           workflowSelect.innerHTML = '';
           workflowPreview.textContent = '';
           wfWarn.style.display = 'none';
         }
+
+        // Style block refresh
+        await refreshStyle();
 
         if (statusEl.dataset.state !== 'connected') statusEl.textContent = t('status_ready');
       } catch (e) {
@@ -1093,11 +1225,13 @@
 
     (async function init() {
       applyI18N();
+      // Initialize default style strength value
+      styleStrength.value = 0.6;
+      styleStrengthVal.textContent = styleStrengthToText(0.6);
       await refreshConfig();
       function onSizeInputChange() { updateSizePill(); scheduleSizeSync(); }
       widthInput.addEventListener('input', onSizeInputChange);
       heightInput.addEventListener('input', onSizeInputChange);
-      // Only load workflows when block is visible (ComfyUI)
       if (document.getElementById('workflow-block').style.display !== 'none') {
         await refreshWorkflowList();
       }

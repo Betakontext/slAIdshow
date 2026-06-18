@@ -7,6 +7,7 @@ import os
 import shutil
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Set, Any, Tuple
 
@@ -59,11 +60,6 @@ def _timeout_long(total: float) -> httpx.Timeout:
     """Long timeout profile for generation workflows, safely clamped."""
     total = max(10.0, min(total, 240.0))
     return httpx.Timeout(connect=8.0, read=total, write=8.0, pool=8.0)
-
-def _assert_local_host(host: str) -> None:
-    """Legacy: enforce localhost-only connectivity (kept for LLM/Ollama use)."""
-    if host not in {"127.0.0.1", "localhost"}:
-        raise AssertionError(f"Only localhost allowed, got {host}")
 
 def _clamp_dim(v: Optional[int]) -> Optional[int]:
     """Clamp dimensions to [64, 2048] and align to multiples of 8."""
@@ -176,12 +172,32 @@ def _resolve_size_for_backend(backend_name: str, req_w: Optional[int], req_h: Op
 
 
 # ---------------------------
+# Style runtime (optional injection)
+# ---------------------------
+
+@dataclass
+class StyleRuntime:
+    """
+    Runtime-only styling parameters that can be injected from the app layer.
+
+    reference_path: Absolute path to a local reference image (if any)
+    reference_strength: Weight for adapters/conditioning nodes [0..1]
+    """
+    reference_path: Optional[Path] = None
+    reference_strength: float = 0.6
+
+    @property
+    def has_reference(self) -> bool:
+        return self.reference_path is not None and self.reference_path.exists() and self.reference_path.is_file()
+
+
+# ---------------------------
 # Abstract Interface
 # ---------------------------
 
 class ImageBackend:
     """Abstract image backend interface."""
-    async def generate(self, prompt: str, width: int | None = None, height: int | None = None) -> Path:
+    async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative_prompt: str | None = None) -> Path:
         raise NotImplementedError
 
 
@@ -337,10 +353,17 @@ class PollinationsBackend(ImageBackend):
                     continue
         raise RuntimeError(f"pollinations_get_all_attempts_failed: {last_exc}")
 
-    async def generate(self, prompt: str, width: int | None = None, height: int | None = None) -> Path:
+    async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative_prompt: str | None = None) -> Path:
         """Public generate method with v1 try-first fallback to GET."""
         if not self.cfg.allow_cloud:
             raise RuntimeError("Cloud image backend disabled (ALLOW_CLOUD_IMAGE_BACKEND=0)")
+
+        # Merge negative minimally if provided (cloud API has no native negative)
+        full_prompt = (prompt or "").strip()
+        if negative_prompt:
+            n = negative_prompt.strip()
+            if n:
+                full_prompt = f"{full_prompt}\n-- negative: {n}"
 
         # Resolve sizes with unified precedence so switching backends does not reset dimensions
         rw, rh = _resolve_size_for_backend("pollinations", width, height)
@@ -349,11 +372,11 @@ class PollinationsBackend(ImageBackend):
 
         if self.cfg.use_v1:
             try:
-                return await self._fetch_v1(prompt, eff_w, eff_h)
+                return await self._fetch_v1(full_prompt, eff_w, eff_h)
             except Exception:
-                return await self._fetch_get(prompt, eff_w, eff_h)
+                return await self._fetch_get(full_prompt, eff_w, eff_h)
         else:
-            return await self._fetch_get(prompt, eff_w, eff_h)
+            return await self._fetch_get(full_prompt, eff_w, eff_h)
 
 
 # ---------------------------
@@ -380,6 +403,13 @@ class ComfyConfig(BaseModel):
     node_id_negative: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_NEG", "3"))
     node_id_latent: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_LATENT", "4"))
 
+    # Optional style nodes (auto-detected if set and present in workflow)
+    # Common patterns: LoadImage → IPAdapterApply (class_type may vary)
+    node_id_ref_image: Optional[str] = Field(default_factory=lambda: (_env_str("APP_COMFY_NODE_REF_IMAGE", "") or None))
+    node_id_ipadapter: Optional[str] = Field(default_factory=lambda: (_env_str("APP_COMFY_NODE_IPADAPTER", "") or None))
+    node_key_ref_image_path: str = Field(default_factory=lambda: _env_str("APP_COMFY_KEY_REF_IMAGE_PATH", "image"))
+    node_key_ref_weight: str = Field(default_factory=lambda: _env_str("APP_COMFY_KEY_REF_WEIGHT", "weight"))
+
     def assert_local(self) -> None:
         """
         Verify image-backend host policy for privacy.
@@ -393,14 +423,24 @@ class LocalComfyBackend(ImageBackend):
     - Loads workflow JSON (prompt dict)
     - Enforces width/height on the latent node
     - Writes positive/negative prompts into CLIPTextEncode nodes
+    - Optionally injects reference image path/strength into style nodes when present
     - Sends prompt_dict as-is through the bridge and downloads results
     """
-    def __init__(self, out_dir: Path, cfg: Optional[ComfyConfig] = None) -> None:
+    def __init__(self, out_dir: Path, cfg: Optional[ComfyConfig] = None, style: Optional[StyleRuntime] = None) -> None:
         self.out_dir = Path(out_dir).resolve()
         self.cfg = cfg or ComfyConfig()
+        self.style = style or StyleRuntime()
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.cfg.assert_local()
         self._samplers_cache: Optional[Set[str]] = None
+
+    # ----- Style runtime setter for hot updates -----
+
+    def set_style_runtime(self, style: Optional[StyleRuntime]) -> None:
+        """Allow app layer to hot-update the style runtime (reference path/strength)."""
+        self.style = style or StyleRuntime()
+
+    # ----- Availability & metadata -----
 
     async def _available(self) -> bool:
         """Check if ComfyUI is reachable by calling /history."""
@@ -443,6 +483,8 @@ class LocalComfyBackend(ImageBackend):
         if n in {"euler a", "euler_a", "euler-ancestral"}:
             return "euler_ancestral"
         return n
+
+    # ----- Workflow helpers -----
 
     def _load_prompt_file(self) -> dict:
         """Load the workflow JSON and return its 'prompt' dict (or the full dict)."""
@@ -536,6 +578,43 @@ class LocalComfyBackend(ImageBackend):
                     if "height" in inputs:
                         inputs["height"] = height
 
+    def _inject_style_reference(self, prompt_dict: dict) -> None:
+        """
+        If style.reference_path is present and workflow exposes matching nodes,
+        inject the reference file path and strength.
+
+        This is intentionally conservative:
+        - We only touch nodes if configured IDs exist in the dict.
+        - We set keys given by node_key_ref_image_path/node_key_ref_weight when present.
+        - Class types commonly used: 'LoadImage', 'IPAdapterApply' (variants differ by custom nodes).
+        """
+        if not (self.style and self.style.has_reference):
+            return
+
+        ref_path = str(self.style.reference_path.as_posix())
+        weight = float(max(0.0, min(1.0, self.style.reference_strength)))
+
+        # Optional: Set path on a LoadImage-like node
+        if self.cfg.node_id_ref_image:
+            node = prompt_dict.get(self.cfg.node_id_ref_image)
+            if isinstance(node, dict):
+                inputs = node.get("inputs")
+                if isinstance(inputs, dict):
+                    # Many LoadImage nodes use 'image' field to store filename or absolute path
+                    key = self.cfg.node_key_ref_image_path or "image"
+                    if key in inputs:
+                        inputs[key] = ref_path
+
+        # Optional: Set weight on IP-Adapter-like node
+        if self.cfg.node_id_ipadapter:
+            node = prompt_dict.get(self.cfg.node_id_ipadapter)
+            if isinstance(node, dict):
+                inputs = node.get("inputs")
+                if isinstance(inputs, dict):
+                    k = self.cfg.node_key_ref_weight or "weight"
+                    if k in inputs:
+                        inputs[k] = weight
+
     def _copy_latest_from_comfy(self, since_ts: float) -> Optional[Path]:
         """
         Conservative fallback in case the bridge returns no files:
@@ -564,12 +643,15 @@ class LocalComfyBackend(ImageBackend):
         except Exception:
             return None
 
-    async def generate(self, prompt: str, width: int | None = None, height: int | None = None) -> Path:
+    # ----- Public generate -----
+
+    async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative_prompt: str | None = None) -> Path:
         """
         Generate an image via ComfyUI:
         - Validate availability
         - Load workflow prompt dict
         - Override latent dimensions and text nodes
+        - Optionally inject style reference nodes
         - Submit prompt_dict via bridge (no extra width/height)
         - Return first resulting image path or use safe fallback
         """
@@ -597,7 +679,13 @@ class LocalComfyBackend(ImageBackend):
         # Load and override prompt dict (dimensions and text)
         prompt_dict = self._load_prompt_file()
         self._override_dimensions_in_prompt(prompt_dict, width=w, height=h)
-        self._override_text_nodes(prompt_dict, positive=(prompt or "").strip(), negative=(self.cfg.negative or "").strip())
+
+        # Determine effective negatives: prefer call-time negative_prompt, fallback to cfg.negative
+        neg_eff = (negative_prompt or self.cfg.negative or "").strip()
+        self._override_text_nodes(prompt_dict, positive=(prompt or "").strip(), negative=neg_eff)
+
+        # Optionally inject style reference (LoadImage/IP-Adapter style nodes)
+        self._inject_style_reference(prompt_dict)
 
         started_at = _now()
 
@@ -642,7 +730,7 @@ class BackendEnv(BaseModel):
     allow_cloud: bool = Field(default_factory=lambda: _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0))
     output_dir: Path = Field(default_factory=lambda: Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")).resolve())
 
-def build_image_backend() -> ImageBackend:
+def build_image_backend(style: Optional[StyleRuntime] = None) -> ImageBackend:
     """
     Backend factory:
     - comfyui (default): local privacy-preserving pipeline; LAN allowed if APP_ALLOW_REMOTE_BACKENDS=1
@@ -654,7 +742,7 @@ def build_image_backend() -> ImageBackend:
 
     if env.image_backend == "comfyui":
         cfg = ComfyConfig()
-        return LocalComfyBackend(out_dir=out_dir, cfg=cfg)
+        return LocalComfyBackend(out_dir=out_dir, cfg=cfg, style=style)
     elif env.image_backend == "pollinations":
         cfg = PollinationsConfig()
         cfg.allow_cloud = env.allow_cloud

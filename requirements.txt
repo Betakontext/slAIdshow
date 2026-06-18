@@ -5,6 +5,9 @@ pydantic>=2,<3
 numpy==2.0.1
 sounddevice==0.4.7
 python-dotenv==1.0.1
+Pillow>=10.3
+python-multipart>=0.0.9
+
 
 # Whisper (lokal, Python-Bindings für whisper.cpp)
 pywhispercpp>=1.1.0
