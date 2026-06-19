@@ -39,6 +39,7 @@ from style_engine import (
     StyleConfig,
     build_prompt as build_style_prompt,
     ReferenceStore,
+    prepare_backend_style,  # NEW: central hook to apply reference to backend
 )
 
 # ---------- ENV helpers ----------
@@ -243,7 +244,7 @@ _assert_image_backend_host()
 
 WARMUP_ENABLE = _env_bool01("APP_OLLAMA_WARMUP_ENABLE", 1)
 WARMUP_PROMPT = _env_str("APP_OLLAMA_WARMUP_PROMPT", "Sag Hallo auf Deutsch.")
-WARMUP_TIMEOUT_SEC = _env_float("APP_OLLAMA_WARMUP_TIMEOUT_SEC", 45.0)
+WARMUP_TIMEOUT_SEC = _env_float("APP_OLLAMA_TIMEOUT_SEC", 45.0)
 WARMUP_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 3)
 WARMUP_RETRY_DELAY = _env_float("APP_OLLAMA_RETRY_DELAY", 1.2)
 WARMUP_GRACE_SEC = _env_float("APP_OLLAMA_GRACE_SEC", 10.0)
@@ -1047,6 +1048,10 @@ async def run_llm_and_image(text: str) -> None:
                 # Prefer style negative; fallback to global negative if style negative is empty
                 eff_negative = (built.negative or neg_global or "").strip()
 
+                # NEW: Apply current style reference to backend before generation
+                # This central hook ensures IP-Adapter/LoadImage nodes receive the reference.
+                prepare_backend_style(BACKEND, STATE.style_cfg, STYLE_REFS_DIR)
+
                 path = await _generate_with_negative_support(
                     prompt=built.positive,
                     width=STATE.image_width,
@@ -1585,6 +1590,9 @@ async def api_plan(req: PlanRequest):
                         eff_h = req.height if (req.height and req.height > 0) else STATE.image_height
                         eff_negative = (built.negative or neg_global or "").strip()
 
+                        # NEW: ensure backend has the current reference style applied
+                        prepare_backend_style(BACKEND, STATE.style_cfg, STYLE_REFS_DIR)
+
                         path = await _generate_with_negative_support(
                             built.positive,
                             width=eff_w,
@@ -1628,6 +1636,9 @@ async def api_image_direct(req: DirectImageRequest):
         w = req.width if (req.width and req.width > 0) else STATE.image_width
         h = req.height if (req.height and req.height > 0) else STATE.image_height
 
+        # NEW: ensure backend has the current reference style applied
+        prepare_backend_style(BACKEND, STATE.style_cfg, STYLE_REFS_DIR)
+
         path = await _generate_with_negative_support(
             prompt=built.positive,
             width=w,
@@ -1666,6 +1677,10 @@ async def api_image_test(req: ImageRequest):
 
         w = req.width if (req.width and req.width > 0) else STATE.image_width
         h = req.height if (req.height and req.height > 0) else STATE.image_height
+
+        # NEW: ensure backend has the current reference style applied
+        prepare_backend_style(BACKEND, STATE.style_cfg, STYLE_REFS_DIR)
+
         path = await _generate_with_negative_support(built.positive, width=w, height=h, negative=eff_negative)
         path = ensure_in_output_dir(path)
         rel = rel_for_ui_path(path)

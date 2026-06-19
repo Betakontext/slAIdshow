@@ -132,7 +132,7 @@
             </div>
           </div>
 
-          <!-- Size controls -->
+           <!-- Size controls -->
           <div class="row" style="margin-bottom:8px;">
             <label for="width-input" style="min-width:120px;" id="label-width">Breite</label>
             <input id="width-input" type="number" min="64" max="2048" step="64" placeholder="z. B. 768" />
@@ -141,7 +141,7 @@
             <button id="btn-apply-size" title="Größe übernehmen">Übernehmen</button>
           </div>
 
-          <!-- Style Reference -->
+          <!-- Style Reference line -->
           <div class="ref-line">
             <label for="ref-file" id="label-ref-upload" style="display:block;">Stil-Referenz (Bild)</label>
             <div class="ref-actions">
@@ -155,7 +155,7 @@
             <span class="mono" id="ref-info" style="font-size:12px; color:#cfd6e6;">Keine Referenz</span>
           </div>
 
-          <!-- Style Prompt -->
+          <!-- Style Prompt line -->
           <div style="margin-bottom:8px;">
             <label for="style-text" style="display:block; margin-bottom:6px;" id="label-style">Style-Prompt</label>
             <div class="style-line">
@@ -364,7 +364,7 @@
         neg_applied_ok: "Negative prompt saved.",
         neg_applied_fail: "Failed to save negative prompt.",
         wf_applied_ok: "Workflow applied.",
-        wf_applied_fail: "Workflow apply failed.",
+        wf_applied_fail: "Failed to apply workflow.",
         wf_none_placeholder: "No workflows found (folder: ./workflows)",
         wf_list_unavailable: "Workflow list unavailable",
         image_prompt_label: "Image Prompt"
@@ -378,6 +378,7 @@
     function t(key){ return I18N[LANG][key] || key; }
 
     function applyI18N(){
+      // Header and main titles
       document.getElementById('brand-title').textContent = t('brand');
       document.getElementById('title-viewer').textContent = t('title_viewer');
       document.getElementById('title-controls').textContent = t('title_controls');
@@ -386,6 +387,7 @@
       document.getElementById('btn-open-dir').textContent = t('btn_open_dir');
       document.getElementById('btn-open-dir').title = t('btn_open_dir');
 
+      // Buttons
       document.getElementById('btn-start').textContent = t('btn_start');
       document.getElementById('btn-stop').textContent = t('btn_stop');
       document.getElementById('btn-plan').textContent = t('btn_plan');
@@ -397,6 +399,7 @@
       const wfBtn = document.getElementById('btn-apply-workflow');
       if (wfBtn) wfBtn.textContent = t('btn_apply_workflow');
 
+      // Labels
       document.getElementById('label-backend').textContent = t('label_backend');
       document.getElementById('label-workflow').textContent = t('label_workflow');
       document.getElementById('label-ref-upload').textContent = t('ref_upload_label');
@@ -406,13 +409,15 @@
       document.getElementById('label-status').textContent = t('label_status');
       document.getElementById('label-width').textContent = t('label_width');
       document.getElementById('label-height').textContent = t('label_height');
-
+      // New: image prompt label
       const lblImg = document.getElementById('label-image-prompt');
       if (lblImg) lblImg.textContent = t('image_prompt_label');
 
+      // Buttons text near reference
       document.getElementById('btn-upload-ref').textContent = t('btn_upload_ref');
       document.getElementById('btn-disable-ref').textContent = t('btn_disable_ref');
 
+      // Placeholders
       const planInput = document.getElementById('plan-input');
       const negInput = document.getElementById('neg-input');
       const styleText = document.getElementById('style-text');
@@ -420,9 +425,11 @@
       if (negInput) negInput.placeholder = t('ph_neg');
       if (styleText) styleText.placeholder = t('ph_style_text');
 
+      // Status text while connecting
       const statusEl = document.getElementById('status');
       if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
 
+      // Reference info default if inactive
       if(!CURRENT_REF.id || !CURRENT_REF.use){
         document.getElementById('ref-info').textContent = t('ref_none');
       }
@@ -458,7 +465,7 @@
     const sizePill = $('#size-pill');
 
     // Style Prompt + Reference
-    const refFile = $('#ref-file');
+    const refFile = $('#ref-file'); // hidden input
     const btnUploadRef = $('#btn-upload-ref');
     const btnDisableRef = $('#btn-disable-ref');
     const refInfo = $('#ref-info');
@@ -729,6 +736,7 @@
 
       const size = currentSizePayload();
 
+      // Fetch style config to include style details + reference
       let styleCfg = null;
       try {
         const rs = await fetch('/api/settings/style', { cache: 'no-store' });
@@ -793,12 +801,13 @@
     });
 
     // Upload UX
-    document.getElementById('btn-upload-ref').addEventListener('click', ()=>{ const f = document.getElementById('ref-file'); if(f) f.click(); });
+    document.getElementById('btn-upload-ref').addEventListener('click', ()=>{ const refFile = document.getElementById('ref-file'); if(refFile) refFile.click(); });
 
     document.getElementById('ref-file').addEventListener('change', async ()=>{
-      const f = document.getElementById('ref-file').files && document.getElementById('ref-file').files[0];
+      const refFile = document.getElementById('ref-file');
+      const f = refFile.files && refFile.files[0];
       if(!f) return;
-      if(!/^image\//.test(f.type)){ log(statusLog, 'ref upload blocked (not an image)'); document.getElementById('ref-file').value=''; return; }
+      if(!/^image\//.test(f.type)){ log(statusLog, 'ref upload blocked (not an image)'); refFile.value=''; return; }
       const fd = new FormData(); fd.append('file', f, f.name);
       document.getElementById('btn-upload-ref').disabled = true;
       document.getElementById('ref-info').textContent = LANG === 'de' ? 'Lade hoch…' : 'Uploading…';
@@ -821,7 +830,7 @@
         await updateRefThumb(null, false);
         log(statusLog, `reference upload error: ${e}`);
       }finally{
-        document.getElementById('ref-file').value = '';
+        refFile.value = '';
         document.getElementById('btn-upload-ref').disabled = false;
       }
     });
@@ -851,7 +860,7 @@
       }
     });
 
-    // Backend switch
+    // Backend switch (unchanged)
     async function ensureCloudAllowed(){
       try{
         const r = await fetch('/api/settings/image_allow_cloud', {
@@ -881,12 +890,6 @@
         if(r.ok && j.ok){
           log(statusLog, I18N[LANG]['backend_switched_ok'] || 'Backend switched.');
           await refreshConfig();
-          // Refresh workflow list if visible
-          if(document.getElementById('workflow-block').style.display!=='none'){
-            await refreshWorkflowList();
-          }else{
-            workflowSelect.innerHTML=''; workflowPreview.textContent=''; wfWarn.style.display='none';
-          }
         }else{
           const err = j?.error || `${r.status}`;
           log(statusLog, `${I18N[LANG]['backend_switch_failed'] || 'Switch failed.'}: ${err}`);
@@ -897,177 +900,6 @@
         log(statusLog, `${I18N[LANG]['backend_switch_failed'] || 'Switch failed.'}: ${e}`);
       }finally{
         btn.disabled = false;
-      }
-    });
-
-    // ---- Workflow helpers with basename matching + deterministic fallback + empty-state ----
-
-    function wfBasename(s){
-      if(!s) return '';
-      const parts = String(s).split(/[\\/]/);
-      return parts[parts.length - 1];
-    }
-
-    async function listWorkflowsFromServer(){
-      try{
-        const r = await fetch('/api/workflows', {cache:'no-store'});
-        if(r.ok){
-          const j = await r.json();
-          if(j && Array.isArray(j.items)) return j.items;
-        }
-      }catch{}
-      return null;
-    }
-    async function listWorkflowsByIndexJson(){
-      try{
-        const r = await fetch('/workflows/index.json', {cache:'no-store'});
-        if(!r.ok) return [];
-        const j = await r.json();
-        if(Array.isArray(j)){ return j.map(x=> (typeof x==='string' ? {name:x.replace(/\.json$/,''), filename:x} : x)); }
-        else if(j && Array.isArray(j.items)){ return j.items; }
-      }catch{}
-      return [];
-    }
-
-    function normalizeWorkflowItems(items){
-      const norm = [];
-      for(const it of (items || [])){
-        const raw = (it && (it.filename || it.name)) ? (it.filename || it.name) : it;
-        const base = wfBasename(raw);
-        if(!base || !base.endsWith('.json')) continue;
-        const safe = base.replace(/[^A-Za-z0-9._-]/g, '');
-        norm.push({ filename: safe, name: (it && it.name) ? it.name : safe.replace(/\.json$/,'') });
-      }
-      norm.sort((a,b)=> a.filename.localeCompare(b.filename, 'en', {sensitivity:'base'}));
-      return norm;
-    }
-
-    function wfEmptyText(){
-      return t('wf_none_placeholder');
-    }
-
-    async function loadWorkflowPreview(filename){
-      workflowPreview.textContent='';
-      if(!filename || !/^[A-Za-z0-9._-]+$/.test(filename) || !filename.endsWith('.json')) return;
-      try{
-        const r = await fetch(`/workflows/${filename}`, {cache:'no-store'});
-        if(!r.ok) throw new Error(`HTTP ${r.status}`);
-        const txt = await r.text();
-        try{ const obj = JSON.parse(txt); workflowPreview.textContent = JSON.stringify(obj, null, 2); }
-        catch{ workflowPreview.textContent = txt; }
-      }catch(e){ workflowPreview.textContent = `Failed to load: ${e}`; }
-    }
-
-    async function refreshWorkflowList(){
-      if(workflowBlock.style.display==='none'){
-        workflowSelect.innerHTML='';
-        workflowSelect.title = '';
-        workflowPreview.textContent='';
-        wfWarn.style.display='none';
-        if (btnApplyWorkflow) btnApplyWorkflow.disabled = true;
-        return;
-      }
-
-      wfWarn.style.display='none';
-      workflowSelect.title = './workflows';
-
-      let items = await listWorkflowsFromServer();
-      if(!items) items = await listWorkflowsByIndexJson();
-      const list = normalizeWorkflowItems(items);
-
-      workflowSelect.innerHTML='';
-
-      if(list.length === 0){
-        const opt = document.createElement('option');
-        opt.value = '';
-        opt.textContent = wfEmptyText();
-        opt.disabled = true;
-        opt.selected = true;
-        workflowSelect.appendChild(opt);
-
-        if (btnApplyWorkflow) btnApplyWorkflow.disabled = true;
-        workflowPreview.textContent = '';
-        wfWarn.textContent = t('wf_list_unavailable');
-        wfWarn.style.display = '';
-        return;
-      }
-
-      for(const it of list){
-        const opt = document.createElement('option');
-        opt.value = it.filename;
-        opt.textContent = it.name || it.filename.replace(/\.json$/,'');
-        workflowSelect.appendChild(opt);
-      }
-      if (btnApplyWorkflow) btnApplyWorkflow.disabled = false;
-
-      const serverActiveRaw = (window.__CONFIG_CACHED?.image?.active_workflow) || '';
-      const serverActive = wfBasename(serverActiveRaw);
-      const storedRaw = localStorage.getItem('active_workflow') || '';
-      const stored = wfBasename(storedRaw);
-      const exists = (fn)=> !!Array.from(workflowSelect.options).find(o => o.value === fn);
-
-      let target = null;
-      if (serverActive && exists(serverActive)) {
-        target = serverActive;
-      } else if (stored && exists(stored)) {
-        target = stored;
-      } else {
-        target = workflowSelect.options[0].value;
-      }
-
-      workflowSelect.value = target;
-      localStorage.setItem('active_workflow', target);
-      await loadWorkflowPreview(target);
-    }
-
-    workflowSelect.addEventListener('change', async ()=>{
-      const v = workflowSelect.value;
-      if(!v) return;
-      localStorage.setItem('active_workflow', v);
-      await loadWorkflowPreview(v);
-    });
-
-    btnApplyWorkflow.addEventListener('click', async ()=>{
-      const filename = workflowSelect.value;
-      if(!filename) return;
-      btnApplyWorkflow.disabled=true;
-      try{
-        const r = await fetch('/api/settings/workflow', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ filename })
-        });
-        if(r.ok){
-          statusEl.textContent = t('wf_applied_ok') || 'Workflow applied.';
-          log(statusLog, `workflow applied: ${filename}`);
-          localStorage.setItem('active_workflow', filename);
-          await refreshConfig();
-        }else{
-          statusEl.textContent = t('wf_applied_fail') || 'Workflow apply failed.';
-          const txt = await r.text().catch(()=> '');
-          log(statusLog, `workflow apply failed: HTTP ${r.status} ${txt}`);
-        }
-      }catch(e){
-        statusEl.textContent = t('wf_applied_fail') || 'Workflow apply exception.';
-        log(statusLog, `workflow apply exception: ${e}`);
-      }finally{
-        btnApplyWorkflow.disabled=false;
-      }
-    });
-
-    // Save style prompt
-    document.getElementById('btn-save-style-text').addEventListener('click', async ()=>{
-      const val = document.getElementById('style-text').value || '';
-      try{
-        const r = await fetch('/api/settings/style', {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ style_details: val })
-        });
-        if(!r.ok) throw new Error(`HTTP ${r.status}`);
-        statusEl.textContent = t('style_text_ok');
-      }catch(e){
-        statusEl.textContent = t('style_text_fail');
-        log(statusLog, `style text save error: ${e}`);
       }
     });
 
@@ -1129,12 +961,6 @@
 
         const showWF = !!(j?.image?.show_workflow_selector);
         document.getElementById('workflow-block').style.display = showWF ? '' : 'none';
-        if(showWF){
-          await refreshWorkflowList();
-        }else{
-          workflowSelect.innerHTML=''; workflowSelect.title=''; workflowPreview.textContent=''; wfWarn.style.display='none';
-          if (btnApplyWorkflow) btnApplyWorkflow.disabled = true;
-        }
 
         const styleCfg = j?.style || {};
         document.getElementById('style-text').value = styleCfg.style_details || '';
@@ -1158,9 +984,6 @@
       function onSizeInputChange(){ updateSizePill(); }
       widthInputEl.addEventListener('input', onSizeInputChange);
       heightInputEl.addEventListener('input', onSizeInputChange);
-      if(document.getElementById('workflow-block').style.display!=='none'){
-        await refreshWorkflowList();
-      }
     })();
   </script>
 

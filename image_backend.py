@@ -9,74 +9,56 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Set, Any, Tuple
+from typing import Optional, Set, Any
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
-# Important:
-# The bridge must NOT hard-override width/height (e.g., force 512x512).
-# It must send the provided prompt_dict as-is to ComfyUI (/prompt)
-# and fetch results via /history. We will not pass width/height to it.
 from comfyui_bridge import generate_from_prompt_dict
 
-
-# ---------------------------
-# Helper & Safety Utilities
-# ---------------------------
+# --- Debug flag (optional minimal logging) ---
+def _debug() -> bool:
+    return (os.getenv("APP_IMAGE_BACKEND_DEBUG", "0") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 def _env_str(k: str, d: str) -> str:
-    """Read an environment variable as string with default, trimming whitespace."""
     return (os.getenv(k, d) or "").strip()
 
 def _env_int(k: str, d: int) -> int:
-    """Read an environment variable as int with default and safe fallback."""
     try:
         return int(os.getenv(k, str(d)))
     except Exception:
         return d
 
 def _env_float(k: str, d: float) -> float:
-    """Read an environment variable as float with default and safe fallback."""
     try:
         return float(os.getenv(k, str(d)))
     except Exception:
         return d
 
 def _env_bool01(k: str, d: int = 0) -> bool:
-    """Interpret common truthy strings (1, true, yes, on) as boolean True."""
     v = (os.getenv(k, str(d)) or "").strip().lower()
     return v in {"1", "true", "yes", "on"}
 
 def _httpx_limits() -> httpx.Limits:
-    """Shared connection pool limits for async HTTP clients."""
     return httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=30.0)
 
 def _timeout_short() -> httpx.Timeout:
-    """Short timeout profile for metadata and probes."""
     return httpx.Timeout(connect=3.0, read=6.0, write=4.0, pool=4.0)
 
 def _timeout_long(total: float) -> httpx.Timeout:
-    """Long timeout profile for generation workflows, safely clamped."""
     total = max(10.0, min(total, 240.0))
     return httpx.Timeout(connect=8.0, read=total, write=8.0, pool=8.0)
 
 def _clamp_dim(v: Optional[int]) -> Optional[int]:
-    """Clamp dimensions to [64, 2048] and align to multiples of 8."""
     if v is None:
         return None
     x = max(64, min(2048, int(v)))
     return x - (x % 8)
 
 def _now() -> float:
-    """Current timestamp used to filter fresh files in output directories."""
     return time.time()
 
 def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
-    """
-    Return True if the given IP lies inside any of the provided CIDR subnets.
-    subnets_str may contain multiple subnets separated by commas or whitespace.
-    """
     try:
         ip_addr = ipaddress.ip_address(ip)
     except Exception:
@@ -92,12 +74,6 @@ def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
     return False
 
 def _assert_image_backend_host_policy(host: str) -> None:
-    """
-    Image backend host policy:
-    - Always allow loopback (127.0.0.1, localhost).
-    - Allow remote only if APP_ALLOW_REMOTE_BACKENDS=1|true|yes|on.
-    - If APP_ALLOWED_SUBNETS is set, the host (if an IP) must be inside one of the subnets.
-    """
     if host in {"127.0.0.1", "localhost"}:
         return
     allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
@@ -113,18 +89,11 @@ def _assert_image_backend_host_policy(host: str) -> None:
     if not _is_in_allowed_subnets(host, subnets):
         raise AssertionError(f"Remote host {host} not in allowed subnets ({subnets})")
 
-
-# ---------------------------
-# Unified size resolution helpers (env-driven)
-# ---------------------------
-
 def _clamp8(v: int) -> int:
-    """Clamp to [64, 4096] and align to multiples of 8 for SD/Comfy stability."""
     v = max(64, min(4096, int(v)))
     return v - (v % 8)
 
 def _env_opt_int(name: str) -> Optional[int]:
-    """Read an optional int from environment; return None if unset/invalid."""
     raw = (os.getenv(name) or "").strip()
     if not raw:
         return None
@@ -134,27 +103,12 @@ def _env_opt_int(name: str) -> Optional[int]:
         return None
 
 def _resolve_size_for_backend(backend_name: str, req_w: Optional[int], req_h: Optional[int]) -> tuple[Optional[int], Optional[int]]:
-    """
-    Unified size precedence across backends:
-      1) Request width/height when both are present (>0)
-      2) Global defaults: APP_IMAGE_WIDTH/APP_IMAGE_HEIGHT
-      3) Backend-specific defaults:
-         - ComfyUI: APP_COMFY_WIDTH/APP_COMFY_HEIGHT
-         - Pollinations: POLLINATIONS_WIDTH/POLLINATIONS_HEIGHT
-      4) None (backend will rely on its own internal defaults)
-    Note: We intentionally do not touch POLLINATIONS_SIZE here to preserve your GET/v1 behavior.
-    """
-    # 1) Request overrides
     if isinstance(req_w, int) and req_w > 0 and isinstance(req_h, int) and req_h > 0:
         return _clamp8(req_w), _clamp8(req_h)
-
-    # 2) Global defaults (shared for both backends)
     gw = _env_opt_int("APP_IMAGE_WIDTH")
     gh = _env_opt_int("APP_IMAGE_HEIGHT")
     if gw and gh:
         return _clamp8(gw), _clamp8(gh)
-
-    # 3) Backend-specific fallbacks
     b = (backend_name or "").strip().lower()
     if b == "comfyui":
         cw = _env_opt_int("APP_COMFY_WIDTH")
@@ -166,44 +120,19 @@ def _resolve_size_for_backend(backend_name: str, req_w: Optional[int], req_h: Op
         ph = _env_opt_int("POLLINATIONS_HEIGHT")
         if pw and ph:
             return _clamp8(pw), _clamp8(ph)
-
-    # 4) No decision → let backend defaults apply
     return None, None
-
-
-# ---------------------------
-# Style runtime (optional injection)
-# ---------------------------
 
 @dataclass
 class StyleRuntime:
-    """
-    Runtime-only styling parameters that can be injected from the app layer.
-
-    reference_path: Absolute path to a local reference image (if any)
-    reference_strength: Weight for adapters/conditioning nodes [0..1]
-    """
     reference_path: Optional[Path] = None
     reference_strength: float = 0.6
-
     @property
     def has_reference(self) -> bool:
         return self.reference_path is not None and self.reference_path.exists() and self.reference_path.is_file()
 
-
-# ---------------------------
-# Abstract Interface
-# ---------------------------
-
 class ImageBackend:
-    """Abstract image backend interface."""
     async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative_prompt: str | None = None) -> Path:
         raise NotImplementedError
-
-
-# ---------------------------
-# Optional Cloud Backend (Pollinations)
-# ---------------------------
 
 class _PollinationsV1Datum(BaseModel):
     b64_json: str
@@ -214,7 +143,6 @@ class _PollinationsV1Response(BaseModel):
     data: list[_PollinationsV1Datum]
 
 class PollinationsConfig(BaseModel):
-    """Config for the optional Pollinations cloud backend (disabled by default)."""
     api_base: str = Field(default_factory=lambda: _env_str("POLLINATIONS_API_BASE", "https://gen.pollinations.ai").rstrip("/"))
     secret: str = Field(default_factory=lambda: _env_str("POLLINATIONS_SECRET", ""))
     model: Optional[str] = Field(default_factory=lambda: _env_str("POLLINATIONS_MODEL", "") or None)
@@ -225,26 +153,21 @@ class PollinationsConfig(BaseModel):
     use_v1: bool = Field(default_factory=lambda: _env_bool01("POLLINATIONS_USE_V1", 1))
     size_override: str = Field(default_factory=lambda: _env_str("POLLINATIONS_SIZE", ""))
     allow_cloud: bool = Field(default_factory=lambda: _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0))
-
     @property
     def seed(self) -> Optional[int]:
-        """Convert seed string to int if provided, otherwise None."""
         if self.seed_raw is None:
             return None
         try:
             return int(self.seed_raw)
         except Exception:
             return None
-
     def require_cloud_enabled(self) -> None:
-        """Ensure cloud usage is explicitly enabled and properly configured."""
         if not self.allow_cloud:
             raise RuntimeError("Cloud image backend not allowed (set ALLOW_CLOUD_IMAGE_BACKEND=1 to enable)")
         if not self.secret:
             raise RuntimeError("POLLINATIONS_SECRET missing in environment")
 
 def _size_from_wh(width: int, height: int) -> str:
-    """Return an API-friendly WxH string."""
     if width > 0 and height > 0:
         return f"{width}x{height}"
     return "1024x1024"
@@ -252,7 +175,6 @@ def _size_from_wh(width: int, height: int) -> str:
 def _build_pollinations_image_url(api_base: str, prompt: str, model: Optional[str],
                                   width: Optional[int], height: Optional[int],
                                   nologo: bool, seed: Optional[int]) -> str:
-    """Build URL for Pollinations GET-based generation endpoint."""
     from urllib.parse import quote, urlencode
     base = (api_base or "").rstrip("/")
     encoded_prompt = quote(prompt, safe="")
@@ -273,27 +195,18 @@ def _build_pollinations_image_url(api_base: str, prompt: str, model: Optional[st
     return url
 
 class PollinationsBackend(ImageBackend):
-    """Cloud image generation (optional). Disabled by default for privacy reasons."""
     def __init__(self, out_dir: Path, cfg: Optional[PollinationsConfig] = None) -> None:
         self.out_dir = Path(out_dir).resolve()
         self.cfg = cfg or PollinationsConfig()
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
     async def _fetch_v1(self, prompt: str, width: int | None, height: int | None) -> Path:
-        """Use POST /v1/images/generations which returns base64-encoded images."""
         self.cfg.require_cloud_enabled()
         url = f"{self.cfg.api_base}/v1/images/generations"
-        headers = {
-            "Authorization": f"Bearer {self.cfg.secret}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Authorization": f"Bearer {self.cfg.secret}", "Content-Type": "application/json"}
         w = width if (width and width > 0) else self.cfg.width
         h = height if (height and height > 0) else self.cfg.height
-        payload = {
-            "model": self.cfg.model or "flux",
-            "prompt": prompt,
-            "size": (self.cfg.size_override or _size_from_wh(w, h)),
-        }
+        payload = {"model": self.cfg.model or "flux", "prompt": prompt, "size": (self.cfg.size_override or _size_from_wh(w, h))}
         timeout = _timeout_long(120.0)
         delay = 1.0
         last_exc: Optional[Exception] = None
@@ -321,13 +234,10 @@ class PollinationsBackend(ImageBackend):
         raise RuntimeError(f"pollinations_v1_all_attempts_failed: {last_exc}")
 
     async def _fetch_get(self, prompt: str, width: int | None, height: int | None) -> Path:
-        """Use simple GET endpoint that streams a single image."""
         self.cfg.require_cloud_enabled()
         w = width if (width and width > 0) else self.cfg.width
         h = height if (height and height > 0) else self.cfg.height
-        url = _build_pollinations_image_url(
-            self.cfg.api_base, prompt, self.cfg.model, w, h, self.cfg.nologo, self.cfg.seed
-        )
+        url = _build_pollinations_image_url(self.cfg.api_base, prompt, self.cfg.model, w, h, self.cfg.nologo, self.cfg.seed)
         params: dict[str, str] = {}
         if self.cfg.secret:
             params["key"] = self.cfg.secret
@@ -354,22 +264,16 @@ class PollinationsBackend(ImageBackend):
         raise RuntimeError(f"pollinations_get_all_attempts_failed: {last_exc}")
 
     async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative_prompt: str | None = None) -> Path:
-        """Public generate method with v1 try-first fallback to GET."""
         if not self.cfg.allow_cloud:
             raise RuntimeError("Cloud image backend disabled (ALLOW_CLOUD_IMAGE_BACKEND=0)")
-
-        # Merge negative minimally if provided (cloud API has no native negative)
         full_prompt = (prompt or "").strip()
         if negative_prompt:
             n = negative_prompt.strip()
             if n:
                 full_prompt = f"{full_prompt}\n-- negative: {n}"
-
-        # Resolve sizes with unified precedence so switching backends does not reset dimensions
         rw, rh = _resolve_size_for_backend("pollinations", width, height)
         eff_w = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
         eff_h = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
-
         if self.cfg.use_v1:
             try:
                 return await self._fetch_v1(full_prompt, eff_w, eff_h)
@@ -378,13 +282,7 @@ class PollinationsBackend(ImageBackend):
         else:
             return await self._fetch_get(full_prompt, eff_w, eff_h)
 
-
-# ---------------------------
-# Local ComfyUI Backend
-# ---------------------------
-
 class ComfyConfig(BaseModel):
-    """Runtime configuration for the local ComfyUI backend."""
     host: str = Field(default_factory=lambda: _env_str("APP_COMFY_HOST", "127.0.0.1"))
     port: int = Field(default_factory=lambda: _env_int("APP_COMFY_PORT", 8188))
     workflow_path: Path = Field(default_factory=lambda: Path(_env_str("APP_COMFY_WORKFLOW", "./workflows/text2img_SD15-FP16.json")).resolve())
@@ -398,34 +296,19 @@ class ComfyConfig(BaseModel):
     comfy_output_dir: Optional[Path] = Field(default_factory=lambda: (Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).resolve() if _env_str("APP_COMFY_OUTPUT_DIR", "") else None))
     negative: str = Field(default_factory=lambda: _env_str("APP_COMFY_NEGATIVE", "text, watermark, logo, low quality, blurry, bad anatomy"))
 
-    # Explicit node IDs for robust overrides (adjust via .env if your workflow differs)
     node_id_positive: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_POS", "2"))
     node_id_negative: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_NEG", "3"))
     node_id_latent: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_LATENT", "4"))
 
-    # Optional style nodes (auto-detected if set and present in workflow)
-    # Common patterns: LoadImage → IPAdapterApply (class_type may vary)
     node_id_ref_image: Optional[str] = Field(default_factory=lambda: (_env_str("APP_COMFY_NODE_REF_IMAGE", "") or None))
     node_id_ipadapter: Optional[str] = Field(default_factory=lambda: (_env_str("APP_COMFY_NODE_IPADAPTER", "") or None))
     node_key_ref_image_path: str = Field(default_factory=lambda: _env_str("APP_COMFY_KEY_REF_IMAGE_PATH", "image"))
     node_key_ref_weight: str = Field(default_factory=lambda: _env_str("APP_COMFY_KEY_REF_WEIGHT", "weight"))
 
     def assert_local(self) -> None:
-        """
-        Verify image-backend host policy for privacy.
-        For image backends, allow remote only if explicitly enabled via APP_ALLOW_REMOTE_BACKENDS.
-        """
         _assert_image_backend_host_policy(self.host)
 
 class LocalComfyBackend(ImageBackend):
-    """
-    Local ComfyUI backend:
-    - Loads workflow JSON (prompt dict)
-    - Enforces width/height on the latent node
-    - Writes positive/negative prompts into CLIPTextEncode nodes
-    - Optionally injects reference image path/strength into style nodes when present
-    - Sends prompt_dict as-is through the bridge and downloads results
-    """
     def __init__(self, out_dir: Path, cfg: Optional[ComfyConfig] = None, style: Optional[StyleRuntime] = None) -> None:
         self.out_dir = Path(out_dir).resolve()
         self.cfg = cfg or ComfyConfig()
@@ -434,16 +317,10 @@ class LocalComfyBackend(ImageBackend):
         self.cfg.assert_local()
         self._samplers_cache: Optional[Set[str]] = None
 
-    # ----- Style runtime setter for hot updates -----
-
     def set_style_runtime(self, style: Optional[StyleRuntime]) -> None:
-        """Allow app layer to hot-update the style runtime (reference path/strength)."""
         self.style = style or StyleRuntime()
 
-    # ----- Availability & metadata -----
-
     async def _available(self) -> bool:
-        """Check if ComfyUI is reachable by calling /history."""
         if self.cfg.disabled:
             return False
         try:
@@ -455,7 +332,6 @@ class LocalComfyBackend(ImageBackend):
             return False
 
     async def _fetch_valid_samplers(self) -> Set[str]:
-        """Query KSampler object info for available sampler_name choices."""
         if self._samplers_cache is not None:
             return self._samplers_cache
         url = f"http://{self.cfg.host}:{self.cfg.port}/object_info/KSampler"
@@ -470,7 +346,6 @@ class LocalComfyBackend(ImageBackend):
                 else:
                     self._samplers_cache = set()
         except Exception:
-            # Static fallback to keep running even if object_info fails
             self._samplers_cache = {
                 "euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde",
                 "dpmpp_2m_karras", "heun", "dpm_fast", "uni_pc"
@@ -478,48 +353,32 @@ class LocalComfyBackend(ImageBackend):
         return self._samplers_cache
 
     def _normalize_sampler(self, name: str) -> str:
-        """Normalize a few common alias names for samplers."""
         n = (name or "").strip().lower()
         if n in {"euler a", "euler_a", "euler-ancestral"}:
             return "euler_ancestral"
         return n
 
-    # ----- Workflow helpers -----
-
     def _load_prompt_file(self) -> dict:
-        """Load the workflow JSON and return its 'prompt' dict (or the full dict)."""
         data = json.loads(self.cfg.workflow_path.read_text(encoding="utf-8"))
         if "prompt" in data and isinstance(data["prompt"], dict):
             return data["prompt"]
         return data
 
     def _override_text_nodes(self, prompt_dict: dict, positive: str, negative: str) -> None:
-        """
-        Robustly set texts in CLIPTextEncode nodes.
-        Strategy:
-        1) Target explicit node IDs (configured in env, defaults: pos='2', neg='3').
-        2) Fallback to the first two CLIPTextEncode nodes if IDs are missing.
-        """
         pos_set = False
         neg_set = False
-
-        # Try configured positive node
         node_pos = prompt_dict.get(self.cfg.node_id_positive)
         if isinstance(node_pos, dict) and node_pos.get("class_type") == "CLIPTextEncode":
             inputs = node_pos.get("inputs")
             if isinstance(inputs, dict) and "text" in inputs:
                 inputs["text"] = positive
                 pos_set = True
-
-        # Try configured negative node
         node_neg = prompt_dict.get(self.cfg.node_id_negative)
         if isinstance(node_neg, dict) and node_neg.get("class_type") == "CLIPTextEncode":
             inputs = node_neg.get("inputs")
             if isinstance(inputs, dict) and "text" in inputs:
                 inputs["text"] = negative
                 neg_set = True
-
-        # Fallback: first two CLIPTextEncode nodes
         if not (pos_set and neg_set):
             clip_nodes = []
             for node in prompt_dict.values():
@@ -537,14 +396,6 @@ class LocalComfyBackend(ImageBackend):
                     neg_set = True
 
     def _override_dimensions_in_prompt(self, prompt_dict: dict, width: int, height: int) -> None:
-        """
-        Enforce width/height on the active latent source node.
-        Strategy:
-        1) Primary: target configured latent node ID (default '4').
-        2) Fallback: update all known latent source classes to minimize mismatch.
-        Note: We only modify the in-memory prompt_dict; the bridge sends it as-is.
-        """
-        # 1) Try explicit latent node ID
         node_latent = prompt_dict.get(self.cfg.node_id_latent)
         if isinstance(node_latent, dict):
             cls = str(node_latent.get("class_type") or node_latent.get("class", "")).strip()
@@ -555,9 +406,7 @@ class LocalComfyBackend(ImageBackend):
                         inputs["width"] = width
                     if "height" in inputs:
                         inputs["height"] = height
-                    return  # Success: explicit target found and set
-
-        # 2) Fallback: apply to all potential latent sources
+                    return
         for node in prompt_dict.values():
             if not isinstance(node, dict):
                 continue
@@ -569,7 +418,6 @@ class LocalComfyBackend(ImageBackend):
                         inputs["width"] = width
                     if "height" in inputs:
                         inputs["height"] = height
-            # Rarely workflows put width/height into KSampler; patch if present
             if cls.startswith("KSampler"):
                 inputs = node.get("inputs")
                 if isinstance(inputs, dict):
@@ -579,33 +427,20 @@ class LocalComfyBackend(ImageBackend):
                         inputs["height"] = height
 
     def _inject_style_reference(self, prompt_dict: dict) -> None:
-        """
-        If style.reference_path is present and workflow exposes matching nodes,
-        inject the reference file path and strength.
-
-        This is intentionally conservative:
-        - We only touch nodes if configured IDs exist in the dict.
-        - We set keys given by node_key_ref_image_path/node_key_ref_weight when present.
-        - Class types commonly used: 'LoadImage', 'IPAdapterApply' (variants differ by custom nodes).
-        """
         if not (self.style and self.style.has_reference):
             return
-
         ref_path = str(self.style.reference_path.as_posix())
         weight = float(max(0.0, min(1.0, self.style.reference_strength)))
-
-        # Optional: Set path on a LoadImage-like node
+        if _debug():
+            print(f"[COMFY][style] apply ref={ref_path} w={weight}")
         if self.cfg.node_id_ref_image:
             node = prompt_dict.get(self.cfg.node_id_ref_image)
             if isinstance(node, dict):
                 inputs = node.get("inputs")
                 if isinstance(inputs, dict):
-                    # Many LoadImage nodes use 'image' field to store filename or absolute path
                     key = self.cfg.node_key_ref_image_path or "image"
                     if key in inputs:
                         inputs[key] = ref_path
-
-        # Optional: Set weight on IP-Adapter-like node
         if self.cfg.node_id_ipadapter:
             node = prompt_dict.get(self.cfg.node_id_ipadapter)
             if isinstance(node, dict):
@@ -616,11 +451,6 @@ class LocalComfyBackend(ImageBackend):
                         inputs[k] = weight
 
     def _copy_latest_from_comfy(self, since_ts: float) -> Optional[Path]:
-        """
-        Conservative fallback in case the bridge returns no files:
-        - Only consider images created/modified after 'since_ts'
-        - Copy the most recent candidate into our output directory
-        """
         src_dir = self.cfg.comfy_output_dir
         if not src_dir or not src_dir.exists():
             return None
@@ -629,7 +459,6 @@ class LocalComfyBackend(ImageBackend):
             candidates.extend(src_dir.rglob(ext))
         if not candidates:
             return None
-        # Keep only fresh files (with a small slack)
         recent = [p for p in candidates if p.is_file() and p.stat().st_mtime >= since_ts - 0.8]
         if not recent:
             return None
@@ -643,18 +472,7 @@ class LocalComfyBackend(ImageBackend):
         except Exception:
             return None
 
-    # ----- Public generate -----
-
     async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative_prompt: str | None = None) -> Path:
-        """
-        Generate an image via ComfyUI:
-        - Validate availability
-        - Load workflow prompt dict
-        - Override latent dimensions and text nodes
-        - Optionally inject style reference nodes
-        - Submit prompt_dict via bridge (no extra width/height)
-        - Return first resulting image path or use safe fallback
-        """
         if self.cfg.disabled:
             raise RuntimeError("ComfyUI disabled (APP_DISABLE_COMFYUI=1)")
         if not self.cfg.workflow_path.exists():
@@ -663,41 +481,35 @@ class LocalComfyBackend(ImageBackend):
         if not ok:
             raise RuntimeError("comfy_unavailable")
 
-        # Unified size resolution using request, global, or backend defaults
         rw, rh = _resolve_size_for_backend("comfyui", width, height)
         w_eff = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
         h_eff = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
         w = _clamp_dim(w_eff)
         h = _clamp_dim(h_eff)
 
-        # Validate/normalize sampler against ComfyUI choices (kept for future extension)
         valid_samplers = await self._fetch_valid_samplers()
         sampler = self._normalize_sampler(self.cfg.sampler)
         if sampler not in valid_samplers:
             sampler = "euler" if "euler" in valid_samplers else (next(iter(valid_samplers)) if valid_samplers else "euler")
 
-        # Load and override prompt dict (dimensions and text)
         prompt_dict = self._load_prompt_file()
         self._override_dimensions_in_prompt(prompt_dict, width=w, height=h)
 
-        # Determine effective negatives: prefer call-time negative_prompt, fallback to cfg.negative
         neg_eff = (negative_prompt or self.cfg.negative or "").strip()
         self._override_text_nodes(prompt_dict, positive=(prompt or "").strip(), negative=neg_eff)
 
-        # Optionally inject style reference (LoadImage/IP-Adapter style nodes)
         self._inject_style_reference(prompt_dict)
 
         started_at = _now()
 
-        # Critical: Do NOT pass width/height to the bridge; the dict overrides are authoritative.
         images = await generate_from_prompt_dict(
             prompt_dict=prompt_dict,
             out_dir=self.out_dir,
-            positive_text=None,    # already applied in dict
-            negative_text=None,    # already applied in dict
-            width=None,            # avoid override collisions
-            height=None,           # avoid override collisions
-            steps=self.cfg.steps,  # if your bridge overwrites sampler/steps, set to None here
+            positive_text=None,
+            negative_text=None,
+            width=None,
+            height=None,
+            steps=self.cfg.steps,
             cfg=self.cfg.cfg,
             sampler_name=sampler,
             scheduler=None,
@@ -712,34 +524,21 @@ class LocalComfyBackend(ImageBackend):
         if images:
             return images[0]
 
-        # Fallback: copy the latest fresh file from ComfyUI's output dir (if configured)
         copied = self._copy_latest_from_comfy(since_ts=started_at)
         if copied:
             return copied
 
         raise RuntimeError("comfy_no_images")
 
-
-# ---------------------------
-# Factory
-# ---------------------------
-
 class BackendEnv(BaseModel):
-    """Environment switches for backend selection and output directory."""
     image_backend: str = Field(default_factory=lambda: _env_str("IMAGE_BACKEND", "comfyui").lower())
     allow_cloud: bool = Field(default_factory=lambda: _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0))
     output_dir: Path = Field(default_factory=lambda: Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")).resolve())
 
 def build_image_backend(style: Optional[StyleRuntime] = None) -> ImageBackend:
-    """
-    Backend factory:
-    - comfyui (default): local privacy-preserving pipeline; LAN allowed if APP_ALLOW_REMOTE_BACKENDS=1
-    - pollinations: optional cloud backend (requires explicit env opt-in)
-    """
     env = BackendEnv()
     out_dir = env.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-
     if env.image_backend == "comfyui":
         cfg = ComfyConfig()
         return LocalComfyBackend(out_dir=out_dir, cfg=cfg, style=style)

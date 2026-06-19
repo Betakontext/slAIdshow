@@ -57,9 +57,6 @@
     /* style input with inline save */
     .style-line{display:flex;gap:8px;align-items:center}
     .style-line input{flex:1}
-    /* generic inline input + button row for prompts */
-    .inline-input-line{display:flex;gap:8px;align-items:center}
-    .inline-input-line input{flex:1}
     /* hide native file input completely but keep it accessible for JS */
     .visually-hidden{position:absolute !important; width:1px !important; height:1px !important; padding:0 !important; margin:-1px !important; overflow:hidden !important; clip:rect(0 0 0 0) !important; white-space:nowrap !important; border:0 !important;}
   </style>
@@ -132,7 +129,7 @@
             </div>
           </div>
 
-          <!-- Size controls -->
+           <!-- Size controls -->
           <div class="row" style="margin-bottom:8px;">
             <label for="width-input" style="min-width:120px;" id="label-width">Breite</label>
             <input id="width-input" type="number" min="64" max="2048" step="64" placeholder="z. B. 768" />
@@ -141,7 +138,7 @@
             <button id="btn-apply-size" title="Größe übernehmen">Übernehmen</button>
           </div>
 
-          <!-- Style Reference -->
+          <!-- Style Reference line: label on left, actions on right -->
           <div class="ref-line">
             <label for="ref-file" id="label-ref-upload" style="display:block;">Stil-Referenz (Bild)</label>
             <div class="ref-actions">
@@ -155,7 +152,7 @@
             <span class="mono" id="ref-info" style="font-size:12px; color:#cfd6e6;">Keine Referenz</span>
           </div>
 
-          <!-- Style Prompt -->
+          <!-- Style Prompt line: input + save button on the right -->
           <div style="margin-bottom:8px;">
             <label for="style-text" style="display:block; margin-bottom:6px;" id="label-style">Style-Prompt</label>
             <div class="style-line">
@@ -164,19 +161,14 @@
             </div>
           </div>
 
-          <!-- Image Prompt title -->
-          <div style="margin-bottom:6px;">
-            <label for="plan-input" style="display:block;" id="label-image-prompt">Bild Prompt</label>
-          </div>
-
-          <!-- Direct Generate (inline input + button) -->
-          <div class="inline-input-line" style="margin-bottom:8px;">
+          <!-- Direct Generate -->
+          <div class="row" style="margin-bottom:8px;">
             <input id="plan-input" type="text" placeholder="Text eingeben – Prompt erstellen und Bild generieren" />
             <button id="btn-direct">Direkt generieren</button>
           </div>
 
-          <!-- Negative Prompt (inline input + button) -->
-          <div class="inline-input-line" style="margin-bottom:8px%;">
+          <!-- Negative Prompt -->
+          <div class="row" style="margin-bottom:8px%;">
             <input id="neg-input" type="text" placeholder="Negativer Prompt (z. B. niedrige Qualität, verschwommen, fehlerhafte Anatomie)" />
             <button id="btn-apply-neg" title="Negativen Prompt anwenden">Übernehmen</button>
           </div>
@@ -288,7 +280,6 @@
         wf_applied_fail: "Workflow-Übernahme fehlgeschlagen.",
         wf_none_placeholder: "Keine Workflows gefunden (Ordner: ./workflows)",
         wf_list_unavailable: "Workflow-Liste nicht verfügbar",
-        image_prompt_label: "Bild Prompt"
       },
       en: {
         brand: "slAIdshow | Local Speech-to-Image Pipeline",
@@ -364,10 +355,9 @@
         neg_applied_ok: "Negative prompt saved.",
         neg_applied_fail: "Failed to save negative prompt.",
         wf_applied_ok: "Workflow applied.",
-        wf_applied_fail: "Workflow apply failed.",
+        wf_applied_fail: "Failed to apply workflow.",
         wf_none_placeholder: "No workflows found (folder: ./workflows)",
         wf_list_unavailable: "Workflow list unavailable",
-        image_prompt_label: "Image Prompt"
       }
     };
 
@@ -378,6 +368,7 @@
     function t(key){ return I18N[LANG][key] || key; }
 
     function applyI18N(){
+      // Header and main titles
       document.getElementById('brand-title').textContent = t('brand');
       document.getElementById('title-viewer').textContent = t('title_viewer');
       document.getElementById('title-controls').textContent = t('title_controls');
@@ -386,6 +377,7 @@
       document.getElementById('btn-open-dir').textContent = t('btn_open_dir');
       document.getElementById('btn-open-dir').title = t('btn_open_dir');
 
+      // Buttons
       document.getElementById('btn-start').textContent = t('btn_start');
       document.getElementById('btn-stop').textContent = t('btn_stop');
       document.getElementById('btn-plan').textContent = t('btn_plan');
@@ -397,6 +389,7 @@
       const wfBtn = document.getElementById('btn-apply-workflow');
       if (wfBtn) wfBtn.textContent = t('btn_apply_workflow');
 
+      // Labels
       document.getElementById('label-backend').textContent = t('label_backend');
       document.getElementById('label-workflow').textContent = t('label_workflow');
       document.getElementById('label-ref-upload').textContent = t('ref_upload_label');
@@ -407,12 +400,11 @@
       document.getElementById('label-width').textContent = t('label_width');
       document.getElementById('label-height').textContent = t('label_height');
 
-      const lblImg = document.getElementById('label-image-prompt');
-      if (lblImg) lblImg.textContent = t('image_prompt_label');
-
+      // Buttons text near reference
       document.getElementById('btn-upload-ref').textContent = t('btn_upload_ref');
       document.getElementById('btn-disable-ref').textContent = t('btn_disable_ref');
 
+      // Placeholders
       const planInput = document.getElementById('plan-input');
       const negInput = document.getElementById('neg-input');
       const styleText = document.getElementById('style-text');
@@ -420,9 +412,11 @@
       if (negInput) negInput.placeholder = t('ph_neg');
       if (styleText) styleText.placeholder = t('ph_style_text');
 
+      // Status text while connecting
       const statusEl = document.getElementById('status');
       if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
 
+      // Reference info default if inactive
       if(!CURRENT_REF.id || !CURRENT_REF.use){
         document.getElementById('ref-info').textContent = t('ref_none');
       }
@@ -458,7 +452,7 @@
     const sizePill = $('#size-pill');
 
     // Style Prompt + Reference
-    const refFile = $('#ref-file');
+    const refFile = $('#ref-file'); // hidden input
     const btnUploadRef = $('#btn-upload-ref');
     const btnDisableRef = $('#btn-disable-ref');
     const refInfo = $('#ref-info');
@@ -667,7 +661,7 @@
     });
 
     // Start/Stop
-    document.getElementById('btn-start').addEventListener('click', async ()=>{
+    $('#btn-start').addEventListener('click', async ()=>{
       try{
         const size = currentSizePayload();
         await fetch('/api/settings/image_size', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(size)});
@@ -699,10 +693,10 @@
     }
 
     // Plan
-    document.getElementById('btn-plan').addEventListener('click', async ()=>{
-      const text = document.getElementById('plan-input').value.trim();
+    $('#btn-plan').addEventListener('click', async ()=>{
+      const text = $('#plan-input').value.trim();
       if(!text) return;
-      const btn = document.getElementById('btn-plan');
+      const btn = $('#btn-plan');
       btn.disabled=true;
       try{
         const size = currentSizePayload();
@@ -729,6 +723,7 @@
 
       const size = currentSizePayload();
 
+      // Fetch style config to include style details + reference
       let styleCfg = null;
       try {
         const rs = await fetch('/api/settings/style', { cache: 'no-store' });
@@ -793,15 +788,15 @@
     });
 
     // Upload UX
-    document.getElementById('btn-upload-ref').addEventListener('click', ()=>{ const f = document.getElementById('ref-file'); if(f) f.click(); });
+    btnUploadRef.addEventListener('click', ()=>{ if(refFile) refFile.click(); });
 
-    document.getElementById('ref-file').addEventListener('change', async ()=>{
-      const f = document.getElementById('ref-file').files && document.getElementById('ref-file').files[0];
+    refFile.addEventListener('change', async ()=>{
+      const f = refFile.files && refFile.files[0];
       if(!f) return;
-      if(!/^image\//.test(f.type)){ log(statusLog, 'ref upload blocked (not an image)'); document.getElementById('ref-file').value=''; return; }
+      if(!/^image\//.test(f.type)){ log(statusLog, 'ref upload blocked (not an image)'); refFile.value=''; return; }
       const fd = new FormData(); fd.append('file', f, f.name);
-      document.getElementById('btn-upload-ref').disabled = true;
-      document.getElementById('ref-info').textContent = LANG === 'de' ? 'Lade hoch…' : 'Uploading…';
+      btnUploadRef.disabled = true;
+      refInfo.textContent = LANG === 'de' ? 'Lade hoch…' : 'Uploading…';
       try{
         const r = await fetch('/api/reference/upload', { method:'POST', body: fd });
         const j = await r.json().catch(()=> ({}));
@@ -810,26 +805,25 @@
         const use = !!sty?.use_reference;
         const id = sty?.reference_id || null;
         if(use && id){
-          document.getElementById('ref-info').textContent = `${t('ref_ok')} (${String(id).slice(0,8)}…)`;
+          refInfo.textContent = `${t('ref_ok')} (${String(id).slice(0,8)}…)`;
         }else{
-          document.getElementById('ref-info').textContent = t('ref_none');
+          refInfo.textContent = t('ref_none');
         }
         await updateRefThumb(id, use);
         log(statusLog, 'reference uploaded & enabled');
       }catch(e){
-        document.getElementById('ref-info').textContent = t('ref_fail');
+        refInfo.textContent = t('ref_fail');
         await updateRefThumb(null, false);
         log(statusLog, `reference upload error: ${e}`);
       }finally{
-        document.getElementById('ref-file').value = '';
-        document.getElementById('btn-upload-ref').disabled = false;
+        refFile.value = '';
+        btnUploadRef.disabled = false;
       }
     });
 
     // Reference disable
-    document.getElementById('btn-disable-ref').addEventListener('click', async ()=>{
-      const btn = document.getElementById('btn-disable-ref');
-      btn.disabled = true;
+    btnDisableRef.addEventListener('click', async ()=>{
+      btnDisableRef.disabled = true;
       try{
         const r = await fetch('/api/settings/style', {
           method:'POST',
@@ -839,7 +833,7 @@
         if(!r.ok) throw new Error(`HTTP ${r.status}`);
         const sty = await fetch('/api/settings/style', { cache:'no-store' }).then(x=>x.json()).catch(()=> ({}));
         const id = sty?.reference_id || null;
-        document.getElementById('ref-info').textContent = t('ref_none');
+        refInfo.textContent = t('ref_none');
         statusEl.textContent = t('ref_disabled_ok');
         await updateRefThumb(id, false);
         log(statusLog, 'reference disabled');
@@ -847,7 +841,7 @@
         statusEl.textContent = t('ref_disabled_fail');
         log(statusLog, `reference disable error: ${e}`);
       }finally{
-        btn.disabled = false;
+        btnDisableRef.disabled = false;
       }
     });
 
@@ -862,12 +856,10 @@
       }catch{ return false; }
     }
 
-    document.getElementById('btn-apply-backend').addEventListener('click', async ()=>{
-      const backend = document.getElementById('backend-select').value;
-      const backendWarn = document.getElementById('backend-warn');
-      const btn = document.getElementById('btn-apply-backend');
+    btnApplyBackend.addEventListener('click', async ()=>{
+      const backend = backendSelect.value;
       backendWarn.style.display = 'none';
-      btn.disabled = true;
+      btnApplyBackend.disabled = true;
       try{
         if(backend==='pollinations'){
           const ok = await ensureCloudAllowed();
@@ -879,42 +871,39 @@
         });
         const j = await r.json().catch(()=> ({}));
         if(r.ok && j.ok){
-          log(statusLog, I18N[LANG]['backend_switched_ok'] || 'Backend switched.');
+          log(statusLog, t('backend_switched_ok'));
           await refreshConfig();
-          // Refresh workflow list if visible
-          if(document.getElementById('workflow-block').style.display!=='none'){
-            await refreshWorkflowList();
-          }else{
+          if(workflowBlock.style.display!=='none'){ await refreshWorkflowList(); }
+          else{
             workflowSelect.innerHTML=''; workflowPreview.textContent=''; wfWarn.style.display='none';
           }
         }else{
           const err = j?.error || `${r.status}`;
-          log(statusLog, `${I18N[LANG]['backend_switch_failed'] || 'Switch failed.'}: ${err}`);
-          if(j?.reason==='cloud_blocked'){ backendWarn.textContent = I18N[LANG]['backend_warn_cloud_blocked']; backendWarn.style.display=''; }
-          else if(j?.reason==='missing_secret'){ backendWarn.textContent = I18N[LANG]['backend_warn_missing_secret']; backendWarn.style.display=''; }
+          log(statusLog, `${t('backend_switch_failed')}: ${err}`);
+          if(j?.reason==='cloud_blocked'){ backendWarn.textContent = t('backend_warn_cloud_blocked'); backendWarn.style.display=''; }
+          else if(j?.reason==='missing_secret'){ backendWarn.textContent = t('backend_warn_missing_secret'); backendWarn.style.display=''; }
         }
       }catch(e){
-        log(statusLog, `${I18N[LANG]['backend_switch_failed'] || 'Switch failed.'}: ${e}`);
+        log(statusLog, `${t('backend_switch_failed')}: ${e}`);
       }finally{
-        btn.disabled = false;
+        btnApplyBackend.disabled = false;
       }
     });
 
     // ---- Workflow helpers with basename matching + deterministic fallback + empty-state ----
 
+    // Return basename (strip directories from Windows/Unix paths)
     function wfBasename(s){
       if(!s) return '';
       const parts = String(s).split(/[\\/]/);
       return parts[parts.length - 1];
     }
 
+    // Try server API first, then fallback to static index.json
     async function listWorkflowsFromServer(){
       try{
         const r = await fetch('/api/workflows', {cache:'no-store'});
-        if(r.ok){
-          const j = await r.json();
-          if(j && Array.isArray(j.items)) return j.items;
-        }
+        if(r.ok){ const j = await r.json(); if(j && Array.isArray(j.items)) return j.items; }
       }catch{}
       return null;
     }
@@ -929,6 +918,7 @@
       return [];
     }
 
+    // Normalize items to { filename (basename, safe), name }, sort alphabetically by filename
     function normalizeWorkflowItems(items){
       const norm = [];
       for(const it of (items || [])){
@@ -942,6 +932,7 @@
       return norm;
     }
 
+    // Localized empty placeholder text
     function wfEmptyText(){
       return t('wf_none_placeholder');
     }
@@ -959,6 +950,7 @@
     }
 
     async function refreshWorkflowList(){
+      // If selector block hidden: clear and disable apply
       if(workflowBlock.style.display==='none'){
         workflowSelect.innerHTML='';
         workflowSelect.title = '';
@@ -971,6 +963,7 @@
       wfWarn.style.display='none';
       workflowSelect.title = './workflows';
 
+      // Load items from server or fallback
       let items = await listWorkflowsFromServer();
       if(!items) items = await listWorkflowsByIndexJson();
       const list = normalizeWorkflowItems(items);
@@ -978,6 +971,7 @@
       workflowSelect.innerHTML='';
 
       if(list.length === 0){
+        // Empty state: disabled placeholder option, disable apply, clear preview, show warning
         const opt = document.createElement('option');
         opt.value = '';
         opt.textContent = wfEmptyText();
@@ -992,6 +986,7 @@
         return;
       }
 
+      // Populate options
       for(const it of list){
         const opt = document.createElement('option');
         opt.value = it.filename;
@@ -1000,6 +995,7 @@
       }
       if (btnApplyWorkflow) btnApplyWorkflow.disabled = false;
 
+      // Determine active by priority: serverActive (basename) > localStorage (basename) > first alphabetical
       const serverActiveRaw = (window.__CONFIG_CACHED?.image?.active_workflow) || '';
       const serverActive = wfBasename(serverActiveRaw);
       const storedRaw = localStorage.getItem('active_workflow') || '';
@@ -1054,29 +1050,10 @@
       }
     });
 
-    // Save style prompt
-    document.getElementById('btn-save-style-text').addEventListener('click', async ()=>{
-      const val = document.getElementById('style-text').value || '';
-      try{
-        const r = await fetch('/api/settings/style', {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ style_details: val })
-        });
-        if(!r.ok) throw new Error(`HTTP ${r.status}`);
-        statusEl.textContent = t('style_text_ok');
-      }catch(e){
-        statusEl.textContent = t('style_text_fail');
-        log(statusLog, `style text save error: ${e}`);
-      }
-    });
-
     // Size apply
-    document.getElementById('btn-apply-size').addEventListener('click', async ()=>{
+    btnApplySize.addEventListener('click', async ()=>{
       const size = currentSizePayload();
-      document.getElementById('width-input').value = size.width;
-      document.getElementById('height-input').value = size.height;
-      updateSizePill();
+      widthInput.value = size.width; heightInput.value = size.height; updateSizePill();
       try{
         const r = await fetch('/api/settings/image_size', {
           method:'POST', headers:{'Content-Type':'application/json'},
@@ -1101,7 +1078,7 @@
       }catch{}
     });
 
-    // Initial config
+    // Initial config (cache server config → drives workflow priority)
     const widthInputEl = document.getElementById('width-input');
     const heightInputEl = document.getElementById('height-input');
 
@@ -1111,14 +1088,16 @@
         if(!r.ok) throw new Error('config fetch failed');
         const j = await r.json();
 
+        // Cache server config for workflow priority logic
         window.__CONFIG_CACHED = j;
 
-        document.getElementById('ollama-pill').textContent = `Ollama: ${j?.ollama?.model || '?'}`;
-        document.getElementById('poll-pill').textContent = `Images: ${j?.image?.backend || '?'}`;
-        document.getElementById('sr-pill').textContent = `SR: ${j?.audio?.sample_rate || '?'}`;
+        // UI pills / status from server config
+        $('#ollama-pill').textContent = `Ollama: ${j?.ollama?.model || '?'}`;
+        $('#poll-pill').textContent = `Images: ${j?.image?.backend || '?'}`;
+        $('#sr-pill').textContent = `SR: ${j?.audio?.sample_rate || '?'}`;
 
         const current = (j?.image?.backend || 'comfyui').toLowerCase();
-        document.getElementById('backend-select').value = current === 'pollinations' ? 'pollinations' : 'comfyui';
+        backendSelect.value = current === 'pollinations' ? 'pollinations' : 'comfyui';
 
         const w = Number(j?.image?.current_width ?? j?.image?.width_default ?? 512);
         const h = Number(j?.image?.current_height ?? j?.image?.height_default ?? 512);
@@ -1127,8 +1106,9 @@
         const neg = (j?.image?.negative_prompt || '').trim();
         if(neg) document.getElementById('neg-input').value = neg;
 
+        // Show/hide workflow selector and refresh list
         const showWF = !!(j?.image?.show_workflow_selector);
-        document.getElementById('workflow-block').style.display = showWF ? '' : 'none';
+        workflowBlock.style.display = showWF ? '' : 'none';
         if(showWF){
           await refreshWorkflowList();
         }else{
@@ -1137,11 +1117,11 @@
         }
 
         const styleCfg = j?.style || {};
-        document.getElementById('style-text').value = styleCfg.style_details || '';
+        styleText.value = styleCfg.style_details || '';
         if(styleCfg.use_reference && styleCfg.reference_id){
-          document.getElementById('ref-info').textContent = `${t('ref_ok')} (${String(styleCfg.reference_id).slice(0,8)}…)`;
+          refInfo.textContent = `${t('ref_ok')} (${String(styleCfg.reference_id).slice(0,8)}…)`;
         }else{
-          document.getElementById('ref-info').textContent = t('ref_none');
+          refInfo.textContent = t('ref_none');
         }
         await updateRefThumb(styleCfg.reference_id || null, !!styleCfg.use_reference);
 

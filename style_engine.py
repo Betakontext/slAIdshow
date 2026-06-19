@@ -1,54 +1,61 @@
-# style_engine.py
+# file: style_engine.py
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import threading
 import uuid
-from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, field_validator
 
-# Pillow is required for robust image validation (imghdr was removed in Python 3.13)
+# Bildvalidierung
 try:
     from PIL import Image
 except Exception as e:
-    raise RuntimeError(
-        "Pillow (PIL) is required. Please install in your active venv: pip install Pillow"
-    ) from e
+    raise RuntimeError("Pillow ist erforderlich: pip install Pillow") from e
 
-
-# Allowed image formats (uppercased as Pillow reports them)
+# Zulässige Formate
 ALLOWED_FORMATS: set[str] = {"PNG", "JPEG", "JPG", "WEBP"}
 
-# Static root and style directory (local only)
+# Default-Verzeichnisse (können via ENV überschrieben werden)
 STATIC_ROOT = Path(os.environ.get("STATIC_ROOT", "static")).resolve()
-STYLE_DIR = (STATIC_ROOT / "style").resolve()
+STYLE_DIR_STATIC = (STATIC_ROOT / "style").resolve()
+STYLE_REFS_DIR_DEFAULT = Path(os.environ.get("APP_STYLE_REF_DIR", "./outputs/style_refs")).resolve()
+
+# ComfyUI IP-Adapter/Referenz-Node IDs & Keys (über ENV konfigurierbar)
+# Beispiel:
+#   APP_COMFY_NODE_REF_IMAGE=23
+#   APP_COMFY_NODE_IPADAPTER=45
+#   APP_COMFY_KEY_REF_IMAGE_PATH=image
+#   APP_COMFY_KEY_REF_WEIGHT=weight
+REF_IMAGE_NODE_ID = os.environ.get("APP_COMFY_NODE_REF_IMAGE", "").strip()
+IPADAPTER_NODE_ID = os.environ.get("APP_COMFY_NODE_IPADAPTER", "").strip()
+REF_IMAGE_KEY = os.environ.get("APP_COMFY_KEY_REF_IMAGE_PATH", "image").strip()
+REF_WEIGHT_KEY = os.environ.get("APP_COMFY_KEY_REF_WEIGHT", "weight").strip()
 
 
-def ensure_style_dir() -> None:
-    """Ensure the style directory exists."""
-    STYLE_DIR.mkdir(parents=True, exist_ok=True)
+def ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
 
 
 def safe_filename(name: str) -> str:
-    """Sanitize filename to avoid path traversal and unsafe characters."""
-    name = os.path.basename(name)
+    """Säubere Dateinamen gegen Traversal und ungültige Zeichen."""
+    name = os.path.basename(name or "")
     name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
-    return name or "style_ref"
+    return name or f"file_{uuid.uuid4().hex[:8]}"
 
 
 def detect_image_format(data: bytes) -> Tuple[bool, Optional[str], Optional[Tuple[int, int]]]:
     """
-    Validate image bytes via Pillow and return (ok, format, size).
-    - Uses verify() for integrity, then re-opens for metadata.
+    Prüfe Bildbytes via Pillow. Gibt (ok, format, size) zurück.
     """
     try:
         with Image.open(io.BytesIO(data)) as img:
-            img.verify()  # integrity check
+            img.verify()
         with Image.open(io.BytesIO(data)) as img2:
             fmt = (img2.format or "").upper()
             size = img2.size
@@ -57,20 +64,26 @@ def detect_image_format(data: bytes) -> Tuple[bool, Optional[str], Optional[Tupl
         return False, None, None
 
 
+class PromptBuildResult(BaseModel):
+    positive: str
+    negative: str
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
 class StyleState(BaseModel):
-    """
-    Runtime style state used by the engine and backends.
-    - enabled: whether style reference should be applied
-    - strength: 0..1 influence factor (backend-specific mapping)
-    - rel: relative path under /static (e.g., "style/ref.png")
-    - use_reference: mirror of config toggle; not strictly required but useful
-    - style_preset: optional preset name/id
-    """
+    # Historische Felder
     enabled: bool = Field(default=False)
     strength: float = Field(ge=0.0, le=1.0, default=0.6)
-    rel: Optional[str] = None
+    rel: Optional[str] = None  # relativ unter /static (legacy)
     use_reference: bool = False
     style_preset: Optional[str] = None
+
+    # Erweiterungen, wie von app.py erwartet
+    style_details: str = Field(default="")
+    negative_base: str = Field(default="")
+    color_scheme: str = Field(default="")
+    reference_id: Optional[str] = None
+    reference_strength: float = Field(ge=0.0, le=1.0, default=0.6)
 
     @field_validator("rel")
     @classmethod
@@ -85,22 +98,20 @@ class StyleState(BaseModel):
 
 class StyleConfig(BaseModel):
     """
-    Configuration model mirroring StyleState and extended for app startup/shutdown usage.
-
-    Fields:
-    - enabled: whether style reference should be applied
-    - strength: 0..1 influence factor
-    - rel: relative path under /static (e.g., "style/ref.png")
-    - persisted_path: optional filesystem path where this config was loaded/saved
-    - style_preset: optional name/id of a style preset selected in the UI
-    - use_reference: UI toggle whether to use the reference image
+    Persistente UI-Konfiguration (1:1 wie die Felder, die app.py nutzt).
     """
     enabled: bool = Field(default=False)
     strength: float = Field(ge=0.0, le=1.0, default=0.6)
     rel: Optional[str] = None
-    persisted_path: Optional[str] = None
+    persisted_path: Optional[Path] = None
     style_preset: Optional[str] = None
     use_reference: bool = False
+
+    style_details: str = Field(default="")
+    negative_base: str = Field(default="")
+    color_scheme: str = Field(default="")
+    reference_id: Optional[str] = None
+    reference_strength: float = Field(ge=0.0, le=1.0, default=0.6)
 
     @field_validator("rel")
     @classmethod
@@ -113,55 +124,16 @@ class StyleConfig(BaseModel):
         return v
 
 
-class StyleEngine:
+class StaticReferenceStore:
     """
-    Manage the active style reference image and parameters.
-    - Stores reference safely under static/style
-    - Exposes current StyleState/StyleConfig
-    - Validates uploaded images with Pillow
+    Legacy: Speicherung unter static/style mit Rückgabe eines relativen Pfads.
     """
-
     def __init__(self, static_root: Path | str = STATIC_ROOT) -> None:
         self._static_root = Path(static_root).resolve()
-        ensure_style_dir()
-        self._state = StyleState(enabled=False, strength=0.6, rel=None)
+        ensure_dir(STYLE_DIR_STATIC)
+        self._lock = threading.Lock()
 
-    def get_state(self) -> StyleState:
-        """Return current runtime style state."""
-        return self._state
-
-    def get_config(self) -> StyleConfig:
-        """Return current style configuration (alias view)."""
-        # Keep fields that exist on StyleState; persist-only fields remain None
-        return StyleConfig(**self._state.model_dump())
-
-    def update_params(
-        self,
-        enabled: bool,
-        strength: float,
-        use_reference: Optional[bool] = None,
-        style_preset: Optional[str] = None,
-    ) -> StyleState:
-        """Update style params with validation; optional toggles can be passed."""
-        kwargs = self._state.model_dump()
-        kwargs.update({"enabled": enabled, "strength": strength})
-        if use_reference is not None:
-            kwargs["use_reference"] = bool(use_reference)
-        if style_preset is not None:
-            kwargs["style_preset"] = style_preset
-        try:
-            valid = StyleState(**kwargs)
-        except ValidationError as e:
-            raise ValueError(f"Invalid style params: {e}") from e
-        self._state = valid
-        return self._state
-
-    def set_reference_file(self, filename: str, content: bytes) -> StyleState:
-        """
-        Persist a validated reference image to static/style and update state.rel.
-        - Accepts only allowed formats (PNG/JPEG/WEBP)
-        - Writes atomically via a temporary file replace
-        """
+    def save(self, filename: str, content: bytes) -> str:
         ok, fmt, _ = detect_image_format(content)
         if not ok or not fmt:
             raise ValueError("Invalid image file")
@@ -170,97 +142,36 @@ class StyleEngine:
             fmt = "JPEG"
         if fmt not in ALLOWED_FORMATS:
             raise ValueError(f"Unsupported format: {fmt}")
-
         base = os.path.splitext(safe_filename(filename))[0]
         ext = ".jpg" if fmt == "JPEG" else f".{fmt.lower()}"
-        final_name = f"{base}{ext}"
-
-        ensure_style_dir()
-        tmp_path = STYLE_DIR / (final_name + ".tmp")
-        dst_path = STYLE_DIR / final_name
-
-        with open(tmp_path, "wb") as f:
-            f.write(content)
-        # Atomic replace to avoid partial files
-        tmp_path.replace(dst_path)
-
-        # Compute relative path under /static
+        final = f"{base}{ext}"
+        tmp = STYLE_DIR_STATIC / (final + ".tmp")
+        dst = STYLE_DIR_STATIC / final
+        with self._lock:
+            tmp.write_bytes(content)
+            tmp.replace(dst)
         try:
-            rel_path = dst_path.relative_to(self._static_root)
+            rel = dst.relative_to(self._static_root)
         except ValueError:
-            rel_path = Path("style") / final_name  # fallback if style dir is outside static
-
-        self._state.rel = str(rel_path).replace(os.sep, "/")
-        return self._state
-
-    def clear_reference(self) -> StyleState:
-        """Clear only the reference pointer; keep the file on disk."""
-        self._state.rel = None
-        return self._state
-
-    def current_file_path(self) -> Optional[Path]:
-        """Return absolute path to the current reference file, if any."""
-        if not self._state.rel:
-            return None
-        return (self._static_root / self._state.rel).resolve()
-
-
-class ReferenceMeta(BaseModel):
-    """Lightweight metadata for a stored reference image."""
-    rel: str  # relative path under /static (e.g. "style/foo.png")
-    format: str
-    width: int
-    height: int
-    created_at: float = Field(default_factory=lambda: datetime.now().timestamp())
-
-    @field_validator("rel")
-    @classmethod
-    def _validate_rel(cls, v: str) -> str:
-        v = v.lstrip("/")
-        if ".." in v:
-            raise ValueError("invalid relative path")
-        if not v.startswith("style/"):
-            # Enforce namespace under static/style
-            raise ValueError("reference must reside under 'style/'")
-        return v
-
-    @field_validator("format")
-    @classmethod
-    def _validate_fmt(cls, v: str) -> str:
-        return v.upper()
+            rel = Path("style") / final
+        return str(rel).replace(os.sep, "/")
 
 
 class ReferenceStore:
     """
-    Store and manage reference images under static/style.
-    - Validates images via Pillow
-    - Returns only relative paths under /static
-    - Provides simple list/get/remove helpers
+    Store für Referenzbilder unter outputs/style_refs.
+    Bietet ID-basierte Speicherung und Lookup.
     """
-
-    def __init__(self, static_root: Path | str = STATIC_ROOT) -> None:
-        self._static_root = Path(static_root).resolve()
-        ensure_style_dir()
+    def __init__(self, root: Path | str = STYLE_REFS_DIR_DEFAULT) -> None:
+        self._root = Path(root).resolve()
+        ensure_dir(self._root)
         self._lock = threading.Lock()
 
-    def _unique_name(self, base: str, ext: str) -> str:
-        """
-        Generate a unique filename if the target already exists.
-        Uses a short UUID suffix to avoid collisions.
-        """
-        candidate = f"{base}{ext}"
-        dst = STYLE_DIR / candidate
-        if not dst.exists():
-            return candidate
-        short = uuid.uuid4().hex[:8]
-        return f"{base}_{short}{ext}"
+    def _id_to_path(self, rid: str) -> Path:
+        fname = safe_filename(rid)
+        return (self._root / fname).resolve()
 
-    def save(self, filename: str, content: bytes) -> ReferenceMeta:
-        """
-        Validate and save an image under static/style, returning its metadata.
-        - Only PNG/JPEG/WEBP
-        - Atomic write via temporary file
-        """
+    def put(self, filename: str, content: bytes) -> tuple[str, Path]:
         ok, fmt, size = detect_image_format(content)
         if not ok or not fmt or not size:
             raise ValueError("Invalid image file")
@@ -272,164 +183,229 @@ class ReferenceStore:
 
         base = os.path.splitext(safe_filename(filename))[0]
         ext = ".jpg" if fmt == "JPEG" else f".{fmt.lower()}"
-        final_name = self._unique_name(base, ext)
-
-        tmp_path = STYLE_DIR / (final_name + ".tmp")
-        dst_path = STYLE_DIR / final_name
-
+        rid = f"{base}_{uuid.uuid4().hex[:8]}{ext}"
+        tmp = self._root / (rid + ".tmp")
+        dst = self._root / rid
         with self._lock:
-            with open(tmp_path, "wb") as f:
-                f.write(content)
-            tmp_path.replace(dst_path)
+            tmp.write_bytes(content)
+            tmp.replace(dst)
+        return rid, dst
 
+    def get(self, rid: str) -> Optional[Path]:
+        p = self._id_to_path(rid)
+        if p.exists() and p.is_file():
+            return p
+        return None
+
+    # Alias, falls bestehende Aufrufer get_path erwarten
+    def get_path(self, rid: str) -> Optional[Path]:
+        return self.get(rid)
+
+    def remove(self, rid: str) -> bool:
+        p = self._id_to_path(rid)
         try:
-            rel_path = dst_path.relative_to(self._static_root)
-        except ValueError:
-            rel_path = Path("style") / final_name
-
-        w, h = int(size[0]), int(size[1])
-        return ReferenceMeta(
-            rel=str(rel_path).replace(os.sep, "/"),
-            format=fmt,
-            width=w,
-            height=h,
-        )
-
-    def get_path(self, rel: str) -> Path:
-        """Return absolute filesystem path for a given relative 'style/...' path."""
-        # Validate namespace using ReferenceMeta schema
-        ReferenceMeta(rel=rel, format="PNG", width=1, height=1)
-        abs_path = (self._static_root / rel.lstrip("/")).resolve()
-        # Ensure the resolved path is still inside STYLE_DIR
-        if not str(abs_path).startswith(str(STYLE_DIR)):
-            raise ValueError("path escapes style directory")
-        return abs_path
-
-    def list(self) -> List[ReferenceMeta]:
-        """
-        List reference images from static/style.
-        Reads minimal metadata (format via Pillow open, size via Pillow).
-        """
-        items: List[ReferenceMeta] = []
-        for p in STYLE_DIR.glob("*"):
-            if not p.is_file():
-                continue
-            ext = p.suffix.lower()
-            if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
-                continue
-            try:
-                with Image.open(p) as im:
-                    fmt = (im.format or "").upper()
-                    w, h = im.size
-            except Exception:
-                continue
-            if fmt == "JPG":
-                fmt = "JPEG"
-            if fmt not in ALLOWED_FORMATS:
-                continue
-            try:
-                rel_path = p.relative_to(self._static_root)
-            except ValueError:
-                rel_path = Path("style") / p.name
-            items.append(
-                ReferenceMeta(
-                    rel=str(rel_path).replace(os.sep, "/"),
-                    format=fmt,
-                    width=int(w),
-                    height=int(h),
-                )
-            )
-        return items
-
-    def remove(self, rel: str) -> bool:
-        """Remove a stored reference by its relative path. Returns True if deleted."""
-        try:
-            target = self.get_path(rel)
+            if p.exists() and p.is_file():
+                p.unlink()
+                return True
         except Exception:
             return False
-        if target.exists() and target.is_file():
-            try:
-                target.unlink()
-                return True
-            except Exception:
-                return False
         return False
+
+    def list(self) -> List[str]:
+        return [f.name for f in self._root.iterdir() if f.is_file()]
+
+
+def _compose_positive(base: str, sc: StyleConfig) -> str:
+    """
+    Positive Prompt setzt sich zusammen aus:
+    - Benutzer- oder LLM-Text (base)
+    - optionale style_preset/styledetails/farbvorgaben
+    - deklarativer Hinweis auf Referenz-Style (Text-Hinweis für Prompt-Modelle ohne IP-Adapter)
+    """
+    base = (base or "").strip()
+    parts: List[str] = [base]
+    if sc.style_preset:
+        parts.append(f"style preset: {sc.style_preset}")
+    if sc.style_details:
+        parts.append(sc.style_details)
+    if sc.color_scheme:
+        parts.append(f"color scheme: {sc.color_scheme}")
+    if sc.use_reference and sc.reference_id:
+        parts.append(f"visual style guided by reference image (strength {sc.reference_strength:.2f})")
+    # Schlicht zusammenführen, kurz halten:
+    return ", ".join([p for p in parts if p])
+
+
+def _compose_negative(sc: StyleConfig) -> str:
+    neg = (sc.negative_base or "").strip()
+    return neg
+
 
 def build_prompt(
     prompt: str,
-    negative_prompt: Optional[str],
     state: Union[StyleState, StyleConfig, None] = None,
-) -> dict:
-
+) -> PromptBuildResult:
     """
-    Build a unified payload for image backends.
-    - Adds a gentle style hint to the positive prompt when style is enabled and a reference is present.
-    - Returns a dict containing prompt, negative_prompt, and style metadata.
-
-    Returns:
-      {
-        "prompt": str,
-        "negative_prompt": Optional[str],
-        "style": {"enabled": bool, "strength": float, "rel": Optional[str]}
-      }
+    Baue positive/negative Prompts aus Nutzereingabe und StyleConfig.
     """
-    base_prompt = (prompt or "").strip()
-    neg = (negative_prompt or "").strip() or None
-
-    # Normalize state to StyleState
     if state is None:
-        st = StyleState(enabled=False, strength=0.6, rel=None)
+        sc = StyleConfig()
     elif isinstance(state, StyleConfig):
-        st = StyleState(**state.model_dump())
+        sc = state
     else:
-        st = state
+        sc = StyleConfig(**state.model_dump())
 
-    final_prompt = base_prompt
-    # Only add hint when reference is intended to be used
-    if st.enabled and st.use_reference and st.rel:
-        style_hint = f" Use the visual style from the provided reference image. Style strength: {st.strength:.2f}."
-        final_prompt = f"{final_prompt}{style_hint}"
-
-    return {
-        "prompt": final_prompt,
-        "negative_prompt": neg,
-        "style": {
-            "enabled": bool(st.enabled),
-            "strength": float(st.strength),
-            "rel": st.rel,
-            "use_reference": bool(st.use_reference),
-            "style_preset": st.style_preset,
-        },
+    positive = _compose_positive((prompt or "").strip(), sc)
+    negative = _compose_negative(sc)
+    meta = {
+        "use_reference": sc.use_reference,
+        "reference_id": sc.reference_id,
+        "reference_strength": sc.reference_strength,
+        "style_preset": sc.style_preset,
     }
+    return PromptBuildResult(positive=positive, negative=negative, meta=meta)
 
 
-# Global instances for convenient import in app.py
-style_engine = StyleEngine()
+# ===== ComfyUI IP-Adapter Patching =====
+
+def _parse_node_id(s: str) -> Optional[str]:
+    s = (s or "").strip()
+    if not s:
+        return None
+    # ComfyUI JSON nutzt meist numerische IDs als Strings
+    return s
+
+
+def apply_ip_adapter_to_workflow(
+    workflow_payload: Dict[str, Any],
+    reference_path: Path,
+    reference_strength: float,
+    *,
+    ref_image_node_id: Optional[str] = None,
+    ipadapter_node_id: Optional[str] = None,
+    ref_image_key: Optional[str] = None,
+    ref_weight_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Patches das bestehende ComfyUI-Workflow-Payload (dict), um:
+    - den LoadImage-Node (ref_image_node_id) mit 'image': reference_path zu setzen
+    - den IP-Adapter-Node (ipadapter_node_id) mit 'weight': reference_strength zu setzen
+
+    Die Node IDs/Keys kommen standardmäßig aus ENV, können aber überschrieben werden.
+    Gibt das modifizierte Payload zurück.
+    """
+    if not isinstance(workflow_payload, dict):
+        return workflow_payload
+
+    rid_ref = _parse_node_id(ref_image_node_id or REF_IMAGE_NODE_ID)
+    rid_ip = _parse_node_id(ipadapter_node_id or IPADAPTER_NODE_ID)
+    key_img = (ref_image_key or REF_IMAGE_KEY) or "image"
+    key_w = (ref_weight_key or REF_WEIGHT_KEY) or "weight"
+
+    if not rid_ref and not rid_ip:
+        # Keine Konfiguration vorhanden → nichts zu patchen
+        return workflow_payload
+
+    # ComfyUI Workflow ist i.d.R. dict mit Node-ID als Schlüssel → Node-Objekt mit "inputs"
+    nodes: Dict[str, Any] = {**workflow_payload}
+
+    # Patch: Referenz-Image-Node
+    if rid_ref and rid_ref in nodes:
+        node = nodes.get(rid_ref)
+        if isinstance(node, dict):
+            inputs = node.setdefault("inputs", {})
+            # Lokaler Pfad als String; ComfyUI erwartet string path
+            inputs[key_img] = str(reference_path)
+
+    # Patch: IP-Adapter-Node Gewicht
+    if rid_ip and rid_ip in nodes:
+        node = nodes.get(rid_ip)
+        if isinstance(node, dict):
+            inputs = node.setdefault("inputs", {})
+            try:
+                val = float(reference_strength)
+            except Exception:
+                val = 0.6
+            inputs[key_w] = val
+
+    return nodes
+
+
+# ===== Backend-Bridge =====
+
+def prepare_backend_style(
+    backend: Any,
+    style_cfg: StyleConfig,
+    refs_dir: Path | str = STYLE_REFS_DIR_DEFAULT,
+) -> None:
+    """
+    Stelle backend-seitig die Style-Referenz bereit.
+    - Für LocalComfyBackend: setze StyleRuntime(reference_path, reference_strength) falls verfügbar.
+    - Alternativ-Backends können diese Funktion ignorieren; der textuelle Stil bleibt erhalten.
+
+    Diese Funktion darf gefahrlos mehrfach vor Generierung aufgerufen werden.
+    """
+    if backend is None:
+        return
+    # Lazy-Import, um harte Abhängigkeit auf image_backend zu vermeiden
+    try:
+        from image_backend import LocalComfyBackend, StyleRuntime  # type: ignore
+    except Exception:
+        LocalComfyBackend = None  # type: ignore
+        StyleRuntime = None  # type: ignore
+
+    if LocalComfyBackend is None or StyleRuntime is None:
+        return
+    if not isinstance(backend, LocalComfyBackend):
+        return
+
+    # Kein Referenzstil aktiv: StyleRuntime leeren (falls Backend das unterstützt)
+    if not style_cfg.use_reference or not style_cfg.reference_id:
+        try:
+            backend.set_style_runtime(StyleRuntime(reference_path=None, reference_strength=style_cfg.reference_strength))  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return
+
+    store = ReferenceStore(refs_dir)
+    p = store.get(style_cfg.reference_id)
+    if p is None:
+        # Falls Referenz nicht existiert → leeren
+        try:
+            backend.set_style_runtime(StyleRuntime(reference_path=None, reference_strength=style_cfg.reference_strength))  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return
+
+    # Lokale Referenz setzen
+    try:
+        backend.set_style_runtime(StyleRuntime(reference_path=p, reference_strength=style_cfg.reference_strength))  # type: ignore[attr-defined]
+    except Exception:
+        # Optional: Falls Backend stattdessen einen Workflow-Payload-Patcher exposed,
+        # könnte man hier fallbacken. Standardmäßig genügt StyleRuntime.
+        pass
+
+
+# Bequeme Exporte
 reference_store = ReferenceStore()
 
-
 if __name__ == "__main__":
-    # Simple self-test to verify core functionality works in isolation
-    print("Selftest style_engine...")
-    se = StyleEngine()
-    print("Initial:", se.get_state().model_dump())
-    # Create a tiny red PNG in-memory
+    # Minimaler Selbsttest
     buf = io.BytesIO()
-    with Image.new("RGB", (1, 1), (255, 0, 0)) as im:
+    with Image.new("RGB", (4, 4), (120, 60, 200)) as im:
         im.save(buf, format="PNG")
-    st = se.set_reference_file("test.png", buf.getvalue())
-    print("After upload:", st.model_dump())
-    st = se.update_params(True, 0.8, use_reference=True, style_preset="soft-illustration")
-    print("After update:", st.model_dump())
-    payload = build_prompt("A castle at sunset", "low quality, blurry", st)
-    print("Payload:", payload)
-    # Exercise ReferenceStore
     rs = ReferenceStore()
-    meta = rs.save("another.png", buf.getvalue())
-    print("Saved meta:", meta.model_dump())
-    all_refs = rs.list()
-    print("List:", [m.rel for m in all_refs])
-    removed = rs.remove(meta.rel)
-    print("Removed:", removed)
-    st = se.clear_reference()
-    print("After clear:", st.model_dump())
+    rid, p = rs.put("ref.png", buf.getvalue())
+    print("Saved:", rid, "->", p)
+    sc = StyleConfig(
+        style_preset="photo",
+        style_details="soft bokeh, 35mm lens",
+        color_scheme="warm tones",
+        negative_base="text, watermark, logo, low quality",
+        use_reference=True,
+        reference_id=rid,
+        reference_strength=0.65,
+    )
+    built = build_prompt("Ein roter Fuchs im Wald", sc)
+    print("Positive:", built.positive)
+    print("Negative:", built.negative)
