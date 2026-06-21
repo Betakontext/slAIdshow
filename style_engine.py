@@ -1,411 +1,604 @@
-# file: style_engine.py
+# slAIdshow : style_engine.py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
-import io
-import json
+import asyncio
+import contextlib
 import os
 import re
-import threading
-import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from pydantic import BaseModel, Field, field_validator
+import httpx
+from pydantic import BaseModel, Field, ConfigDict, field_validator, HttpUrl, ValidationError
 
-# Bildvalidierung
-try:
-    from PIL import Image
-except Exception as e:
-    raise RuntimeError("Pillow ist erforderlich: pip install Pillow") from e
+# =========================
+# Environment helpers
+# =========================
 
-# Zulässige Formate
-ALLOWED_FORMATS: set[str] = {"PNG", "JPEG", "JPG", "WEBP"}
+def _env_str(k: str, d: str = "") -> str:
+    return (os.getenv(k, d) or "").strip()
 
-# Default-Verzeichnisse (können via ENV überschrieben werden)
-STATIC_ROOT = Path(os.environ.get("STATIC_ROOT", "static")).resolve()
-STYLE_DIR_STATIC = (STATIC_ROOT / "style").resolve()
-STYLE_REFS_DIR_DEFAULT = Path(os.environ.get("APP_STYLE_REF_DIR", "./outputs/style_refs")).resolve()
-
-# ComfyUI IP-Adapter/Referenz-Node IDs & Keys (über ENV konfigurierbar)
-# Beispiel:
-#   APP_COMFY_NODE_REF_IMAGE=23
-#   APP_COMFY_NODE_IPADAPTER=45
-#   APP_COMFY_KEY_REF_IMAGE_PATH=image
-#   APP_COMFY_KEY_REF_WEIGHT=weight
-REF_IMAGE_NODE_ID = os.environ.get("APP_COMFY_NODE_REF_IMAGE", "").strip()
-IPADAPTER_NODE_ID = os.environ.get("APP_COMFY_NODE_IPADAPTER", "").strip()
-REF_IMAGE_KEY = os.environ.get("APP_COMFY_KEY_REF_IMAGE_PATH", "image").strip()
-REF_WEIGHT_KEY = os.environ.get("APP_COMFY_KEY_REF_WEIGHT", "weight").strip()
-
-
-def ensure_dir(p: Path) -> None:
-    p.mkdir(parents=True, exist_ok=True)
-
-
-def safe_filename(name: str) -> str:
-    """Säubere Dateinamen gegen Traversal und ungültige Zeichen."""
-    name = os.path.basename(name or "")
-    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
-    return name or f"file_{uuid.uuid4().hex[:8]}"
-
-
-def detect_image_format(data: bytes) -> Tuple[bool, Optional[str], Optional[Tuple[int, int]]]:
-    """
-    Prüfe Bildbytes via Pillow. Gibt (ok, format, size) zurück.
-    """
+def _env_int(k: str, d: int) -> int:
     try:
-        with Image.open(io.BytesIO(data)) as img:
-            img.verify()
-        with Image.open(io.BytesIO(data)) as img2:
-            fmt = (img2.format or "").upper()
-            size = img2.size
-        return True, fmt, size
+        return int(os.getenv(k, str(d)))
     except Exception:
-        return False, None, None
+        return d
 
+def _env_float(k: str, d: float) -> float:
+    try:
+        return float(os.getenv(k, str(d)))
+    except Exception:
+        return d
 
-class PromptBuildResult(BaseModel):
-    positive: str
-    negative: str
-    meta: Dict[str, Any] = Field(default_factory=dict)
+def _env_bool01(k: str, d: int = 0) -> bool:
+    v = (os.getenv(k, str(d)) or "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
 
+# =========================
+# Data models
+# =========================
 
-class StyleState(BaseModel):
-    # Historische Felder
-    enabled: bool = Field(default=False)
-    strength: float = Field(ge=0.0, le=1.0, default=0.6)
-    rel: Optional[str] = None  # relativ unter /static (legacy)
-    use_reference: bool = False
-    style_preset: Optional[str] = None
-
-    # Erweiterungen, wie von app.py erwartet
-    style_details: str = Field(default="")
-    negative_base: str = Field(default="")
-    color_scheme: str = Field(default="")
-    reference_id: Optional[str] = None
-    reference_strength: float = Field(ge=0.0, le=1.0, default=0.6)
-
-    @field_validator("rel")
-    @classmethod
-    def _validate_rel(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        v = v.lstrip("/")
-        if ".." in v:
-            raise ValueError("invalid relative path")
-        return v
-
+class BuiltPrompt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    positive: str = Field(default="")
+    negative: str = Field(default="")
 
 class StyleConfig(BaseModel):
-    """
-    Persistente UI-Konfiguration (1:1 wie die Felder, die app.py nutzt).
-    """
-    enabled: bool = Field(default=False)
-    strength: float = Field(ge=0.0, le=1.0, default=0.6)
-    rel: Optional[str] = None
-    persisted_path: Optional[Path] = None
-    style_preset: Optional[str] = None
-    use_reference: bool = False
+    model_config = ConfigDict(extra="forbid")
 
+    # High-level stylistic controls
+    style_preset: str = Field(default="photo")
     style_details: str = Field(default="")
     negative_base: str = Field(default="")
     color_scheme: str = Field(default="")
-    reference_id: Optional[str] = None
-    reference_strength: float = Field(ge=0.0, le=1.0, default=0.6)
 
-    @field_validator("rel")
+    # Reference-based styling
+    use_reference: bool = Field(default=False)
+    reference_id: Optional[str] = Field(default=None)
+    reference_strength: float = Field(default=0.6, ge=0.0, le=1.0)
+
+    # Internal
+    persisted_path: Optional[Path] = Field(default=None, exclude=True)
+
+    @field_validator("style_preset")
     @classmethod
-    def _validate_rel(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        v = v.lstrip("/")
-        if ".." in v:
-            raise ValueError("invalid relative path")
-        return v
+    def _normalize_preset(cls, v: str) -> str:
+        return (v or "").strip() or "photo"
 
+    @field_validator("style_details", "negative_base", "color_scheme")
+    @classmethod
+    def _normalize_optional_text(cls, v: str) -> str:
+        return (v or "").strip()
 
-class StaticReferenceStore:
-    """
-    Legacy: Speicherung unter static/style mit Rückgabe eines relativen Pfads.
-    """
-    def __init__(self, static_root: Path | str = STATIC_ROOT) -> None:
-        self._static_root = Path(static_root).resolve()
-        ensure_dir(STYLE_DIR_STATIC)
-        self._lock = threading.Lock()
-
-    def save(self, filename: str, content: bytes) -> str:
-        ok, fmt, _ = detect_image_format(content)
-        if not ok or not fmt:
-            raise ValueError("Invalid image file")
-        fmt = fmt.upper()
-        if fmt == "JPG":
-            fmt = "JPEG"
-        if fmt not in ALLOWED_FORMATS:
-            raise ValueError(f"Unsupported format: {fmt}")
-        base = os.path.splitext(safe_filename(filename))[0]
-        ext = ".jpg" if fmt == "JPEG" else f".{fmt.lower()}"
-        final = f"{base}{ext}"
-        tmp = STYLE_DIR_STATIC / (final + ".tmp")
-        dst = STYLE_DIR_STATIC / final
-        with self._lock:
-            tmp.write_bytes(content)
-            tmp.replace(dst)
-        try:
-            rel = dst.relative_to(self._static_root)
-        except ValueError:
-            rel = Path("style") / final
-        return str(rel).replace(os.sep, "/")
-
+# =========================
+# Reference file store
+# =========================
 
 class ReferenceStore:
-    """
-    Store für Referenzbilder unter outputs/style_refs.
-    Bietet ID-basierte Speicherung und Lookup.
-    """
-    def __init__(self, root: Path | str = STYLE_REFS_DIR_DEFAULT) -> None:
-        self._root = Path(root).resolve()
-        ensure_dir(self._root)
-        self._lock = threading.Lock()
+    """Local reference image store with strict filename handling."""
 
-    def _id_to_path(self, rid: str) -> Path:
-        fname = safe_filename(rid)
-        return (self._root / fname).resolve()
+    def __init__(self, base_dir: Union[str, Path]) -> None:
+        self.base = Path(base_dir).resolve()
+        self.base.mkdir(parents=True, exist_ok=True)
 
-    def put(self, filename: str, content: bytes) -> tuple[str, Path]:
-        ok, fmt, size = detect_image_format(content)
-        if not ok or not fmt or not size:
-            raise ValueError("Invalid image file")
-        fmt = fmt.upper()
-        if fmt == "JPG":
-            fmt = "JPEG"
-        if fmt not in ALLOWED_FORMATS:
-            raise ValueError(f"Unsupported format: {fmt}")
+    @staticmethod
+    def _safe_basename(name: str) -> str:
+        if not name:
+            raise ValueError("empty name")
+        if "/" in name or "\\" in name:
+            raise ValueError("invalid path separator")
+        if not re.fullmatch(r"[A-Za-z0-9._\-]+", name):
+            raise ValueError("illegal characters")
+        return name
 
-        base = os.path.splitext(safe_filename(filename))[0]
-        ext = ".jpg" if fmt == "JPEG" else f".{fmt.lower()}"
-        rid = f"{base}_{uuid.uuid4().hex[:8]}{ext}"
-        tmp = self._root / (rid + ".tmp")
-        dst = self._root / rid
-        with self._lock:
-            tmp.write_bytes(content)
-            tmp.replace(dst)
-        return rid, dst
-
-    def get(self, rid: str) -> Optional[Path]:
-        p = self._id_to_path(rid)
-        if p.exists() and p.is_file():
-            return p
-        return None
-
-    # Alias, falls bestehende Aufrufer get_path erwarten
-    def get_path(self, rid: str) -> Optional[Path]:
-        return self.get(rid)
-
-    def remove(self, rid: str) -> bool:
-        p = self._id_to_path(rid)
+    def put(self, filename: str, data: bytes) -> Tuple[str, Path]:
+        if not isinstance(data, (bytes, bytearray)):
+            raise ValueError("data must be bytes")
         try:
-            if p.exists() and p.is_file():
-                p.unlink()
-                return True
+            base_raw = filename or "ref.png"
+            base = self._safe_basename(Path(base_raw).name)
         except Exception:
-            return False
-        return False
+            base = "ref.png"
 
-    def list(self) -> List[str]:
-        return [f.name for f in self._root.iterdir() if f.is_file()]
+        target = self.base / base
+        if target.exists():
+            stem = target.stem
+            suf = target.suffix or ".png"
+            for i in range(1, 1000):
+                cand = self.base / f"{stem}_{i}{suf}"
+                if not cand.exists():
+                    target = cand
+                    break
 
+        target.write_bytes(bytes(data))
+        return (target.name, target)
 
-def _compose_positive(base: str, sc: StyleConfig) -> str:
-    """
-    Positive Prompt setzt sich zusammen aus:
-    - Benutzer- oder LLM-Text (base)
-    - optionale style_preset/styledetails/farbvorgaben
-    - deklarativer Hinweis auf Referenz-Style (Text-Hinweis für Prompt-Modelle ohne IP-Adapter)
-    """
-    base = (base or "").strip()
-    parts: List[str] = [base]
-    if sc.style_preset:
-        parts.append(f"style preset: {sc.style_preset}")
-    if sc.style_details:
-        parts.append(sc.style_details)
-    if sc.color_scheme:
-        parts.append(f"color scheme: {sc.color_scheme}")
-    if sc.use_reference and sc.reference_id:
-        parts.append(f"visual style guided by reference image (strength {sc.reference_strength:.2f})")
-    # Schlicht zusammenführen, kurz halten:
-    return ", ".join([p for p in parts if p])
+    def get_path(self, reference_id: str) -> Path:
+        base = self._safe_basename(reference_id)
+        p = (self.base / base).resolve()
+        if p.parent != self.base or not p.exists() or not p.is_file():
+            raise FileNotFoundError(f"reference not found: {reference_id}")
+        return p
 
+# =========================
+# Style prompt builder
+# =========================
 
-def _compose_negative(sc: StyleConfig) -> str:
-    neg = (sc.negative_base or "").strip()
-    return neg
-
-
-def build_prompt(
-    prompt: str,
-    state: Union[StyleState, StyleConfig, None] = None,
-) -> PromptBuildResult:
-    """
-    Baue positive/negative Prompts aus Nutzereingabe und StyleConfig.
-    """
-    if state is None:
-        sc = StyleConfig()
-    elif isinstance(state, StyleConfig):
-        sc = state
+def _compose_positive(user_topic: str, cfg: StyleConfig) -> str:
+    topic = (user_topic or "").strip()
+    parts: List[str] = []
+    if topic:
+        parts.append(topic)
+    preset = (cfg.style_preset or "photo").lower()
+    if preset == "photo":
+        parts.append("high-quality photograph, realistic lighting, crisp focus")
+    elif preset == "illustration":
+        parts.append("clean illustration, vector-like clarity, balanced composition")
+    elif preset == "watercolor":
+        parts.append("soft watercolor style, gentle gradients, textured paper look")
+    elif preset == "sketch":
+        parts.append("pencil sketch, fine lines, cross-hatching, monochrome")
     else:
-        sc = StyleConfig(**state.model_dump())
+        parts.append("detailed, balanced composition")
 
-    positive = _compose_positive((prompt or "").strip(), sc)
-    negative = _compose_negative(sc)
-    meta = {
-        "use_reference": sc.use_reference,
-        "reference_id": sc.reference_id,
-        "reference_strength": sc.reference_strength,
-        "style_preset": sc.style_preset,
-    }
-    return PromptBuildResult(positive=positive, negative=negative, meta=meta)
+    if cfg.style_details:
+        parts.append(cfg.style_details)
+    if cfg.color_scheme:
+        parts.append(f"color scheme: {cfg.color_scheme}")
 
+    positive = ", ".join([p for p in parts if p])
+    positive = re.sub(r"\s{2,}", " ", positive).strip().strip(",")
+    return positive
 
-# ===== ComfyUI IP-Adapter Patching =====
+def _compose_negative(cfg: StyleConfig) -> str:
+    base = (cfg.negative_base or "").strip()
+    default_neg = "low quality, blurry, overexposed, underexposed, watermark, text artifacts"
+    if base:
+        items = [s.strip() for s in (base.split(",") + default_neg.split(","))]
+        seen: set[str] = set()
+        merged: List[str] = []
+        for it in items:
+            itn = it.lower()
+            if not itn or itn in seen:
+                continue
+            seen.add(itn)
+            merged.append(it)
+        return ", ".join(merged)
+    return default_neg
 
-def _parse_node_id(s: str) -> Optional[str]:
-    s = (s or "").strip()
-    if not s:
-        return None
-    # ComfyUI JSON nutzt meist numerische IDs als Strings
-    return s
+def build_prompt(user_text: str, cfg: StyleConfig) -> BuiltPrompt:
+    pos = _compose_positive(user_text, cfg)
+    neg = _compose_negative(cfg)
+    return BuiltPrompt(positive=pos, negative=neg)
 
+build_style_prompt = build_prompt
 
-def apply_ip_adapter_to_workflow(
-    workflow_payload: Dict[str, Any],
-    reference_path: Path,
-    reference_strength: float,
-    *,
-    ref_image_node_id: Optional[str] = None,
-    ipadapter_node_id: Optional[str] = None,
-    ref_image_key: Optional[str] = None,
-    ref_weight_key: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Patches das bestehende ComfyUI-Workflow-Payload (dict), um:
-    - den LoadImage-Node (ref_image_node_id) mit 'image': reference_path zu setzen
-    - den IP-Adapter-Node (ipadapter_node_id) mit 'weight': reference_strength zu setzen
+# =========================
+# ComfyUI integration (local)
+# =========================
 
-    Die Node IDs/Keys kommen standardmäßig aus ENV, können aber überschrieben werden.
-    Gibt das modifizierte Payload zurück.
-    """
-    if not isinstance(workflow_payload, dict):
-        return workflow_payload
-
-    rid_ref = _parse_node_id(ref_image_node_id or REF_IMAGE_NODE_ID)
-    rid_ip = _parse_node_id(ipadapter_node_id or IPADAPTER_NODE_ID)
-    key_img = (ref_image_key or REF_IMAGE_KEY) or "image"
-    key_w = (ref_weight_key or REF_WEIGHT_KEY) or "weight"
-
-    if not rid_ref and not rid_ip:
-        # Keine Konfiguration vorhanden → nichts zu patchen
-        return workflow_payload
-
-    # ComfyUI Workflow ist i.d.R. dict mit Node-ID als Schlüssel → Node-Objekt mit "inputs"
-    nodes: Dict[str, Any] = {**workflow_payload}
-
-    # Patch: Referenz-Image-Node
-    if rid_ref and rid_ref in nodes:
-        node = nodes.get(rid_ref)
-        if isinstance(node, dict):
-            inputs = node.setdefault("inputs", {})
-            # Lokaler Pfad als String; ComfyUI erwartet string path
-            inputs[key_img] = str(reference_path)
-
-    # Patch: IP-Adapter-Node Gewicht
-    if rid_ip and rid_ip in nodes:
-        node = nodes.get(rid_ip)
-        if isinstance(node, dict):
-            inputs = node.setdefault("inputs", {})
+def prepare_backend_style(backend: Any, cfg: StyleConfig, refs_dir: Union[str, Path]) -> None:
+    try:
+        if not cfg or not getattr(cfg, "use_reference", False) or not getattr(cfg, "reference_id", None):
+            return
+        store = ReferenceStore(refs_dir)
+        ref_path = store.get_path(cfg.reference_id)
+        if not ref_path.exists():
+            print(f"[STYLE] reference file missing on disk: {ref_path}")
+            return
+        if hasattr(backend, "stage_reference_image"):
             try:
-                val = float(reference_strength)
-            except Exception:
-                val = 0.6
-            inputs[key_w] = val
+                backend.stage_reference_image(ref_path, float(cfg.reference_strength))  # type: ignore[attr-defined]
+                print("[STYLE] staged reference into LocalComfyBackend.")
+            except Exception as e:
+                print(f"[STYLE] backend staging failed: {e}")
+    except Exception as e:
+        print(f"[STYLE] prepare_backend_style failed: {e}")
 
-    return nodes
+# =========================
+# Pollinations integration (V1)
+# =========================
 
+POLLINATIONS_API_BASE = _env_str("POLLINATIONS_API_BASE", "https://gen.pollinations.ai")
+POLLINATIONS_V1_IMAGES_EDITS_PATH = _env_str("POLLINATIONS_V1_IMAGES_EDITS_PATH", "/v1/images/edits")
+POLLINATIONS_SECRET = _env_str("POLLINATIONS_SECRET", "")
+POLLINATIONS_IMAGE_MODEL = _env_str("POLLINATIONS_IMAGE_MODEL", _env_str("POLLINATIONS_MODEL", "flux"))
 
-# ===== Backend-Bridge =====
+FEATURE_POLLINATIONS_V1_EDITS = _env_bool01("FEATURE_POLLINATIONS_V1_EDITS", 1)
+FEATURE_POLLINATIONS_USE_URL_MODE = _env_bool01("FEATURE_POLLINATIONS_USE_URL_MODE", 0)
 
-def prepare_backend_style(
-    backend: Any,
-    style_cfg: StyleConfig,
-    refs_dir: Path | str = STYLE_REFS_DIR_DEFAULT,
-) -> None:
-    """
-    Stelle backend-seitig die Style-Referenz bereit.
-    - Für LocalComfyBackend: setze StyleRuntime(reference_path, reference_strength) falls verfügbar.
-    - Alternativ-Backends können diese Funktion ignorieren; der textuelle Stil bleibt erhalten.
+ALLOW_CLOUD_IMAGE_BACKEND = _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0)
+POLLINATIONS_ENABLE_UPLOAD = _env_bool01("POLLINATIONS_ENABLE_UPLOAD", 1)
 
-    Diese Funktion darf gefahrlos mehrfach vor Generierung aufgerufen werden.
-    """
-    if backend is None:
-        return
-    # Lazy-Import, um harte Abhängigkeit auf image_backend zu vermeiden
+APP_TIMEOUT_SEC = float(_env_float("APP_OLLAMA_TIMEOUT_SEC", 90.0))
+APP_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 4)
+APP_RETRY_BASE_DELAY = float(_env_float("APP_OLLAMA_RETRY_BASE_DELAY", 0.8))
+
+APP_IMAGE_WIDTH = _env_int("APP_IMAGE_WIDTH", 1024)
+APP_IMAGE_HEIGHT = _env_int("APP_IMAGE_HEIGHT", 1024)
+
+class PollinationsRefUploadResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    ok: bool = False
+    url: Optional[str] = None
+    size: Optional[int] = None
+    error: Optional[str] = None
+
+class PollinationsPromptPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    positive: str
+    negative: str
+    refs: List[str] = Field(default_factory=list)
+    merged_prompt: str
+
+class V1ImagesItem(BaseModel):
+    url: Optional[HttpUrl] = None
+    b64_json: Optional[str] = None
+
+class V1ImagesResp(BaseModel):
+    data: List[V1ImagesItem] = Field(default_factory=list)
+
+def _httpx_limits() -> httpx.Limits:
+    return httpx.Limits(max_keepalive_connections=6, max_connections=8, keepalive_expiry=20.0)
+
+def _timeout_generic() -> httpx.Timeout:
+    return httpx.Timeout(connect=8.0, read=APP_TIMEOUT_SEC, write=30.0, pool=8.0)
+
+def _v1_edits_endpoint() -> str:
+    path = POLLINATIONS_V1_IMAGES_EDITS_PATH
+    if not path.startswith("/"):
+        path = "/" + path
+    return f"{POLLINATIONS_API_BASE.rstrip('/')}{path}"
+
+def _auth_headers() -> Dict[str, str]:
+    if not POLLINATIONS_SECRET:
+        raise RuntimeError("POLLINATIONS_SECRET not set in environment")
+    return {"Authorization": f"Bearer {POLLINATIONS_SECRET}"}
+
+def _mime_for(name: str) -> str:
+    n = name.lower()
+    if n.endswith(".jpg") or n.endswith(".jpeg"):
+        return "image/jpeg"
+    if n.endswith(".png"):
+        return "image/png"
+    if n.endswith(".webp"):
+        return "image/webp"
+    if n.endswith(".bmp"):
+        return "image/bmp"
+    return "application/octet-stream"
+
+def _parse_v1_images_response(resp: httpx.Response) -> Tuple[Optional[str], Optional[str]]:
     try:
-        from image_backend import LocalComfyBackend, StyleRuntime  # type: ignore
+        js = resp.json()
     except Exception:
-        LocalComfyBackend = None  # type: ignore
-        StyleRuntime = None  # type: ignore
-
-    if LocalComfyBackend is None or StyleRuntime is None:
-        return
-    if not isinstance(backend, LocalComfyBackend):
-        return
-
-    # Kein Referenzstil aktiv: StyleRuntime leeren (falls Backend das unterstützt)
-    if not style_cfg.use_reference or not style_cfg.reference_id:
-        try:
-            backend.set_style_runtime(StyleRuntime(reference_path=None, reference_strength=style_cfg.reference_strength))  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        return
-
-    store = ReferenceStore(refs_dir)
-    p = store.get(style_cfg.reference_id)
-    if p is None:
-        # Falls Referenz nicht existiert → leeren
-        try:
-            backend.set_style_runtime(StyleRuntime(reference_path=None, reference_strength=style_cfg.reference_strength))  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        return
-
-    # Lokale Referenz setzen
+        return (None, None)
     try:
-        backend.set_style_runtime(StyleRuntime(reference_path=p, reference_strength=style_cfg.reference_strength))  # type: ignore[attr-defined]
+        parsed = V1ImagesResp(**js)
+        if parsed.data:
+            item = parsed.data[0]
+            return (str(item.url) if item.url else None, item.b64_json)
+    except ValidationError:
+        try:
+            url = js.get("url") or ((js.get("data") or [{}])[0] or {}).get("url")
+            b64 = ((js.get("data") or [{}])[0] or {}).get("b64_json") or js.get("b64_json")
+            return (url, b64)
+        except Exception:
+            return (None, None)
+    return (None, None)
+
+async def _post_with_retries(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    files: Dict[str, Any],
+    headers: Dict[str, str],
+    max_retries: int = APP_MAX_RETRIES,
+    base_delay: float = APP_RETRY_BASE_DELAY,
+) -> httpx.Response:
+    last_exc: Optional[Exception] = None
+    delay = float(base_delay)
+    for attempt in range(1, int(max_retries) + 1):
+        try:
+            return await client.post(url, files=files, headers=headers)
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+            last_exc = e
+            if attempt >= max_retries:
+                break
+            await asyncio.sleep(delay)
+            delay *= 1.8
+    raise RuntimeError(f"pollinations_post_failed after {max_retries} attempts: {last_exc}")
+
+async def _v1_edits_multipart(
+    prompt: str,
+    image_file: Path,
+    *,
+    width: int,
+    height: int,
+    negative_prompt: str = "",
+    seed: Optional[int] = None,
+    model: str = POLLINATIONS_IMAGE_MODEL,
+) -> Tuple[Optional[str], Optional[str]]:
+    if not image_file.exists():
+        raise FileNotFoundError(image_file)
+    mime = _mime_for(image_file.name)
+    files: Dict[str, Any] = {
+        "prompt": (None, prompt),
+        "response_format": (None, "url"),
+        "n": (None, "1"),
+        "model": (None, model),
+        "size": (None, f"{width}x{height}"),
+        "image": (image_file.name, image_file.read_bytes(), mime),
+    }
+    if negative_prompt:
+        files["negative_prompt"] = (None, negative_prompt)
+    if seed is not None:
+        files["seed"] = (None, str(seed))
+
+    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_generic(), follow_redirects=True, http2=True) as client:
+        print(f"[STYLE] pollinations: POST {_v1_edits_endpoint()} (multipart), model={model}")
+        resp = await _post_with_retries(client, _v1_edits_endpoint(), files=files, headers=_auth_headers())
+        if resp.status_code >= 400:
+            raise RuntimeError(f"pollinations multipart error {resp.status_code}: {resp.text[:512]}")
+        return _parse_v1_images_response(resp)
+
+async def _v1_edits_url_mode(
+    prompt: str,
+    image_url: str,
+    *,
+    width: int,
+    height: int,
+    negative_prompt: str = "",
+    seed: Optional[int] = None,
+    model: str = POLLINATIONS_IMAGE_MODEL,
+) -> Tuple[Optional[str], Optional[str]]:
+    # WICHTIG: Feld 'image' (nicht 'image_url'), um den Test-Aufruf exakt zu spiegeln.
+    files: Dict[str, Any] = {
+        "prompt": (None, prompt),
+        "response_format": (None, "url"),
+        "n": (None, "1"),
+        "model": (None, model),
+        "size": (None, f"{width}x{height}"),
+        "image": (None, image_url),
+    }
+    if negative_prompt:
+        files["negative_prompt"] = (None, negative_prompt)
+    if seed is not None:
+        files["seed"] = (None, str(seed))
+
+    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_generic(), follow_redirects=True, http2=True) as client:
+        print(f"[STYLE] pollinations: POST {_v1_edits_endpoint()} (url-mode), model={model}")
+        resp = await _post_with_retries(client, _v1_edits_endpoint(), files=files, headers=_auth_headers())
+        if resp.status_code >= 400:
+            raise RuntimeError(f"pollinations url-mode error {resp.status_code}: {resp.text[:512]}")
+        return _parse_v1_images_response(resp)
+
+# Legacy helper
+POLLINATIONS_UPLOAD_ENDPOINT = _env_str("POLLINATIONS_UPLOAD_ENDPOINT", "/upload")
+
+def validate_image_bytes_minimal(data: bytes) -> None:
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError("invalid bytes")
+    if len(data) < 128:
+        raise ValueError("image too small")
+    head = data[:16]
+    if not any((
+        head.startswith(b"\x89PNG"),
+        head.startswith(b"\xFF\xD8\xFF"),
+        head.startswith(b"RIFF") and b"WEBP" in data[:64],
+        head[:2] == b"BM",
+    )):
+        print("[STYLE] unknown image magic header; continuing")
+
+async def pollinations_upload_ref(path: Path) -> PollinationsRefUploadResult:
+    if not ALLOW_CLOUD_IMAGE_BACKEND:
+        return PollinationsRefUploadResult(ok=False, error="cloud_disabled")
+    if not POLLINATIONS_SECRET:
+        return PollinationsRefUploadResult(ok=False, error="missing_secret")
+    if not POLLINATIONS_ENABLE_UPLOAD:
+        return PollinationsRefUploadResult(ok=False, error="upload_disabled")
+    if not path.exists() or not path.is_file():
+        return PollinationsRefUploadResult(ok=False, error="file_missing")
+
+    data = path.read_bytes()
+    try:
+        validate_image_bytes_minimal(data)
+    except Exception as e:
+        return PollinationsRefUploadResult(ok=False, error=f"invalid_image:{e}", size=len(data))
+
+    mime = _mime_for(path.name)
+    neutral_name = "reference" + (Path(path.name).suffix.lower() or ".jpg")
+
+    url = f"{POLLINATIONS_API_BASE.rstrip('/')}{POLLINATIONS_UPLOAD_ENDPOINT}"
+    headers = {"Authorization": f"Bearer {POLLINATIONS_SECRET}"}
+    files = {"file": (neutral_name, data, mime)}
+
+    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_generic(), follow_redirects=True, http2=True) as client:
+        try:
+            resp = await _post_with_retries(client, url, files=files, headers=headers)
+        except Exception as e:
+            return PollinationsRefUploadResult(ok=False, error=f"network:{e}", size=len(data))
+
+    try:
+        js = resp.json()
     except Exception:
-        # Optional: Falls Backend stattdessen einen Workflow-Payload-Patcher exposed,
-        # könnte man hier fallbacken. Standardmäßig genügt StyleRuntime.
-        pass
+        return PollinationsRefUploadResult(ok=False, error="invalid_json", size=len(data))
 
+    ok = bool(js.get("ok", True))
+    media_url = js.get("url") or js.get("media_url") or js.get("href")
+    if not isinstance(media_url, str) or not media_url.startswith("http"):
+        return PollinationsRefUploadResult(ok=False, error="missing_media_url", size=len(data))
 
-# Bequeme Exporte
-reference_store = ReferenceStore()
+    return PollinationsRefUploadResult(ok=ok, url=media_url, size=len(data))
 
-if __name__ == "__main__":
-    # Minimaler Selbsttest
-    buf = io.BytesIO()
-    with Image.new("RGB", (4, 4), (120, 60, 200)) as im:
-        im.save(buf, format="PNG")
-    rs = ReferenceStore()
-    rid, p = rs.put("ref.png", buf.getvalue())
-    print("Saved:", rid, "->", p)
-    sc = StyleConfig(
-        style_preset="photo",
-        style_details="soft bokeh, 35mm lens",
-        color_scheme="warm tones",
-        negative_base="text, watermark, logo, low quality",
-        use_reference=True,
-        reference_id=rid,
-        reference_strength=0.65,
+async def resolve_reference_urls_for_pollinations(
+    cfg: StyleConfig,
+    refs_dir: Union[str, Path],
+) -> List[str]:
+    try:
+        if not cfg or not getattr(cfg, "use_reference", False) or not getattr(cfg, "reference_id", None):
+            return []
+        store = ReferenceStore(refs_dir)
+        ref_path = store.get_path(cfg.reference_id)
+        up = await pollinations_upload_ref(ref_path)
+        if up.ok and up.url:
+            return [up.url]
+        return []
+    except Exception as e:
+        print(f"[-STYLE] pollinations resolve failed: {e}")
+        return []
+
+def build_pollinations_prompt(
+    user_text: str,
+    cfg: StyleConfig,
+    refs: List[str],
+    negative_override: Optional[str] = None,
+) -> PollinationsPromptPayload:
+    base = build_prompt(user_text, cfg)
+    negative = (negative_override or "").strip() or base.negative
+
+    ref_prefixes: List[str] = []
+    for u in refs:
+        if not isinstance(u, str) or not u.startswith("http"):
+            continue
+        ref_prefixes.append(f"style guided by: {u}")
+
+    parts: List[str] = []
+    if ref_prefixes:
+        parts.extend(ref_prefixes)
+    if base.positive:
+        parts.append(base.positive)
+
+    merged_pos = "; ".join(parts).strip().strip(";")
+    merged_full = merged_pos
+    if negative:
+        merged_full = f"{merged_pos}\n-- negative: {negative}".strip()
+
+    return PollinationsPromptPayload(
+        positive=merged_pos,
+        negative=negative,
+        refs=list(ref_prefixes),
+        merged_prompt=merged_full,
     )
-    built = build_prompt("Ein roter Fuchs im Wald", sc)
-    print("Positive:", built.positive)
-    print("Negative:", built.negative)
+
+# =========================
+# Orchestration
+# =========================
+
+async def generate_image_pollinations(
+    user_text: str,
+    cfg: StyleConfig,
+    backend: Any,
+    refs_dir: Union[str, Path],
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    negative_override: Optional[str] = None,
+    seed: Optional[int] = None,
+) -> Optional[Path]:
+    """
+    Pollinations V1 Edits orchestration with 'lean edit prompt' when a reference is used.
+    Aligns parameters with the working test script to ensure the reference actually guides the output.
+    """
+    try:
+        STYLE_REFERENCE_LEAN_PROMPT = _env_bool01("STYLE_REFERENCE_LEAN_PROMPT", 1)
+        bname = type(backend).__name__.lower()
+        w = int(width or APP_IMAGE_WIDTH)
+        h = int(height or APP_IMAGE_HEIGHT)
+
+        # If not pollinations backend, fall back to generic generation
+        if "pollinations" not in bname:
+            payload = build_pollinations_prompt(user_text, cfg, refs=[], negative_override=negative_override)
+            try:
+                path = await backend.generate(payload.merged_prompt, width=w, height=h)  # type: ignore[attr-defined]
+                return Path(path) if isinstance(path, (str, Path)) else None
+            except Exception as e:
+                print(f"[STYLE] non-pollinations backend.generate failed: {e}")
+                return None
+
+        # Build prompts
+        base_prompts = build_prompt(user_text, cfg)
+        final_negative = (negative_override or "").strip() or base_prompts.negative
+
+        # Reference resolution
+        ref_path: Optional[Path] = None
+        if cfg and getattr(cfg, "use_reference", False) and getattr(cfg, "reference_id", None):
+            try:
+                store = ReferenceStore(refs_dir)
+                ref_path = store.get_path(cfg.reference_id)
+            except Exception as e:
+                print(f"[STYLE] reference resolution failed: {e}")
+                ref_path = None
+
+        # If we have a local reference and V1 edits are enabled, go multipart
+        if FEATURE_POLLINATIONS_V1_EDITS and POLLINATIONS_SECRET and ref_path and ref_path.exists():
+            # Lean prompt (mimic the successful test): do not prepend style preset verbiage, just the user's intent
+            if STYLE_REFERENCE_LEAN_PROMPT:
+                # Knapper Prompt wie im Test – dein Test hatte explizit "Donald Duck as a pencil sketch..."
+                lean_prompt = user_text.strip() if user_text.strip() else base_prompts.positive
+                if not lean_prompt:
+                    lean_prompt = "high-quality image"
+                prompt_for_edits = lean_prompt
+            else:
+                # Fallback: benutze die positive Komposition
+                prompt_for_edits = base_prompts.positive
+
+            print(f"[STYLE] pollinations: using multipart local reference | model={POLLINATIONS_IMAGE_MODEL} size={w}x{h}")
+            print(f"[STYLE] prompt(mode={'lean' if STYLE_REFERENCE_LEAN_PROMPT else 'full'}): {prompt_for_edits[:180]}")
+
+            # Perform multipart call using the exact contract that worked in your test
+            try:
+                img_url, b64 = await _v1_edits_multipart(
+                    prompt=prompt_for_edits,
+                    image_file=ref_path,
+                    width=w,
+                    height=h,
+                    negative_prompt=final_negative,
+                    seed=seed,
+                    model=POLLINATIONS_IMAGE_MODEL,
+                )
+                if hasattr(backend, "store_generated_result"):
+                    try:
+                        path = await backend.store_generated_result(image_url=img_url, b64=b64)  # type: ignore[attr-defined]
+                        if path:
+                            return Path(path)
+                    except Exception as e:
+                        print(f"[STYLE] backend.store_generated_result failed: {e}")
+                return None
+            except Exception as e:
+                # Transparenter Fehler: 402, 4xx, 5xx inkl. body snippet
+                print(f"[STYLE] pollinations multipart failed: {e}")
+                return None
+
+        # If no local reference (or disabled), fall back to text-only via backend
+        payload = build_pollinations_prompt(user_text, cfg, refs=[], negative_override=negative_override)
+        try:
+            path = await backend.generate(payload.merged_prompt, width=w, height=h)  # type: ignore[attr-defined]
+            return Path(path) if isinstance(path, (str, Path)) else None
+        except Exception as e:
+            print(f"[STYLE] backend.generate(text-only) failed: {e}")
+            return None
+
+    except Exception as e:
+        print(f"[STYLE] generate_image_pollinations failed: {e}")
+        return None
+
+# =========================
+# Module init diagnostics
+# =========================
+
+def _log_style_env() -> None:
+    print(
+        "[STYLE-ENV]",
+        f"api={POLLINATIONS_API_BASE or '(unset)'}",
+        f"v1_edits={'on' if FEATURE_POLLINATIONS_V1_EDITS else 'off'}",
+        f"url_mode={'on' if FEATURE_POLLINATIONS_USE_URL_MODE else 'off'}",
+        f"cloud={'on' if ALLOW_CLOUD_IMAGE_BACKEND else 'off'}",
+        f"uploads={'on' if POLLINATIONS_ENABLE_UPLOAD else 'off'}",
+        f"secret_set={'yes' if bool(POLLINATIONS_SECRET) else 'no'}",
+        f"model={POLLINATIONS_IMAGE_MODEL}",
+    )
+
+with contextlib.suppress(Exception):
+    _log_style_env()

@@ -10,7 +10,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Iterable
+from typing import Any, Dict, List, Optional, Tuple, Iterable, Union
 from urllib.parse import urlencode, quote
 
 import httpx
@@ -65,6 +65,24 @@ def _assert_image_backend_host_policy(host: str) -> None:
 
 # Optional filesystem fallback when /view is unavailable or unsuitable (mounted output dir).
 _COMFY_OUTPUT_DIR: Optional[Path] = Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).resolve() if _env_str("APP_COMFY_OUTPUT_DIR", "") else None
+
+# Remote upload endpoint configuration (optional)
+_COMFY_UPLOAD_ENDPOINT: str = _env_str("APP_COMFY_UPLOAD_ENDPOINT", "/upload/image")
+_COMFY_INPUT_EXPECTS_OBJECT: bool = _env_bool01("APP_COMFY_INPUT_EXPECTS_OBJECT", 0)
+# Ob der LoadImage-Node-Key von ENV überschrieben werden soll (z. B. "image" oder "image_upload")
+_COMFY_REF_IMAGE_KEY: str = _env_str("APP_COMFY_KEY_REF_IMAGE_PATH", "image")
+# IP-Adapter Gewicht-Key
+_COMFY_REF_WEIGHT_KEY: str = _env_str("APP_COMFY_KEY_REF_WEIGHT", "weight")
+# Node-IDs (optional)
+_COMFY_NODE_REF_IMAGE: str = _env_str("APP_COMFY_NODE_REF_IMAGE", "")
+_COMFY_NODE_IPADAPTER: str = _env_str("APP_COMFY_NODE_IPADAPTER", "")
+
+# PATCH: lokales input-Verzeichnis für Staging (Default analog ComfyUI)
+_COMFY_INPUT_DIR: Path = Path(_env_str("APP_COMFY_INPUT_DIR", "./ComfyUI/input")).resolve()
+
+# [URL-MODUS] Konfiguration für URL-Referenz
+_COMFY_NODE_REF_URL: str = _env_str("APP_COMFY_NODE_REF_URL", "")
+_COMFY_KEY_REF_URL: str = _env_str("APP_COMFY_KEY_REF_URL", "url")
 
 # -----------------------------
 # Connection / helpers
@@ -185,6 +203,198 @@ def override_prompt_inplace(
     return payload
 
 # -----------------------------
+# Remote/local reference staging (FILE / UPLOAD)
+# -----------------------------
+
+async def _upload_reference_to_remote_comfy(
+    client: httpx.AsyncClient,
+    base_url: str,
+    local_path: Path,
+    *,
+    upload_endpoint: str = _COMFY_UPLOAD_ENDPOINT,
+    timeout_s: float = 20.0,
+) -> Optional[str]:
+    """
+    Lädt eine Datei via HTTP auf den Comfy-Host und gibt den Dateinamen zurück,
+    den ein LoadImage-Node verwenden kann (typisch: basename).
+    Erwartet einen Endpoint auf dem Comfy-Host, der multipart/form-data akzeptiert
+    und in den Comfy input-Ordner schreibt.
+    """
+    try:
+        if not local_path.exists() or not local_path.is_file():
+            return None
+        url = f"{base_url}{upload_endpoint}"
+        filename = local_path.name
+        files = {"file": (filename, local_path.open("rb"), "application/octet-stream")}
+        r = await client.post(url, files=files, timeout=timeout_s)
+        if 200 <= r.status_code < 300:
+            try:
+                data = r.json()
+                # häufige Keys: filename, name; fallback: basename
+                return data.get("filename") or data.get("name") or filename
+            except Exception:
+                return filename
+        else:
+            print(f"DEBUG comfy upload failed: status={r.status_code} text={r.text[:300]}")
+            return None
+    except Exception as e:
+        print(f"DEBUG comfy upload exception: {e}")
+        return None
+
+# PATCH: Lokales Staging in ComfyUI/input für localhost
+def _stage_reference_into_local_input(local_path: Path, input_dir: Path = _COMFY_INPUT_DIR) -> Optional[str]:
+    """
+    Kopiert die referenzierte Datei in das ComfyUI/input-Verzeichnis (falls nötig) und
+    gibt den Dateinamen (basename) für den LoadImage-Node zurück.
+    """
+    try:
+        if not local_path.exists() or not local_path.is_file():
+            return None
+        input_dir.mkdir(parents=True, exist_ok=True)
+        target = input_dir / local_path.name
+        try:
+            # Überschreiben nur wenn Quelle neuer ist oder Ziel fehlt
+            if (not target.exists()) or (local_path.stat().st_mtime > target.stat().st_mtime):
+                data = local_path.read_bytes()
+                if len(data) < 10:
+                    # Minimale sanity-check
+                    return None
+                target.write_bytes(data)
+        except Exception:
+            # Fallback: simple copy2
+            import shutil
+            shutil.copy2(str(local_path), str(target))
+        return local_path.name
+    except Exception as e:
+        print(f"DEBUG comfy local stage exception: {e}")
+        return None
+
+def _expected_loadimage_value(image_key_value: Any, filename_only: str) -> Union[str, Dict[str, Any]]:
+    """
+    Manche Workflows setzen inputs[image] als String; andere als Dict {"image":"..."}.
+    Wir bewahren den alten Typ, setzen aber den neuen Dateinamen.
+    """
+    if isinstance(image_key_value, dict):
+        d = dict(image_key_value)
+        d["image"] = filename_only
+        return d
+    return filename_only
+
+def override_reference_inplace(
+    body: Dict[str, Any],
+    *,
+    reference_filename: str,
+    ref_image_node_id: Optional[str] = None,
+    ipadapter_node_id: Optional[str] = None,
+    reference_strength: Optional[float] = None,
+    ref_image_key: Optional[str] = None,
+    ref_weight_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Setzt im Prompt-Dict:
+      - beim LoadImage-Node (ref_image_node_id) den Bildnamen (kein absoluter Pfad!)
+      - beim IP-Adapter-Node (ipadapter_node_id) das Gewicht
+    """
+    payload = _ensure_api_prompt_dict(body)
+    prompt: Dict[str, Any] = payload["prompt"]
+
+    rid_ref = (ref_image_node_id or _COMFY_NODE_REF_IMAGE or "").strip()
+    rid_ip = (ipadapter_node_id or _COMFY_NODE_IPADAPTER or "").strip()
+    key_img = (ref_image_key or _COMFY_REF_IMAGE_KEY or "image")
+    key_w = (ref_weight_key or _COMFY_REF_WEIGHT_KEY or "weight")
+
+    if rid_ref:
+        n = _get_node(prompt, rid_ref)
+        if n and isinstance(n.get("inputs"), dict):
+            ins = n["inputs"]
+            old_val = ins.get(key_img)
+            ins[key_img] = _expected_loadimage_value(old_val, reference_filename)
+
+    if rid_ip and reference_strength is not None:
+        n = _get_node(prompt, rid_ip)
+        if n and isinstance(n.get("inputs"), dict):
+            try:
+                val = float(reference_strength)
+            except Exception:
+                val = 0.6
+            n["inputs"][key_w] = val
+
+    return payload
+
+# -----------------------------
+# [URL-MODUS] URL-Referenz-Injektion
+# -----------------------------
+
+def _build_signed_url_for_basename(basename: str, ttl_sec: Optional[int] = None) -> str:
+    """
+    Baut eine signierte URL anhand app.build_signed_url(basename[, ttl]).
+    Lazy-Import, damit keine harten Abhängigkeiten entstehen.
+    """
+    try:
+        from app import build_signed_url  # muss im App-Layer vorhanden sein
+    except Exception as e:
+        raise RuntimeError(f"build_signed_url_unavailable: {e}")
+    return build_signed_url(basename, ttl_sec) if ttl_sec is not None else build_signed_url(basename)
+
+def inject_reference_url_inplace(
+    body: Dict[str, Any],
+    *,
+    url: str,
+    ref_url_node_id: Optional[str] = None,
+    ref_url_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Setzt im Prompt-Dict beim URL-Loader-Node (z. B. ImageFromURL) den URL-Wert.
+    """
+    payload = _ensure_api_prompt_dict(body)
+    prompt: Dict[str, Any] = payload["prompt"]
+
+    rid = (ref_url_node_id or _COMFY_NODE_REF_URL or "").strip()
+    key = (ref_url_key or _COMFY_KEY_REF_URL or "url")
+
+    if rid:
+        n = _get_node(prompt, rid)
+        if n and isinstance(n.get("inputs"), dict):
+            if key in n["inputs"]:
+                n["inputs"][key] = url
+                return payload
+
+    # Fallback: ersten Node mit passendem Key überschreiben (heuristisch)
+    for node in prompt.values():
+        if not isinstance(node, dict):
+            continue
+        ins = node.get("inputs")
+        if isinstance(ins, dict) and (key in ins):
+            ins[key] = url
+            return payload
+
+    # Wenn kein passender Node gefunden → keine Ausnahme, aber Rückgabe unverändert
+    return payload
+
+def stage_reference_url_and_patch_prompt(
+    prompt_dict: Dict[str, Any],
+    reference_local_path: Path,
+    *,
+    ref_url_node_id: Optional[str] = None,
+    ref_url_key: Optional[str] = None,
+    ttl_sec: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Baut eine signierte URL aus dem lokalen Referenz-Basename und injiziert sie in den Prompt (URL-Node).
+    Erwartet, dass dein App-Server die Datei unter /ref/<basename> bereitstellen kann.
+    """
+    if not reference_local_path.exists() or not reference_local_path.is_file():
+        raise FileNotFoundError(f"reference not found: {reference_local_path}")
+    basename = reference_local_path.name
+    signed = _build_signed_url_for_basename(basename, ttl_sec=ttl_sec)
+    return inject_reference_url_inplace(
+        prompt_dict,
+        url=signed,
+        ref_url_node_id=ref_url_node_id,
+        ref_url_key=ref_url_key,
+    )
+
+# -----------------------------
 # HTTP calls
 # -----------------------------
 
@@ -263,6 +473,7 @@ async def _poll_history_ready(
 ) -> Dict[str, Any]:
     deadline = time.time() + max_wait_sec
     last_payload: Optional[Dict[str, Any]] = None
+    keys: Union[List[str], str] = "n/a"
     while time.time() < deadline:
         r = await client.get(f"{base_url}/history/{prompt_id}")
         if r.status_code == 404:
@@ -321,7 +532,7 @@ def _build_view_candidates(folder_type: str, subfolder: str, filename: str) -> L
         if key in seen:
             continue
         seen.add(key)
-        uniq.append(key)
+        uniq.append((t, s, f))  # BUG
     return uniq
 
 async def _download_via_view_path(
@@ -493,8 +704,58 @@ async def _download_images(
     return saved
 
 # -----------------------------
-# Public entry point
+# Public entry points
 # -----------------------------
+
+async def stage_reference_on_remote_and_patch_prompt(
+    prompt_dict: Dict[str, Any],
+    reference_local_path: Path,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8188,
+    ref_image_node_id: Optional[str] = None,
+    ipadapter_node_id: Optional[str] = None,
+    reference_strength: Optional[float] = None,
+    ref_image_key: Optional[str] = None,
+    ref_weight_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    1) Bei localhost: Staged die Referenzdatei in APP_COMFY_INPUT_DIR (Default: ./ComfyUI/input)
+       und nutzt den Basename.
+    2) Bei Remote-Host: Upload via HTTP an den konfigurierten Upload-Endpoint.
+    3) Patcht das Prompt-Dict (LoadImage nur Basename, IP-Adapter-Gewicht).
+    """
+    conn = ComfyConnection(host=host, port=port)
+    base = conn.base
+    payload = _ensure_api_prompt_dict(prompt_dict)
+
+    filename_only: Optional[str] = None
+    async with httpx.AsyncClient(limits=_limits(), timeout=_timeout(60)) as client:
+        if host in {"127.0.0.1", "localhost"}:
+            # PATCH: Lokales Staging sicherstellen
+            filename_only = _stage_reference_into_local_input(reference_local_path, _COMFY_INPUT_DIR)
+            if not filename_only:
+                # Fallback auf basename (Comfy schlägt dann ggf. fehl – aber wir loggen es)
+                filename_only = reference_local_path.name
+                print(f"DEBUG comfy: local stage missing, using basename fallback: {filename_only}")
+        else:
+            # Remote: vorab hochladen
+            filename_only = await _upload_reference_to_remote_comfy(client, base, reference_local_path)
+
+    if not filename_only:
+        # Ultimativer Fallback
+        filename_only = reference_local_path.name
+        print(f"DEBUG comfy: remote upload missing, using basename fallback: {filename_only}")
+
+    return override_reference_inplace(
+        payload,
+        reference_filename=filename_only,
+        ref_image_node_id=ref_image_node_id,
+        ipadapter_node_id=ipadapter_node_id,
+        reference_strength=reference_strength,
+        ref_image_key=ref_image_key,
+        ref_weight_key=ref_weight_key,
+    )
 
 async def generate_from_prompt_dict(
     prompt_dict: Dict[str, Any],

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -12,17 +14,18 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Set
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
 import httpx
 import numpy as np
 import sounddevice as sd
-from fastapi import FastAPI, Request, UploadFile, File, Form
+from fastapi import FastAPI, Request, UploadFile, File, Query
 from fastapi.responses import (
     JSONResponse,
     PlainTextResponse,
     StreamingResponse,
     RedirectResponse,
+    Response,
 )
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -39,8 +42,21 @@ from style_engine import (
     StyleConfig,
     build_prompt as build_style_prompt,
     ReferenceStore,
-    prepare_backend_style,  # NEW: central hook to apply reference to backend
+    prepare_backend_style,  # hook to inject references into the backend at runtime
 )
+
+# Optional workflow patch helpers (used for ComfyUI workflow JSON patching)
+try:
+    from style_engine import apply_ip_adapter_to_workflow, reference_store  # type: ignore
+except Exception:
+    apply_ip_adapter_to_workflow = None  # type: ignore
+    reference_store = None  # type: ignore
+
+# For Pollinations: resolve/upload local reference to public media URL(s)
+try:
+    from style_engine import resolve_reference_urls_for_pollinations  # type: ignore
+except Exception:
+    resolve_reference_urls_for_pollinations = None  # type: ignore
 
 # ---------- ENV helpers ----------
 
@@ -63,11 +79,10 @@ def _env_bool01(k: str, d: int = 0) -> bool:
     v = (os.getenv(k, str(d)) or "").strip().lower()
     return v in {"1", "true", "yes", "on"}
 
-
 def _backend_default_size(backend_name: str) -> tuple[int, int]:
     """
-    Backend-specific default sizes from .env:
-    - comfyui: APP_COMFY_WIDTH/HEIGHT, fallback 128×128
+    Backend-specific default sizes from ENV:
+    - comfyui: APP_COMFY_WIDTH/HEIGHT, fallback 128×128 (kept small for quick tests)
     - pollinations: POLLINATIONS_WIDTH/HEIGHT, fallback 1024×1024
     """
     b = (backend_name or "comfyui").lower()
@@ -80,6 +95,9 @@ def _backend_default_size(backend_name: str) -> tuple[int, int]:
     w = max(64, min(2048, w))
     h = max(64, min(2048, h))
     return w, h
+
+# Mode for Pollinations reference passing: auto (prefer multipart), multipart, url
+APP_POLLINATIONS_REF_MODE = _env_str("APP_POLLINATIONS_REF_MODE", "auto").lower()  # CHANGED
 
 # ---------- Optional dotenv loading ----------
 
@@ -146,12 +164,16 @@ CONTEXT_MAX_CHARS = _env_int("APP_CONTEXT_MAX_CHARS", 480)
 OUTPUT_DIR = Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")).resolve()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-def rel_for_ui(p: Path) -> str:
+def rel_for_ui_path(p: Path) -> str:
     return Path(p).name
+
+# Backward-compatible alias
+def rel_for_ui(p: Path) -> str:
+    return rel_for_ui_path(p)
 
 def ensure_in_output_dir(p: Path) -> Path:
     """
-    Ensure the generated file is placed in OUTPUT_DIR; move/copy if needed.
+    Ensure that a generated file ends up in OUTPUT_DIR; move/copy if necessary.
     """
     try:
         p = Path(p).resolve()
@@ -182,11 +204,11 @@ def ensure_in_output_dir(p: Path) -> Path:
         print(f"[SAVE] failed to move/copy image: {e}")
         return p
 
-# UI-defaults (initial)
+# UI defaults (initial)
 APP_IMAGE_WIDTH = _env_int("APP_IMAGE_WIDTH", 512)
 APP_IMAGE_HEIGHT = _env_int("APP_IMAGE_HEIGHT", 512)
 
-# Style config persistence locations (new)
+# Style config persistence locations
 STYLE_CFG_DIR = Path(_env_str("APP_STYLE_CFG_DIR", "./outputs/config")).resolve()
 STYLE_CFG_DIR.mkdir(parents=True, exist_ok=True)
 STYLE_CFG_PATH = STYLE_CFG_DIR / "style.json"
@@ -202,7 +224,7 @@ WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
 
 OLLAMA_HOST = _env_str("APP_OLLAMA_HOST", "127.0.0.1")
 OLLAMA_PORT = _env_int("APP_OLLAMA_PORT", 11434)
-OLLAMA_MODEL = _env_str("APP_OLLAMA_MODEL", "llama3.2:latest")
+OLLAMA_MODEL = _env_str("APP_OLLAMA_MODEL", "gemma3:1b")
 OLLAMA_TEMPERATURE = _env_float("APP_OLLAMA_TEMPERATURE", 0.2)
 OLLAMA_NUM_CTX = _env_int("APP_OLLAMA_NUM_CTX", 3072)
 OLLAMA_NUM_PREDICT = _env_int("APP_OLLAMA_NUM_PREDICT", 640)
@@ -222,23 +244,25 @@ OLLAMA_SYS_PROMPT = _env_str(
 
 def assert_local(host: str) -> None:
     """
-    Hard safety: do not allow remote hosts for Ollama.
+    Strict safety: only allow localhost for Ollama host.
     """
     if host != "127.0.0.1":
-        raise AssertionError(f"Only localhost allowed, got {host}")
+        raise AssertionError(f"Only localhost allowed for Ollama, got {host}")
 
 assert_local(OLLAMA_HOST)
 
 def _assert_image_backend_host() -> None:
     """
-    Allow remote image backends if explicitly enabled.
-    Blocks remote if not enabled.
+    Enforce local image backends unless explicitly allowed via APP_ALLOW_REMOTE_BACKENDS.
     """
     allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
     comfy_host = _env_str("APP_COMFY_HOST", "127.0.0.1")
     if not allow_remote:
         if comfy_host not in {"127.0.0.1", "localhost"}:
-            raise AssertionError(f"Remote image backends disabled, got {comfy_host}")
+            raise AssertionError(
+                f"Remote image backends are disabled. Set APP_ALLOW_REMOTE_BACKENDS=1 to allow non-localhost hosts "
+                f"(current APP_COMFY_HOST={comfy_host})."
+            )
 
 _assert_image_backend_host()
 
@@ -248,6 +272,104 @@ WARMUP_TIMEOUT_SEC = _env_float("APP_OLLAMA_TIMEOUT_SEC", 45.0)
 WARMUP_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 3)
 WARMUP_RETRY_DELAY = _env_float("APP_OLLAMA_RETRY_DELAY", 1.2)
 WARMUP_GRACE_SEC = _env_float("APP_OLLAMA_GRACE_SEC", 10.0)
+
+# ---------- Reference URL signing (local/LAN only) ----------
+
+APP_REF_HOST = _env_str("APP_REF_HOST", "")  # e.g. http://127.0.0.1:8080
+APP_REF_TTL_SEC = _env_int("APP_REF_TTL_SEC", 180)  # 3 minutes
+APP_REF_SECRET = _env_str("APP_REF_SECRET", "")     # must be set in URL mode
+
+def _is_local_or_lan_host(url: str) -> bool:
+    """
+    Conservative check for localhost/LAN host.
+    Allows http://127.0.0.1, http://localhost, http://192.168.x.x, http://10.x.x.x, http://172.16-31.x.x
+    """
+    try:
+        u = url.strip().lower()
+        if not (u.startswith("http://") or u.startswith("https://")):
+            return False
+        host = u.split("://", 1)[1].split("/", 1)[0]
+        host = host.split("@")[-1].split("]")[-1].split(":")[0]
+        if host in {"127.0.0.1", "localhost"}:
+            return True
+        parts = host.split(".")
+        if len(parts) == 4 and all(p.isdigit() for p in parts):
+            a, b, c, d = [int(p) for p in parts]
+            if a == 10:
+                return True
+            if a == 192 and b == 168:
+                return True
+            if a == 172 and 16 <= b <= 31:
+                return True
+        return False
+    except Exception:
+        return False
+
+def _safe_basename(name: str) -> str:
+    """
+    Strict basename validation (no paths, no traversal).
+    """
+    if "/" in name or "\\" in name:
+        raise ValueError("invalid path separator")
+    if not re.fullmatch(r"[A-Za-z0-9._\-]+", name or ""):
+        raise ValueError("illegal characters")
+    return name
+
+def _hmac_sign(msg: str, secret: str) -> str:
+    return hmac.new(secret.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest()
+
+def _hmac_verify(msg: str, sig: str, secret: str) -> bool:
+    try:
+        expected = _hmac_sign(msg, secret)
+        return hmac.compare_digest(expected, sig)
+    except Exception:
+        return False
+
+def build_signed_url(filename: str, now_ts: Optional[int] = None) -> str:
+    """
+    Build short-lived signed URL for /ref/{filename}. Only used for local/LAN ComfyUI URL mode.
+    """
+    base = _safe_basename(filename)
+    host = APP_REF_HOST or ""
+    if not host:
+        # Derive from bind host/port if not provided
+        host = f"http://{os.getenv('APP_BIND_HOST','127.0.0.1')}:{int(os.getenv('APP_BIND_PORT','8080') or '8080')}"
+    if not _is_local_or_lan_host(host):
+        raise AssertionError("APP_REF_HOST must be localhost or LAN")
+    if not APP_REF_SECRET:
+        raise AssertionError("APP_REF_SECRET must be set for URL reference mode")
+    ts = int(now_ts or time.time())
+    exp = ts + int(APP_REF_TTL_SEC)
+    payload = f"{base}:{exp}"
+    sig = _hmac_sign(payload, APP_REF_SECRET)
+    return f"{host.rstrip('/')}/ref/{base}?ts={exp}&sig={sig}"
+
+def _verify_and_open_ref(basename: str, ts: int, sig: str) -> Tuple[bytes, str]:
+    """
+    Verify signature/TTL and read file bytes from STYLE_REFS_DIR. Returns (bytes, mime).
+    """
+    if not APP_REF_SECRET:
+        raise PermissionError("ref_disabled")
+    now = int(time.time())
+    if ts < now:
+        raise PermissionError("expired")
+    base = _safe_basename(basename)
+    msg = f"{base}:{ts}"
+    if not _hmac_verify(msg, sig or "", APP_REF_SECRET):
+        raise PermissionError("bad_sig")
+    src = (STYLE_REFS_DIR / base).resolve()
+    if src.parent != STYLE_REFS_DIR or not src.exists() or not src.is_file():
+        raise FileNotFoundError("not_found")
+    data = src.read_bytes()
+    m = "image/png"
+    low = base.lower()
+    if low.endswith(".jpg") or low.endswith(".jpeg"):
+        m = "image/jpeg"
+    elif low.endswith(".webp"):
+        m = "image/webp"
+    elif low.endswith(".bmp"):
+        m = "image/bmp"
+    return data, m
 
 # ---------- Pydantic payloads ----------
 
@@ -334,7 +456,7 @@ class ImageSizeSettings(BaseModel):
 class NegativePromptSettings(BaseModel):
     negative_prompt: str = Field(default="", max_length=4000)
 
-# Style API payloads (new)
+# Style API payloads
 class StyleSettingsPayload(BaseModel):
     style_preset: str = Field(default="photo")
     style_details: str = Field(default="")
@@ -367,7 +489,7 @@ class WorkflowSelect(BaseModel):
             raise ValueError("Invalid filename")
         if not v.endswith(".json"):
             raise ValueError("Must end with .json")
-        if not re.fullmatch(r"[A-Za-z0-9._\-]+", v):
+        if not re.fullmatch(r"[A-Za-z0-9._\\-]+", v):
             raise ValueError("Illegal characters in filename")
         return v
 
@@ -375,7 +497,7 @@ class WorkflowSelect(BaseModel):
 
 def pick_input_device(prefer: Optional[str] = None) -> int:
     """
-    Select a microphone device with preference heuristic.
+    Select an input device with simple heuristics; prefers a matching named device.
     """
     devs = sd.query_devices()
     if not devs:
@@ -401,7 +523,7 @@ def to_int16(x: np.ndarray) -> np.ndarray:
 
 def rms_vad(frame: np.ndarray, rms_threshold: float = 0.01) -> bool:
     """
-    Simple RMS-based voice activity detection.
+    Very simple RMS-based VAD (voice activity detection).
     """
     if frame.size == 0:
         return False
@@ -410,7 +532,7 @@ def rms_vad(frame: np.ndarray, rms_threshold: float = 0.01) -> bool:
 
 def resample_to_16k(samples: np.ndarray, sr: int) -> np.ndarray:
     """
-    Lightweight linear resampler to 16 kHz for whisper.cpp.
+    Lightweight linear resampler to 16 kHz for whisper.cpp input.
     """
     if sr == 16000:
         return samples.astype(np.float32, copy=False)
@@ -470,6 +592,9 @@ META_RE = re.compile(
 )
 
 def _parse_whisper_out(raw: object) -> str:
+    """
+    Extract text from various possible return shapes from pywhispercpp.
+    """
     if raw is None:
         return ""
     if isinstance(raw, dict):
@@ -491,12 +616,12 @@ def _parse_whisper_out(raw: object) -> str:
                 if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
                     t = t[1:-1]
                 cleaned.append(t.strip())
-            return " " .join(cleaned).strip()
+            return " ".join(cleaned).strip()
     return s
 
 def clean_transcript(raw: str) -> str:
     """
-    Normalize transcript and remove short meta/noise tokens.
+    Normalize transcript and filter short meta/noise tokens.
     """
     if not raw:
         return ""
@@ -515,7 +640,7 @@ def is_meaningful_text(t: str, min_chars: int, min_words: int) -> bool:
 
 def transcribe_chunk_with_whisper(samples: np.ndarray, sr: int) -> str:
     """
-    Run whisper.cpp on a chunk and post-filter the text.
+    Run whisper.cpp on a chunk and post-process text.
     """
     if not WHISPER_AVAILABLE or _WHISPER_MODEL is None:
         return ""
@@ -554,7 +679,7 @@ def transcribe_chunk_with_whisper(samples: np.ndarray, sr: int) -> str:
 
 # ---------- HTTP utils ----------
 
-def _httpx_limits() -> httpx.Limits:
+def _httpx_limits_app() -> httpx.Limits:
     return httpx.Limits(max_keepalive_connections=6, max_connections=12, keepalive_expiry=20.0)
 
 def _timeout_short_http() -> httpx.Timeout:
@@ -606,10 +731,10 @@ async def _post_with_retries(client: httpx.AsyncClient, url: str, body: dict, ti
 
 async def _ollama_available() -> bool:
     """
-    Quick health check against Ollama tags endpoint.
+    Lightweight healthcheck against Ollama /api/tags.
     """
     try:
-        async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short_http()) as c:
+        async with httpx.AsyncClient(limits=_httpx_limits_app(), timeout=_timeout_short_http()) as c:
             r = await c.get(_ollama_url("/api/tags"))
             r.raise_for_status()
             return True
@@ -618,7 +743,7 @@ async def _ollama_available() -> bool:
 
 async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> str:
     """
-    Build a concise image prompt via Ollama /api/generate with a system prompt.
+    Build a compact image prompt via Ollama /api/generate with a system prompt wrapper.
     """
     sys = OLLAMA_SYS_PROMPT
     payload = {
@@ -635,48 +760,37 @@ async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> s
 
 @dataclass
 class PipelineState:
-    # Audio running flag controls the audio capture + whisper loop only
     running: bool = False
-    # Global shutdown flag for hard shutdown
     shutting_down: bool = False
-    # Main audio task
     task: Optional[asyncio.Task] = None
-    # SSE listeners
     listeners: List[asyncio.Queue] = field(default_factory=list)
-    # Audio metadata
     actual_sr: int = 16000
     device_used_index: Optional[int] = None
     device_used_name: Optional[str] = None
-    # LLM/image bookkeeping
     last_prompt: Optional[str] = None
     last_llm_error: Optional[str] = None
     last_llm_run_ts: float = 0.0
-    # Background tasks (LLM → Image jobs)
     bg_tasks: Set[asyncio.Task] = field(default_factory=set)
     ollama_ready_at: float = 0.0
     last_pending_text: Optional[str] = None
     start_ts: float = 0.0
-    # Image backend config
     image_backend_name: str = _env_str("IMAGE_BACKEND", "comfyui").lower()
     allow_cloud: bool = _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0)
     image_width: int = APP_IMAGE_WIDTH
     image_height: int = APP_IMAGE_HEIGHT
     negative_prompt: str = ""
-    # Workflow selection (filename like "text2img_SD15-FP16.json")
     active_workflow: Optional[str] = None
-    # Audio stream handle and stop event
     audio_stream: Any = None
     audio_stopped_broadcasted: bool = False
-    # Style configuration (new)
     style_cfg: StyleConfig = field(default_factory=StyleConfig)
 
 STATE = PipelineState()
 STOP_DEBOUNCE_SEC = float(os.getenv("APP_STOP_DEBOUNCE_SEC", "2.0") or "2.0")
 
-# ---------- Style persistence helpers (new) ----------
+# ---------- Style persistence helpers ----------
 
 def _load_style_cfg() -> StyleConfig:
-    """Load StyleConfig from disk if present; otherwise return defaults."""
+    """Load StyleConfig from disk or return defaults."""
     if STYLE_CFG_PATH.exists():
         try:
             data = json.loads(STYLE_CFG_PATH.read_text(encoding="utf-8"))
@@ -690,10 +804,9 @@ def _load_style_cfg() -> StyleConfig:
     return cfg
 
 def _save_style_cfg(cfg: StyleConfig) -> None:
-    """Persist StyleConfig to disk safely."""
+    """Persist StyleConfig safely."""
     try:
         data = cfg.model_dump()
-        # Do not persist internal path object
         data.pop("persisted_path", None)
         STYLE_CFG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as e:
@@ -701,8 +814,7 @@ def _save_style_cfg(cfg: StyleConfig) -> None:
 
 async def safe_stop_audio_stream() -> None:
     """
-    Deterministically stop and close current audio stream and broadcast
-    'audio_stream_stopped' exactly once (idempotent).
+    Stop audio stream deterministically and broadcast 'audio_stream_stopped' exactly once.
     """
     if getattr(STATE, "audio_stream", None) is not None:
         with contextlib.suppress(Exception):
@@ -722,7 +834,7 @@ def sse_format(event: str, data: str) -> str:
 
 async def broadcast(event: str, data: str) -> None:
     """
-    Broadcast SSE message to local listeners only; suppressed during shutdown.
+    Broadcast SSE locally; suppress during shutdown.
     """
     if STATE.shutting_down:
         return
@@ -734,7 +846,7 @@ _context_buffer: deque[str] = deque(maxlen=CONTEXT_MAX_SEGMENTS)
 
 async def _close_sse_listeners(timeout: float = 0.25) -> None:
     """
-    Gracefully signal all SSE listeners to end streaming.
+    Close all SSE listeners gracefully.
     """
     listeners = getattr(STATE, "listeners", None)
     if not listeners:
@@ -758,7 +870,7 @@ async def _close_sse_listeners(timeout: float = 0.25) -> None:
 
 def update_context_buffer(text: str) -> str:
     """
-    Maintain a rolling context buffer for LLM prompt optimization.
+    Maintain rolling context buffer for LLM prompt optimization.
     """
     _context_buffer.append(text)
     ctx = " ".join(_context_buffer)
@@ -794,7 +906,8 @@ def _log_effective_config() -> None:
 
 def build_image_backend_rt(backend_name: Optional[str] = None, allow_cloud: Optional[bool] = None) -> ImageBackend:
     """
-    Recreate image backend with runtime flags without restarting the app.
+    Rebuild the image backend at runtime (without process restart).
+    Temporarily sets env vars to reuse build_image_backend factory behavior.
     """
     wanted_backend = (backend_name or STATE.image_backend_name or _env_str("IMAGE_BACKEND", "comfyui")).lower()
     allowed = (STATE.allow_cloud if allow_cloud is None else bool(allow_cloud))
@@ -817,13 +930,10 @@ def build_image_backend_rt(backend_name: Optional[str] = None, allow_cloud: Opti
         else:
             os.environ["ALLOW_CLOUD_IMAGE_BACKEND"] = old_allow
 
-def rel_for_ui_path(p: Path) -> str:
-    return Path(p).name
-
 # ---------- Workflow helpers ----------
 
 def _list_workflow_files() -> List[WorkflowItem]:
-    """Scan WORKFLOWS_DIR for .json files and return as WorkflowItem list."""
+    """Scan ./workflows for .json workflow files and return as WorkflowItem list."""
     items: List[WorkflowItem] = []
     if not WORKFLOWS_DIR.exists():
         return items
@@ -834,7 +944,7 @@ def _list_workflow_files() -> List[WorkflowItem]:
     return items
 
 def _ensure_workflow_exists(filename: str) -> Path:
-    """Validate that filename refers to an existing file within WORKFLOWS_DIR."""
+    """Validate that filename refers to an existing file in WORKFLOWS_DIR."""
     candidate = (WORKFLOWS_DIR / filename).resolve()
     if WORKFLOWS_DIR not in candidate.parents and candidate != WORKFLOWS_DIR:
         raise FileNotFoundError("Invalid workflow path")
@@ -844,8 +954,8 @@ def _ensure_workflow_exists(filename: str) -> Path:
 
 def _apply_active_workflow_if_local() -> None:
     """
-    If LocalComfyBackend is active and a STATE.active_workflow is set,
-    point the backend's cfg.workflow_path to ./workflows/<filename>.
+    If LocalComfyBackend is active and STATE.active_workflow is set,
+    update backend.cfg.workflow_path to ./workflows/<filename>.
     """
     if LocalComfyBackend is None or BACKEND is None:
         return
@@ -867,17 +977,157 @@ def _apply_active_workflow_if_local() -> None:
     except Exception as e:
         print(f"[WF] failed to apply active workflow: {e}")
 
+# ---------- Reference→Denoise Mapping ----------
+
+def _map_reference_strength_to_denoise(strength: float) -> float:
+    """
+    Map reference strength (0..1) to denoise (img2img-like control):
+    Higher strength -> lower denoise to preserve style.
+    Conservative range: 0.30 .. 0.85
+    """
+    s = float(max(0.0, min(1.0, strength)))
+    denoise = 0.85 - 0.55 * s
+    return float(max(0.30, min(0.95, denoise)))
+
+def _calc_effective_denoise_from_style(style: StyleConfig) -> Optional[float]:
+    """
+    Only apply when a reference is active and the feature is enabled via ENV.
+    Intended for ComfyUI; cloud backends may ignore.
+    """
+    if not style or not getattr(style, "use_reference", False):
+        return None
+    if not getattr(style, "reference_id", None):
+        return None
+    if not _env_bool01("APP_REFERENCE_DENOISE_ENABLE", 1):
+        return None
+    return _map_reference_strength_to_denoise(getattr(style, "reference_strength", 0.6))
+
+# ---------- LocalComfy: Denoise Setter ----------
+
+def _apply_denoise_to_local_comfy(backend: ImageBackend, denoise: Optional[float]) -> None:
+    """
+    For LocalComfyBackend only: set denoise on backend.cfg if supported.
+    Backends may ignore it if the workflow/sampler does not expose a denoise parameter.
+    """
+    if denoise is None or LocalComfyBackend is None or not isinstance(backend, LocalComfyBackend):
+        return
+    try:
+        if hasattr(backend, "cfg") and hasattr(backend.cfg, "denoise"):
+            setattr(backend.cfg, "denoise", float(denoise))
+            print(f"[COMFY] denoise set via cfg: {denoise:.3f}")
+            return
+        if hasattr(backend, "set_sampler_denoise"):
+            backend.set_sampler_denoise(float(denoise))  # type: ignore[attr-defined]
+            print(f"[COMFY] denoise set via set_sampler_denoise: {denoise:.3f}")
+            return
+        print("[COMFY] denoise not supported on backend; skipping")
+    except Exception as e:
+        print(f"[COMFY] failed to set denoise: {e}")
+
+# ---------- Workflow Reference Patcher (ComfyUI) ----------
+
+def _patch_workflow_with_reference_if_needed(workflow_json: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    If a reference is active, patch workflow JSON so the LoadImage node uses a basename
+    and staging to ComfyUI/input is performed. Uses style_engine.apply_ip_adapter_to_workflow when available.
+    """
+    try:
+        sc = STATE.style_cfg
+    except Exception:
+        return workflow_json
+
+    if not sc or not getattr(sc, "use_reference", False) or not getattr(sc, "reference_id", None):
+        return workflow_json
+
+    if reference_store is None or apply_ip_adapter_to_workflow is None:
+        # Fallback: prepare_backend_style may already inject required changes
+        return workflow_json
+
+    try:
+        ref_path = reference_store.get_path(sc.reference_id)
+    except Exception as e:
+        print(f"[STYLE] reference_store.get_path failed: {e}")
+        return workflow_json
+
+    if not ref_path or not Path(ref_path).exists():
+        print(f"[STYLE] reference file missing for id={sc.reference_id}")
+        return workflow_json
+
+    comfy_host = os.getenv("APP_COMFY_HOST", "127.0.0.1").strip()
+    comfy_port = int(os.getenv("APP_COMFY_PORT", "8188") or "8188")
+
+    try:
+        patched = apply_ip_adapter_to_workflow(
+            workflow_json,
+            reference_path=Path(ref_path),
+            reference_strength=getattr(sc, "reference_strength", 0.6),
+            host=comfy_host,
+            port=comfy_port,
+            ref_image_node_id="8",  # assumption: LoadImage node ID "8"
+            ref_image_key="image",
+            ipadapter_node_id="",   # no IP-Adapter node available
+        )
+        return patched if isinstance(patched, dict) else workflow_json
+    except Exception as e:
+        print(f"[STYLE] workflow patch failed: {e}")
+        return workflow_json
+
+# ---------- Cloud reference resolver (Pollinations) ----------
+
+async def _resolve_reference_for_pollinations(style: StyleConfig) -> tuple[Optional[str], Optional[float]]:
+    """
+    For Pollinations: upload local style reference and return the hosted media URL.
+    This avoids using local signed URLs which are not accessible by Pollinations.
+    """
+    try:
+        if not style or not getattr(style, "use_reference", False):
+            return None, None
+        rid = getattr(style, "reference_id", None)
+        if not rid:
+            return None, None
+        if resolve_reference_urls_for_pollinations is None:
+            print("[STYLE] resolve_reference_urls_for_pollinations not available")
+            return None, None
+        urls = await resolve_reference_urls_for_pollinations(style, STYLE_REFS_DIR)
+        if urls and isinstance(urls[0], str) and urls[0].startswith("http"):
+            strength = float(getattr(style, "reference_strength", 0.6))
+            return urls[0], strength
+        return None, None
+    except Exception as e:
+        print(f"[STYLE] pollinations resolve failed: {e}")
+        return None, None
+
+# ---------- CHANGED: Local reference path resolver for multipart ----------
+
+def _get_local_reference_path(style: StyleConfig) -> Optional[Path]:
+    """
+    Return the local Path for the active reference if available.
+    """
+    try:
+        if not style or not getattr(style, "use_reference", False):
+            return None
+        rid = getattr(style, "reference_id", None)
+        if not rid:
+            return None
+        store = ReferenceStore(STYLE_REFS_DIR)
+        p = store.get_path(rid)
+        if p and Path(p).exists():
+            return Path(p)
+    except Exception as e:
+        print(f"[STYLE] local ref path resolve failed: {e}")
+    return None
+
 # ---------- Audio transcription loop ----------
 
 async def audio_transcription_loop() -> None:
     """
-    Main audio capture + whisper transcription loop.
-    Respects STATE.running; on stop, loop exits but image pipeline continues.
+    Main loop for audio capture + whisper transcription.
+    Respects STATE.running; after stop, image path continues independently.
     """
     sr = int(SAMPLE_RATE)
     frame_len = max(1, int(sr * (FRAME_MS / 1000.0)))
 
-    # Reset stop broadcast gate on start
+    # Reset stop-broadcast gate at start
     STATE.audio_stopped_broadcasted = False
 
     try:
@@ -905,7 +1155,7 @@ async def audio_transcription_loop() -> None:
     q: asyncio.Queue[np.ndarray] = asyncio.Queue(maxsize=100)
 
     def callback(indata, frames, time_info, status):
-        # Push frames only while running to minimize latency post-stop
+        # Only push frames while STATE.running to minimize latency after stop
         if not STATE.running:
             return
         mono = np.asarray(indata[:, 0], dtype=np.float32)
@@ -984,7 +1234,7 @@ async def audio_transcription_loop() -> None:
                         pass
                     else:
                         ctx = update_context_buffer(text)
-                        # Gate LLM dispatch by STATE.running to avoid new prompts after stop
+                        # Gate LLM dispatch to avoid flooding the LLM
                         if not OLLAMA_DISABLED and (time.time() - STATE.last_llm_run_ts) >= float(LLM_INTERVAL_SEC):
                             if not STATE.running:
                                 break
@@ -1007,15 +1257,14 @@ async def audio_transcription_loop() -> None:
         print(f"[AUDIO] loop crashed: {e}")
         await broadcast("status", f"audio_loop_error:{e}")
     finally:
-        # Use helper for deterministic stop + event
         await safe_stop_audio_stream()
 
-# ---------- LLM + Image (now style-aware) ----------
+# ---------- LLM + Image (style-aware) ----------
 
 async def run_llm_and_image(text: str) -> None:
     """
-    End-to-end step: LLM prompt generation, style composition, then image generation.
-    Runs as a background task and should not be cancelled by soft /stop.
+    End-to-end: LLM prompt, style composition, image generation.
+    Runs as a BG task and remains independent from /stop.
     """
     if await _ollama_available() is False:
         await broadcast("status", "ollama_unavailable")
@@ -1026,37 +1275,39 @@ async def run_llm_and_image(text: str) -> None:
         STATE.last_llm_error = "image_backend_not_initialized"
         return
 
-    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_normal()) as client:
+    async with httpx.AsyncClient(limits=_httpx_limits_app(), timeout=_timeout_normal()) as client:
         try:
             base_prompt = await ollama_generate_prompt(client, text)
             if not base_prompt:
                 STATE.last_llm_error = "llm_empty_response"
                 await broadcast("status", "llm_empty_response")
                 return
-            # Compose with style layer (positive + negative)
+            # Apply style layer (positive + negative)
             built = build_style_prompt(base_prompt, STATE.style_cfg)
             STATE.last_prompt = built.positive
             await broadcast("llm_prompt", built.positive)
             await broadcast("status", "llm_ok")
             try:
-                # Mirror current global negative prompt into backend cfg (legacy)
+                # Optionally mirror global negative into LocalComfyBackend config (legacy)
                 neg_global = (STATE.negative_prompt or "").strip()
                 if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
                     if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
                         setattr(BACKEND.cfg, "negative", neg_global or built.negative)
 
-                # Prefer style negative; fallback to global negative if style negative is empty
                 eff_negative = (built.negative or neg_global or "").strip()
 
-                # NEW: Apply current style reference to backend before generation
-                # This central hook ensures IP-Adapter/LoadImage nodes receive the reference.
+                # Prepare backend style (sets reference runtime in LocalComfy, no-op for Pollinations)
                 prepare_backend_style(BACKEND, STATE.style_cfg, STYLE_REFS_DIR)
+
+                # Optional denoise derived from reference strength (img2img-like flow) — applies to ComfyUI only
+                denoise_override = _calc_effective_denoise_from_style(STATE.style_cfg)
 
                 path = await _generate_with_negative_support(
                     prompt=built.positive,
                     width=STATE.image_width,
                     height=STATE.image_height,
                     negative=eff_negative,
+                    denoise=denoise_override,
                 )
                 path = ensure_in_output_dir(path)
                 rel = rel_for_ui_path(path)
@@ -1076,9 +1327,15 @@ def _merge_negative_into_prompt(prompt: str, negative: str) -> str:
         return p
     return f"{p}\n-- negative: {n}"
 
-async def _generate_with_negative_support(prompt: str, width: int, height: int, negative: str) -> Path:
+async def _generate_with_negative_support(prompt: str, width: int, height: int, negative: str, denoise: Optional[float] = None) -> Path:
     """
-    Call backend.generate; if it lacks native negative_prompt, merge it manually.
+    Call backend.generate and pass negative_prompt natively when available; otherwise merge manually.
+    Do NOT pass denoise into generate; instead set it on LocalComfyBackend before generation.
+    Additionally, for LocalComfyBackend attempt workflow JSON patching (LoadImage basename + staging)
+    when backend exposes hooks.
+
+    For Pollinations, prefer multipart local reference (privacy-first) when APP_POLLINATIONS_REF_MODE in {auto,multipart}
+    and a local reference exists; otherwise attach style_reference_url via cloud resolver.
     """
     if BACKEND is None:
         raise RuntimeError("image_backend_not_initialized")
@@ -1088,12 +1345,66 @@ async def _generate_with_negative_support(prompt: str, width: int, height: int, 
     except Exception as e:
         print(f"[WF] apply before generate failed: {e}")
 
-    kwargs: Dict[str, Any] = {"width": width, "height": height}
+    # Apply denoise on LocalComfyBackend (best-effort)
+    _apply_denoise_to_local_comfy(BACKEND, denoise)
+
+    # Optional workflow patch when backend offers JSON hooks (ComfyUI only)
     try:
-        return await BACKEND.generate(prompt, negative_prompt=(negative or ""), **kwargs)  # type: ignore[arg-type]
+        if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
+            if hasattr(BACKEND, "get_workflow_json") and hasattr(BACKEND, "set_workflow_json"):
+                try:
+                    wf_json = await BACKEND.get_workflow_json()  # type: ignore[attr-defined]
+                    if isinstance(wf_json, dict):
+                        wf_patched = _patch_workflow_with_reference_if_needed(wf_json)
+                        if wf_patched is not wf_json:
+                            await BACKEND.set_workflow_json(wf_patched)  # type: ignore[attr-defined]
+                            print("[WF] workflow patched (reference staged + basename set).")
+                except Exception as e:
+                    print(f"[WF] patch via backend json failed: {e}")
+    except Exception as e:
+        print(f"[WF] backend patch hook error: {e}")
+
+    gen_kwargs: Dict[str, Any] = {"width": width, "height": height}
+
+    # Native negative prompt if supported
+    try:
+        gen_kwargs["negative_prompt"] = (negative or "")
+    except Exception:
+        pass
+
+    # CHANGED: Pollinations reference preference logic
+    backend_name = (STATE.image_backend_name or "").lower()
+    if backend_name == "pollinations":
+        # Try local multipart if mode allows
+        use_multipart = APP_POLLINATIONS_REF_MODE in {"auto", "multipart"}
+        local_ref: Optional[Path] = None
+        if use_multipart:
+            local_ref = _get_local_reference_path(STATE.style_cfg)
+        if local_ref is not None and local_ref.exists():
+            gen_kwargs["style_reference_path"] = local_ref  # triggers multipart in PollinationsBackend
+            print("[STYLE] pollinations: using multipart local reference")
+        else:
+            # fallback to URL resolver if available
+            ref_url, ref_strength = await _resolve_reference_for_pollinations(STATE.style_cfg)
+            if ref_url and ref_strength is not None:
+                gen_kwargs["style_reference_url"] = ref_url
+                gen_kwargs["style_reference_strength"] = float(ref_strength)
+                print(f"[STYLE] pollinations: using media_url with strength={ref_strength:.2f}")
+            else:
+                print("[STYLE] pollinations: no reference attached (none or resolver unavailable)")
+
+    # Call backend
+    try:
+        return await BACKEND.generate(prompt, **gen_kwargs)  # type: ignore[arg-type]
     except TypeError:
+        # Backend may not accept negative_prompt — merge it into the positive
         merged = _merge_negative_into_prompt(prompt, negative)
-        return await BACKEND.generate(merged, **kwargs)
+        try:
+            gen_kwargs.pop("negative_prompt", None)
+            return await BACKEND.generate(merged, **gen_kwargs)
+        except TypeError:
+            # Last fallback: width/height only
+            return await BACKEND.generate(merged, width=width, height=height)
 
 # ---------- FastAPI app & lifespan ----------
 
@@ -1102,11 +1413,11 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Initialize whisper, style config, backend, and optional Ollama warmup; finalize gracefully.
+    Init phase: whisper, style config, backend, optional Ollama warmup; cleanup on shutdown.
     """
     print(f"[ENV] loaded from: {ENV_PATH or '(env vars only)'}")
 
-    # Load style configuration early so it is available to all flows
+    # Load style configuration early
     try:
         STATE.style_cfg = _load_style_cfg()
     except Exception as e:
@@ -1126,7 +1437,7 @@ async def lifespan(app: FastAPI):
         BACKEND = None
         print(f"[BACKEND] initialization failed: {e}")
 
-    # Initialize backend-specific default sizes into state only on first boot
+    # Apply backend default sizes into STATE on first start
     try:
         dw, dh = _backend_default_size(STATE.image_backend_name)
         STATE.image_width = STATE.image_width or dw
@@ -1140,12 +1451,15 @@ async def lifespan(app: FastAPI):
     warmup_task: Optional[asyncio.Task] = None
     if WARMUP_ENABLE:
         async def _silent_ollama_warmup():
+            """
+            Best-effort Ollama warmup to reduce the first-token latency for the first request.
+            """
             try:
                 payload = {"model": OLLAMA_MODEL, "prompt": WARMUP_PROMPT, "stream": False, "options": {"temperature": 0.1, "num_predict": 32}}
-                async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short_http()) as c:
+                async with httpx.AsyncClient(limits=_httpx_limits_app(), timeout=_timeout_short_http()) as c:
                     with contextlib.suppress(Exception):
                         await c.get(_ollama_url("/api/tags"))
-                async with httpx.AsyncClient(limits=_httpx_limits(), timeout=httpx.Timeout(WARMUP_TIMEOUT_SEC)) as client:
+                async with httpx.AsyncClient(limits=_httpx_limits_app(), timeout=httpx.Timeout(WARMUP_TIMEOUT_SEC)) as client:
                     await client.post(_ollama_url("/api/generate"), json=payload)
                 print("[WARMUP] Ollama warmup ok.")
             except Exception as e:
@@ -1154,7 +1468,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # Hard shutdown cleanup: stop audio, cancel BG tasks, close SSE
+        # Hard cleanup phase: stop audio, cancel BG tasks, close SSE
         STATE.shutting_down = True
         STATE.running = False
         if STATE.task:
@@ -1178,7 +1492,9 @@ app = FastAPI(lifespan=lifespan)
 
 # Static mounts
 app.mount("/static", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="static")
-# Expose ./workflows as read-only static for UI preview
+# Expose reference images statically for UI convenience (diagnostics)
+app.mount("/style_refs", StaticFiles(directory=str(STYLE_REFS_DIR), html=False), name="style_refs")
+# Read-only mount for workflows
 if not any(route for route in app.router.routes if getattr(route, "path", "") == "/workflows"):
     app.mount("/workflows", StaticFiles(directory=str(WORKFLOWS_DIR), html=False), name="workflows")
 
@@ -1189,7 +1505,7 @@ if web_dir.exists():
 @app.get("/", include_in_schema=False)
 async def root_redirect():
     """
-    Redirect to web UI if present; otherwise show a basic JSON message.
+    Redirect to Web UI if present; otherwise return a minimal JSON message.
     """
     if web_dir.exists():
         return RedirectResponse(url="/web/index.html", status_code=307)
@@ -1222,7 +1538,7 @@ async def health() -> HealthReport:
 @app.get("/config")
 async def get_config():
     """
-    Return current runtime configuration for the front-end UI.
+    Provide runtime configuration for front-end UI.
     """
     wpath = WHISPER_MODEL_PATH
     masked = (wpath[:3] + "..." + wpath[-10:]) if wpath and len(wpath) > 16 else wpath
@@ -1232,14 +1548,12 @@ async def get_config():
     except Exception:
         def_w, def_h = APP_IMAGE_WIDTH, APP_IMAGE_HEIGHT
 
-    # Determine if ComfyUI is the active, enabled backend
     backend_lower = (STATE.image_backend_name or "").strip().lower()
     is_comfy = backend_lower == "comfyui"
     app_disable_comfy_env = os.getenv("APP_DISABLE_COMFYUI", "1").strip().lower()
     comfy_disabled = app_disable_comfy_env in {"1", "true", "yes", "on"}
     show_workflow_selector = bool(is_comfy and not comfy_disabled)
 
-    # Surface style config to UI
     sc = STATE.style_cfg
     style_ui = {
         "style_preset": sc.style_preset,
@@ -1249,6 +1563,14 @@ async def get_config():
         "use_reference": sc.use_reference,
         "reference_id": sc.reference_id,
         "reference_strength": sc.reference_strength,
+        "reference_base_url": "/style_refs",
+    }
+
+    # URL signing diagnostics for cloud style ref usage
+    cfg_ref = {
+        "host": APP_REF_HOST or f"http://{os.getenv('APP_BIND_HOST','127.0.0.1')}:{int(os.getenv('APP_BIND_PORT','8080') or '8080')}",
+        "ttl_sec": APP_REF_TTL_SEC,
+        "secret_set": bool(APP_REF_SECRET),
     }
 
     return {
@@ -1277,6 +1599,7 @@ async def get_config():
             }
         },
         "style": style_ui,
+        "style_ref_url": cfg_ref,
         "sse": {"tick_sec": APP_SSE_TICK_SEC},
     }
 
@@ -1285,7 +1608,7 @@ async def get_config():
 @app.get("/api/workflows", response_model=WorkflowList)
 async def api_list_workflows() -> WorkflowList:
     """
-    Return available workflow JSON files under ./workflows.
+    Return list of workflow JSONs under ./workflows.
     """
     items = _list_workflow_files()
     return WorkflowList(items=items)
@@ -1293,7 +1616,7 @@ async def api_list_workflows() -> WorkflowList:
 @app.post("/api/settings/workflow")
 async def api_select_workflow(payload: WorkflowSelect):
     """
-    Select active workflow by filename; validates against ./workflows and applies to LocalComfyBackend.
+    Select active workflow by filename; validated against ./workflows, then applied.
     """
     try:
         _ensure_workflow_exists(payload.filename)
@@ -1302,10 +1625,8 @@ async def api_select_workflow(payload: WorkflowSelect):
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
-    # Persist in state
     STATE.active_workflow = payload.filename
 
-    # Hot-apply to LocalComfyBackend if active
     try:
         _apply_active_workflow_if_local()
     except Exception as e:
@@ -1319,7 +1640,7 @@ async def api_select_workflow(payload: WorkflowSelect):
 @app.get("/events")
 async def events(request: Request):
     """
-    Server-Sent Events endpoint that emits status, transcripts, prompts, and images.
+    SSE endpoint for status, transcripts, prompts, and image filenames.
     """
     async def gen():
         q: asyncio.Queue[str] = asyncio.Queue()
@@ -1351,7 +1672,7 @@ async def events(request: Request):
 @app.get("/audio/devices")
 def audio_devices():
     """
-    Enumerate input devices for diagnostics and selection.
+    List available input devices with indices.
     """
     try:
         devs = sd.query_devices()
@@ -1367,7 +1688,7 @@ def audio_devices():
 @app.get("/audio/probe")
 def audio_probe():
     """
-    Record a short snippet to estimate peak and RMS on current device.
+    Short capture to estimate peak/RMS of the current input device.
     """
     sr = SAMPLE_RATE
     dur = 0.5
@@ -1391,7 +1712,7 @@ def audio_probe():
 @app.post("/start", response_class=PlainTextResponse)
 async def start_pipeline():
     """
-    Start audio capture loop; image pipeline remains always enabled.
+    Start audio capture; image pipeline remains active regardless of audio.
     """
     print("[HTTP] /start called")
     if STATE.running:
@@ -1408,9 +1729,8 @@ async def start_pipeline():
 @app.post("/stop", response_class=PlainTextResponse)
 async def stop_pipeline():
     """
-    Soft stop: stop audio input and prevent new LLM prompts.
-    Do NOT cancel in-flight or pending image generation tasks.
-    Do NOT broadcast 'server_stopped'; broadcast 'audio_stopped' instead.
+    Soft stop: stop audio and prevent new LLM prompts.
+    Do not cancel running image jobs. Broadcast 'audio_stopped'.
     """
     print("[HTTP] /stop called")
 
@@ -1430,11 +1750,10 @@ async def stop_pipeline():
     print("[HTTP] /stop completed")
     return PlainTextResponse("stopped")
 
-
 @app.post("/shutdown", response_class=PlainTextResponse)
 async def shutdown_server():
     """
-    Hard stop: stop audio, cancel all BG tasks, close SSE, and exit the process.
+    Hard stop: stop audio, cancel BG tasks, close SSE, exit process.
     """
     print("[HTTP] /shutdown called")
     STATE.shutting_down = True
@@ -1454,19 +1773,22 @@ async def shutdown_server():
 
 async def _exit_after_delay():
     """
-    Exit the process shortly after notifying clients.
+    Exit shortly after notifying clients.
     """
     await asyncio.sleep(0.2)
     os._exit(0)
 
 # ---------- Ollama APIs ----------
 
+class _OllamaErr(JSONResponse):
+    pass
+
 @app.post("/api/ollama/generate")
 async def api_ollama_generate(req: OllamaGenerateRequest):
     if await _ollama_available() is False:
         return JSONResponse({"error": "ollama_unavailable"}, status_code=503)
     body = {"model": req.model or OLLAMA_MODEL, "prompt": req.prompt, "stream": bool(req.stream), "options": req.options or {}}
-    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_normal()) as client:
+    async with httpx.AsyncClient(limits=_httpx_limits_app(), timeout=_timeout_normal()) as client:
         try:
             data = await _post_with_retries(client, _ollama_url("/api/generate"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
             return {"response": data.get("response", "")}
@@ -1478,7 +1800,7 @@ async def api_ollama_chat(req: OllamaChatRequest):
     if await _ollama_available() is False:
         return JSONResponse({"error": "ollama_unavailable"}, status_code=503)
     body = {"model": req.model or OLLAMA_MODEL, "messages": [m.model_dump() for m in req.messages], "stream": bool(req.stream), "options": req.options or {}}
-    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_normal()) as client:
+    async with httpx.AsyncClient(limits=_httpx_limits_app(), timeout=_timeout_normal()) as client:
         try:
             data = await _post_with_retries(client, _ollama_url("/api/chat"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
             msg = (data.get("message") or {}).get("content", "") if isinstance(data, dict) else ""
@@ -1486,12 +1808,12 @@ async def api_ollama_chat(req: OllamaChatRequest):
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
-# ---------- Style settings & reference upload (new) ----------
+# ---------- Style settings & reference upload ----------
 
 @app.get("/api/settings/style")
 async def get_style_settings():
     """
-    Return the current style configuration for the UI controls.
+    Current style configuration for UI.
     """
     sc = STATE.style_cfg
     return {
@@ -1502,15 +1824,16 @@ async def get_style_settings():
         "use_reference": sc.use_reference,
         "reference_id": sc.reference_id,
         "reference_strength": sc.reference_strength,
+        "reference_base_url": "/style_refs",
     }
 
 @app.post("/api/settings/style")
 async def set_style_settings(payload: StyleSettingsPayload):
     """
-    Update style configuration and persist to disk.
+    Update style configuration, persist it, and refresh backend style runtime so the next generation
+    reflects the new reference/strength immediately.
     """
     try:
-        # Merge incoming fields into the current StyleConfig
         sc = STATE.style_cfg
         sc.style_preset = (payload.style_preset or sc.style_preset).strip()
         sc.style_details = (payload.style_details or "").strip()
@@ -1520,6 +1843,15 @@ async def set_style_settings(payload: StyleSettingsPayload):
         sc.reference_id = (payload.reference_id or None)
         sc.reference_strength = float(payload.reference_strength)
         _save_style_cfg(sc)
+
+        # Proactively refresh backend style runtime (idempotent, cheap).
+        if BACKEND is not None:
+            try:
+                prepare_backend_style(BACKEND, STATE.style_cfg, STYLE_REFS_DIR)
+            except Exception as e:
+                # Do not fail the API if the style prepare has issues; generation calls it again.
+                print(f"[STYLE] prepare_backend_style on update failed: {e}")
+
         await broadcast("status", "style_updated")
         return {"ok": True}
     except Exception as e:
@@ -1529,7 +1861,7 @@ async def set_style_settings(payload: StyleSettingsPayload):
 async def upload_reference_image(file: UploadFile = File(...)):
     """
     Upload a local reference image for styling (stored under outputs/style_refs).
-    Only allows small image files and returns a reference_id for later use.
+    Only small image files allowed; returns reference_id.
     """
     try:
         raw = await file.read()
@@ -1538,7 +1870,7 @@ async def upload_reference_image(file: UploadFile = File(...)):
     try:
         store = ReferenceStore(STYLE_REFS_DIR)
         rid, path = store.put(file.filename or "ref.png", raw)
-        # Update current style config to use this reference automatically
+        # Automatically set current style to this reference
         STATE.style_cfg.reference_id = rid
         STATE.style_cfg.use_reference = True
         _save_style_cfg(STATE.style_cfg)
@@ -1548,14 +1880,67 @@ async def upload_reference_image(file: UploadFile = File(...)):
     except Exception as e:
         return ReferenceUploadResponse(ok=False, error=f"store_error:{e}")
 
+@app.get("/api/reference/thumbnail")
+async def reference_thumbnail(id: str = Query(..., min_length=1), size: int = Query(256, ge=32, le=2048)):
+    """
+    Return a PNG thumbnail for a reference_id from STYLE_REFS_DIR.
+    If Pillow is unavailable, return original bytes.
+    """
+    src = (STYLE_REFS_DIR / id).resolve()
+    if src.parent != STYLE_REFS_DIR or not src.exists() or not src.is_file():
+        return JSONResponse({"error": "not_found"}, status_code=404)
+
+    try:
+        from PIL import Image  # Pillow
+    except Exception:
+        return Response(src.read_bytes(), media_type="image/png")
+
+    try:
+        im = Image.open(src).convert("RGB")
+        im.thumbnail((size, size))
+        import io as _io
+        buf = _io.BytesIO()
+        im.save(buf, format="PNG", optimize=True)
+        buf.seek(0)
+        return Response(buf.read(), media_type="image/png")
+    except Exception as e:
+        return JSONResponse({"error": f"thumb_error:{e}"}, status_code=500)
+
+# ---------- Reference file delivery (local signed URLs) ----------
+
+@app.get("/ref/{filename}")
+async def get_reference_file(filename: str, ts: int = Query(...), sig: str = Query(...)):
+    """
+    Secured access to STYLE_REFS_DIR via signed short-lived URL.
+    Only for local/LAN use to feed ComfyUI ImageFromURL nodes.
+
+    Security:
+    - HMAC signature (sig) over "filename:ts"
+    - TTL (ts >= now)
+    - Strict basename validation (no paths)
+    """
+    try:
+        data, mime = _verify_and_open_ref(filename, int(ts), sig or "")
+        headers = {
+            "Cache-Control": f"private, max-age={min(30, max(0, int(APP_REF_TTL_SEC//3)))}, must-revalidate",
+            "X-Content-Type-Options": "nosniff",
+            "X-Accel-Buffering": "no",
+        }
+        return Response(content=data, media_type=mime, headers=headers)
+    except PermissionError as e:
+        return JSONResponse({"error": f"forbidden:{e}"}, status_code=401)
+    except FileNotFoundError:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": f"server_error:{e}"}, status_code=500)
+
 # ---------- Plan → Prompt (style-aware) ----------
 
 @app.post("/api/plan")
 async def api_plan(req: PlanRequest):
     """
-    Generate an image prompt via Ollama and immediately trigger image generation.
-    Style configuration is applied (positive + negative).
-    This endpoint is independent of the audio loop; it should work even after soft stop.
+    Generate an image prompt via Ollama and immediately generate an image.
+    Style (positive + negative) is applied. Independent from audio state.
     """
     if await _ollama_available() is False:
         return JSONResponse({"error": "ollama_unavailable"}, status_code=503)
@@ -1567,12 +1952,12 @@ async def api_plan(req: PlanRequest):
     }
     prompt_text = f"<<SYS>>{sys}<</SYS>>\n\nINPUT_JSON:\n{json.dumps(payload, ensure_ascii=False)}\n\nOUTPUT:\n"
     body = {"model": OLLAMA_MODEL, "prompt": prompt_text, "stream": False, "options": _ollama_options_for_prompt()}
-    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_normal()) as client:
+    async with httpx.AsyncClient(limits=_httpx_limits_app(), timeout=_timeout_normal()) as client:
         try:
             data = await _post_with_retries(client, _ollama_url("/api/generate"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
             base_out = (data.get("response") or "").strip()
 
-            # Apply style builder to LLM output
+            # Apply style
             built = build_style_prompt(base_out, STATE.style_cfg)
             if built.positive:
                 STATE.last_prompt = built.positive
@@ -1580,7 +1965,6 @@ async def api_plan(req: PlanRequest):
 
                 if BACKEND is not None:
                     try:
-                        # Update LocalComfyBackend negative mirror (legacy)
                         neg_global = (STATE.negative_prompt or "").strip()
                         if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
                             if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
@@ -1590,14 +1974,16 @@ async def api_plan(req: PlanRequest):
                         eff_h = req.height if (req.height and req.height > 0) else STATE.image_height
                         eff_negative = (built.negative or neg_global or "").strip()
 
-                        # NEW: ensure backend has the current reference style applied
+                        # Prepare reference in backend
                         prepare_backend_style(BACKEND, STATE.style_cfg, STYLE_REFS_DIR)
+                        denoise_override = _calc_effective_denoise_from_style(STATE.style_cfg)
 
                         path = await _generate_with_negative_support(
                             built.positive,
                             width=eff_w,
                             height=eff_h,
                             negative=eff_negative,
+                            denoise=denoise_override,
                         )
                         path = ensure_in_output_dir(path)
                         rel = rel_for_ui_path(path)
@@ -1613,22 +1999,18 @@ async def api_plan(req: PlanRequest):
 @app.post("/api/image/direct", response_model=ImageResponse)
 async def api_image_direct(req: DirectImageRequest):
     """
-    Generate an image directly from a prompt (independent of audio state).
-    Style composition is applied: the user prompt is treated as the 'topic',
-    then combined with the current style settings to form the positive prompt.
+    Generate an image directly (independent from audio). Style is applied:
+    user text forms the topic and is combined with style into a positive prompt.
     """
     if BACKEND is None:
         return JSONResponse({"error": "image_backend_not_initialized"}, status_code=500)
     try:
-        # Build style-aware prompts from the provided topic/content
         built = build_style_prompt(req.prompt.strip(), STATE.style_cfg)
 
-        # Choose effective negative: prefer style negative; else request/global fallback
         neg_req = (req.negative_prompt or "").strip()
         neg_global = (STATE.negative_prompt or "").strip()
         eff_negative = (built.negative or neg_req or neg_global or "").strip()
 
-        # Mirror to LocalComfyBackend config where supported (legacy)
         if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
             if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
                 setattr(BACKEND.cfg, "negative", eff_negative)
@@ -1636,14 +2018,15 @@ async def api_image_direct(req: DirectImageRequest):
         w = req.width if (req.width and req.width > 0) else STATE.image_width
         h = req.height if (req.height and req.height > 0) else STATE.image_height
 
-        # NEW: ensure backend has the current reference style applied
         prepare_backend_style(BACKEND, STATE.style_cfg, STYLE_REFS_DIR)
+        denoise_override = _calc_effective_denoise_from_style(STATE.style_cfg)
 
         path = await _generate_with_negative_support(
             prompt=built.positive,
             width=w,
             height=h,
             negative=eff_negative,
+            denoise=denoise_override,
         )
         path = ensure_in_output_dir(path)
         rel = rel_for_ui_path(path)
@@ -1659,7 +2042,7 @@ async def api_image_direct(req: DirectImageRequest):
 @app.post("/api/image/test", response_model=ImageResponse)
 async def api_image_test(req: ImageRequest):
     """
-    Small test image generation with a default topic, composed with current style.
+    Small test run: default topic + current style.
     """
     if BACKEND is None:
         return JSONResponse({"error": "image_backend_not_initialized"}, status_code=500)
@@ -1678,10 +2061,10 @@ async def api_image_test(req: ImageRequest):
         w = req.width if (req.width and req.width > 0) else STATE.image_width
         h = req.height if (req.height and req.height > 0) else STATE.image_height
 
-        # NEW: ensure backend has the current reference style applied
         prepare_backend_style(BACKEND, STATE.style_cfg, STYLE_REFS_DIR)
+        denoise_override = _calc_effective_denoise_from_style(STATE.style_cfg)
 
-        path = await _generate_with_negative_support(built.positive, width=w, height=h, negative=eff_negative)
+        path = await _generate_with_negative_support(built.positive, width=w, height=h, negative=eff_negative, denoise=denoise_override)
         path = ensure_in_output_dir(path)
         rel = rel_for_ui_path(path)
         await broadcast("image", rel)
@@ -1693,7 +2076,7 @@ async def api_image_test(req: ImageRequest):
 
 def _rebuild_backend(force_name: Optional[str] = None) -> ImageBackend:
     """
-    Rebuild the image backend and update state.
+    Rebuild image backend and update STATE.
     """
     global BACKEND
     if force_name:
@@ -1709,7 +2092,7 @@ class ImageAllowCloudReq(BaseModel):
 @app.post("/api/settings/image_allow_cloud")
 async def api_image_allow_cloud(req: ImageAllowCloudReq):
     """
-    Toggle allowance for cloud-based image backends.
+    Allow/forbid cloud backends at runtime.
     """
     val = req.allow if req.allow is not None else req.allow_cloud
     if val is None:
@@ -1719,7 +2102,6 @@ async def api_image_allow_cloud(req: ImageAllowCloudReq):
         STATE.image_backend_name = "comfyui"
     try:
         _rebuild_backend()
-        # Re-apply selected workflow if we are on LocalComfyBackend
         try:
             _apply_active_workflow_if_local()
         except Exception as e:
@@ -1731,11 +2113,11 @@ async def api_image_allow_cloud(req: ImageAllowCloudReq):
 @app.post("/api/settings/image_backend")
 async def api_switch_image_backend(req: ImageBackendSwitch):
     """
-    Switch between local ComfyUI and Pollinations backend at runtime.
+    Switch between local ComfyUI and Pollinations.
 
     Behavior:
-    - Preserves current UI-selected image size by default.
-    - If reset=true in request body, sets image size to backend-specific defaults.
+    - Keep current UI image size unless reset=true.
+    - With reset=true: adopt backend defaults.
     """
     target = req.backend.lower()
     if target not in {"comfyui", "pollinations"}:
@@ -1747,7 +2129,6 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
         if not secret:
             return JSONResponse({"ok": False, "error": "missing_secret", "reason": "missing_secret"}, status_code=400)
     try:
-        # Keep current size unless reset requested
         cur_w, cur_h = STATE.image_width, STATE.image_height
         _rebuild_backend(force_name=target)
         if req.reset:
@@ -1758,7 +2139,6 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
             STATE.image_width = cur_w
             STATE.image_height = cur_h
 
-        # Re-apply selected workflow if we are on LocalComfyBackend
         try:
             _apply_active_workflow_if_local()
         except Exception as e:
@@ -1778,7 +2158,7 @@ async def get_image_size():
 @app.post("/api/settings/image_size")
 async def set_image_size(s: ImageSizeSettings):
     """
-    Update image dimensions used by subsequent generations.
+    Update image dimensions for subsequent generations.
     """
     STATE.image_width = int(s.width)
     STATE.image_height = int(s.height)
@@ -1792,8 +2172,8 @@ async def get_negative_prompt():
 @app.post("/api/settings/negative_prompt")
 async def set_negative_prompt(s: NegativePromptSettings):
     """
-    Update global negative prompt and mirror it to LocalComfyBackend if supported.
-    Note: Style negative (from style preset + base) typically supersedes this in new flows.
+    Update global negative prompt and mirror into LocalComfyBackend (if supported).
+    Note: Style negative usually overrides.
     """
     txt = (s.negative_prompt or "").strip()
     STATE.negative_prompt = txt
@@ -1804,7 +2184,7 @@ async def set_negative_prompt(s: NegativePromptSettings):
     await broadcast("status", "negative_prompt:updated")
     return {"ok": True, "negative_prompt": STATE.negative_prompt}
 
-# ---------- Utility: Open-dir hint (UI can open /static) ----------
+# ---------- Utility: Open-dir hint ----------
 
 @app.get("/open_dir_hint")
 async def open_dir_hint():
