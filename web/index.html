@@ -45,7 +45,6 @@
     .footer-hud{position:fixed;left:10px;bottom:10px;z-index:20;font-size:12px;color:var(--muted);background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;padding:6px 10px;backdrop-filter:blur(6px);display:flex;gap:10px;align-items:center;pointer-events:auto}
     .footer-hud a{color:#9ecbff;text-decoration:none}
     .footer-hud a:hover{text-decoration:underline}
-    /* reference */
     .ref-line{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;gap:8px}
     .ref-line label{margin:0}
     .ref-actions{display:flex;gap:8px;align-items:center}
@@ -54,13 +53,10 @@
     .ref-thumb.visible{display:inline-block}
     .ref-thumb.skeleton{background:linear-gradient(90deg,#0e1118,#151a22,#0e1118);background-size:200% 100%; animation:shine 1.2s infinite;}
     @keyframes shine { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
-    /* style input with inline save */
     .style-line{display:flex;gap:8px;align-items:center}
     .style-line input{flex:1}
-    /* generic inline input + button row for prompts */
     .inline-input-line{display:flex;gap:8px;align-items:center}
     .inline-input-line input{flex:1}
-    /* hide native file input completely but keep it accessible for JS */
     .visually-hidden{position:absolute !important; width:1px !important; height:1px !important; padding:0 !important; margin:-1px !important; overflow:hidden !important; clip:rect(0 0 0 0) !important; white-space:nowrap !important; border:0 !important;}
   </style>
 </head>
@@ -155,13 +151,21 @@
             <span class="mono" id="ref-info" style="font-size:12px; color:#cfd6e6;">Keine Referenz</span>
           </div>
 
-          <!-- NEU: Referenzstärke + Denoise-Vorschau + Übernehmen -->
+          <!-- Reference strength + denoise mapping -->
           <div id="ref-strength-row" class="ref-controls" style="margin-bottom:8px; display:none;">
             <label for="ref-strength" style="min-width:140px;">Referenzstärke</label>
             <input id="ref-strength" type="range" min="0" max="1" step="0.05" value="0.6" style="width:180px;">
             <span class="mono" id="ref-strength-val">0.60</span>
             <span class="mono" style="color:#9ecbff;">denoise: <span id="ref-denoise-val">0.52</span></span>
             <button id="btn-apply-ref-strength" title="Referenzstärke übernehmen">Übernehmen</button>
+          </div>
+
+          <!-- NEW: Cloud vision toggle -->
+          <div id="ref-cloud-row" class="ref-controls" style="margin-bottom:8px; display:none;">
+            <label for="ref-cloud">Use Cloud Vision for style descriptors</label>
+            <input id="ref-cloud" type="checkbox" />
+            <button id="btn-apply-ref-cloud" title="Apply Cloud Vision setting">Apply</button>
+            <span class="mono" id="ref-cloud-hint" style="opacity:.8;"></span>
           </div>
 
           <!-- Style Prompt -->
@@ -326,7 +330,7 @@
         ref_none: "No reference",
         ref_ok: "Reference enabled",
         ref_fail: "Upload failed",
-        ref_disabled_ok: "Reference disabled.",
+        ref_disabled_ok: "Reference disabled",
         ref_disabled_fail: "Failed to disable reference.",
         ref_thumb_title_active: "Active reference image (click to focus)",
         ref_thumb_title_inactive: "Reference disabled",
@@ -475,12 +479,18 @@
     const styleText = $('#style-text');
     const btnSaveStyleText = $('#btn-save-style-text');
 
-    // NEW: Reference strength elements
+    // Reference strength elements
     const refStrengthRow = document.getElementById('ref-strength-row');
     const refStrength = document.getElementById('ref-strength');
     const refStrengthVal = document.getElementById('ref-strength-val');
     const refDenoiseVal = document.getElementById('ref-denoise-val');
     const btnApplyRefStrength = document.getElementById('btn-apply-ref-strength');
+
+    // NEW: Cloud vision toggle elements
+    const refCloudRow = document.getElementById('ref-cloud-row');
+    const refCloud = document.getElementById('ref-cloud');
+    const btnApplyRefCloud = document.getElementById('btn-apply-ref-cloud');
+    const refCloudHint = document.getElementById('ref-cloud-hint');
 
     let CURRENT_REF = { id: null, use: false };
 
@@ -564,8 +574,9 @@
       CURRENT_REF.use = !!useReference;
       syncRefThumbTitle();
 
-      // Show/hide strength row based on reference presence
+      // Toggle visibility for strength and cloud rows based on reference state
       syncRefStrengthUI(CURRENT_REF.use && !!CURRENT_REF.id, undefined);
+      syncRefCloudUI(CURRENT_REF.use && !!CURRENT_REF.id);
 
       if(!referenceId){
         refThumb.classList.remove('visible','skeleton');
@@ -737,7 +748,7 @@
       finally{ btn.disabled=false; }
     });
 
-    // Direct Generate (include style + reference)
+    // Direct Generate (server-side style + descriptors)
     document.getElementById('btn-direct').addEventListener('click', async ()=>{
       const prompt = document.getElementById('plan-input').value.trim();
       const negative = document.getElementById('neg-input').value.trim();
@@ -766,6 +777,7 @@
       if (styleCfg && styleCfg.use_reference && styleCfg.reference_id) {
         payload.use_reference = true;
         payload.reference_id = styleCfg.reference_id;
+        // Cloud vision usage is saved server-side; the backend decides preference per backend.
       } else {
         payload.use_reference = false;
       }
@@ -870,6 +882,36 @@
       }
     });
 
+    // NEW: Cloud vision UI logic
+    function syncRefCloudUI(visible){
+      if(!refCloudRow) return;
+      refCloudRow.style.display = visible ? '' : 'none';
+    }
+    if(btnApplyRefCloud){
+      btnApplyRefCloud.addEventListener('click', async ()=>{
+        try{
+          const sty = await fetch('/api/settings/style', { cache:'no-store' }).then(r=>r.json()).catch(()=> ({}));
+          const hasRef = !!(sty && sty.use_reference && sty.reference_id);
+          if(!hasRef){
+            log(statusLog, 'no active reference to apply cloud vision setting');
+            return;
+          }
+          const useCloud = !!refCloud.checked;
+          const payload = { reference_cloud: useCloud };
+          const r = await fetch('/api/settings/style', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify(payload)
+          });
+          if(!r.ok) throw new Error(`HTTP ${r.status}`);
+          log(statusLog, `cloud vision ${useCloud ? 'enabled' : 'disabled'} for reference descriptors`);
+          await refreshConfig();
+        }catch(e){
+          log(statusLog, `apply cloud vision setting error: ${e}`);
+        }
+      });
+    }
+
     // Backend switch
     async function ensureCloudAllowed(){
       try{
@@ -918,7 +960,7 @@
       }
     });
 
-    // ---- Workflow helpers ----
+    // ---- Workflow helpers (unchanged) ----
 
     function wfBasename(s){
       if(!s) return '';
@@ -1119,7 +1161,7 @@
       }catch{}
     });
 
-    // NEW: strength-to-denoise mapping + UI sync
+    // Strength-to-denoise mapping + UI sync
     function mapStrengthToDenoise(s){
       s = Math.max(0, Math.min(1, Number(s) || 0));
       const d = 0.85 - 0.55 * s;
@@ -1217,10 +1259,23 @@
         }
         await updateRefThumb(styleCfg.reference_id || null, !!styleCfg.use_reference);
 
-        // NEW: Reference strength UI sync
+        // Strength UI sync
         const hasRef = !!(styleCfg.use_reference && styleCfg.reference_id);
         const sVal = (typeof styleCfg.reference_strength === 'number') ? styleCfg.reference_strength : 0.6;
         syncRefStrengthUI(hasRef, sVal);
+
+        // Cloud vision UI sync
+        syncRefCloudUI(hasRef);
+        if (typeof styleCfg.reference_cloud === 'boolean') {
+          refCloud.checked = !!styleCfg.reference_cloud;
+        } else {
+          refCloud.checked = false;
+        }
+        // Show hint about default behavior per backend (informational only)
+        const hint = (current === 'pollinations')
+          ? 'Default: cloud vision ON (descriptors preferred from Vision).'
+          : 'Default: cloud vision OFF (local descriptors preferred).';
+        refCloudHint.textContent = hint;
 
         if(statusEl.dataset.state!=='connected') statusEl.textContent = t('status_ready');
       }catch(e){

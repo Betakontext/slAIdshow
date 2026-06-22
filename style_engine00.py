@@ -1,10 +1,10 @@
+# slAIdshow : style_engine.py
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
 import os
 import re
@@ -59,9 +59,6 @@ class StyleConfig(BaseModel):
     use_reference: bool = Field(default=False)
     reference_id: Optional[str] = Field(default=None)
     reference_strength: float = Field(default=0.6, ge=0.0, le=1.0)
-
-    # Cloud vision toggle (UI-controlled): if True and model is set, try Vision descriptors
-    reference_cloud: bool = Field(default=False)
 
     # Internal
     persisted_path: Optional[Path] = Field(default=None, exclude=True)
@@ -184,10 +181,6 @@ build_style_prompt = build_prompt
 # =========================
 
 def prepare_backend_style(backend: Any, cfg: StyleConfig, refs_dir: Union[str, Path]) -> None:
-    """
-    Stage the local reference image into the LocalComfyBackend and, if supported by the backend,
-    pass resolved style descriptors. Vision path is disabled by default for ComfyUI.
-    """
     try:
         if not cfg or not getattr(cfg, "use_reference", False) or not getattr(cfg, "reference_id", None):
             return
@@ -202,20 +195,6 @@ def prepare_backend_style(backend: Any, cfg: StyleConfig, refs_dir: Union[str, P
                 print("[STYLE] staged reference into LocalComfyBackend.")
             except Exception as e:
                 print(f"[STYLE] backend staging failed: {e}")
-
-        # Resolve descriptors for ComfyUI as optional enhancement (safe no-op if method not present).
-        try:
-            # Vision disabled by default for ComfyUI; use local pipeline first.
-            desc = resolve_style_descriptors_for_reference(
-                ref_path=ref_path,
-                prefer_cloud=False,
-            )
-            if hasattr(backend, "stage_style_descriptors") and desc:
-                backend.stage_style_descriptors(desc)  # type: ignore[attr-defined]
-                print(f"[STYLE] staged {len(desc)} style descriptors into LocalComfyBackend.")
-        except Exception as e:
-            print(f"[STYLE] descriptor staging skipped: {e}")
-
     except Exception as e:
         print(f"[STYLE] prepare_backend_style failed: {e}")
 
@@ -375,7 +354,7 @@ async def _v1_edits_url_mode(
     seed: Optional[int] = None,
     model: str = POLLINATIONS_IMAGE_MODEL,
 ) -> Tuple[Optional[str], Optional[str]]:
-    # IMPORTANT: field name must be 'image' (not 'image_url') to mirror the working request.
+    # WICHTIG: Feld 'image' (nicht 'image_url'), um den Test-Aufruf exakt zu spiegeln.
     files: Dict[str, Any] = {
         "prompt": (None, prompt),
         "response_format": (None, "url"),
@@ -505,219 +484,6 @@ def build_pollinations_prompt(
     )
 
 # =========================
-# Cloud Vision + Local Style pipeline
-# =========================
-
-# Feature flag and endpoints for Ollama Vision.
-# Defaults: ComfyUI path prefers local descriptors (vision disabled by default).
-# Pollinations path prefers vision descriptors (enabled by default below in orchestration).
-FEATURE_STYLE_REF_VISION_CLOUD = _env_bool01("FEATURE_STYLE_REF_VISION_CLOUD", 1)
-APP_OLLAMA_HOST = _env_str("APP_OLLAMA_HOST", "http://localhost:11434")
-APP_OLLAMA_VISION_MODEL = _env_str("APP_OLLAMA_VISION_MODEL", "")
-
-# Best-effort import of local style features for fallback if cloud is off/unavailable.
-with contextlib.suppress(Exception):
-    from style_features import extract_style_descriptors  # type: ignore[attr-defined]
-
-class _OllamaMsgContent(BaseModel):
-    """Minimal multimodal content item (text or base64 image)."""
-    type: str
-    text: Optional[str] = None
-    image: Optional[str] = None  # base64-encoded image data
-
-class _OllamaMessage(BaseModel):
-    role: str
-    content: List[_OllamaMsgContent]
-
-class _OllamaChatReq(BaseModel):
-    model: str
-    messages: List[_OllamaMessage]
-    stream: bool = False
-    options: Dict[str, Any] = Field(default_factory=dict)
-
-class _OllamaChatRespMsg(BaseModel):
-    role: Optional[str] = None
-    content: Optional[str] = None
-
-class _OllamaChatResp(BaseModel):
-    message: Optional[_OllamaChatRespMsg] = None
-    done: Optional[bool] = None
-
-def _vision_instruction() -> str:
-    """Deterministic instruction to request short, style-focused descriptors only."""
-    return (
-        "Analyze only the STYLE of this image. "
-        "Return 4-6 short, comma-separated descriptors (no sentences, no extra words). "
-        "Focus on: line clarity/thickness, color palette/saturation, halftone dots, straight lines, brush texture, contrast, micro-detail/bokeh. "
-        "Output MUST be a single comma-separated line."
-    )
-
-def _normalize_descriptors_line(s: str, max_items: int = 6) -> List[str]:
-    """Normalize and sanitize a descriptor CSV line into a compact unique list."""
-    s = (s or "").strip().replace("\n", " ").replace("\r", " ")
-    s = re.sub(r"\s{2,}", " ", s)
-    s = re.sub(r"[;:|]", ",", s)
-    raw = [p.strip().strip(".") for p in s.split(",")]
-    out: List[str] = []
-    for p in raw:
-        p = re.sub(r"[^A-Za-z0-9 _/\-]", "", p)
-        if not p:
-            continue
-        if len(p) > 64:
-            p = p[:64].rstrip()
-        lo = p.lower()
-        if lo in {"style", "descriptor", "descriptors", "none", "n/a"}:
-            continue
-        if p not in out:
-            out.append(p)
-        if len(out) >= max_items:
-            break
-    return out
-
-def _encode_image_b64(path: Path, warn_threshold: int = 2_500_000) -> Optional[str]:
-    """Read image and return base64 ascii string; warn if very large."""
-    try:
-        data = path.read_bytes()
-        if len(data) > warn_threshold:
-            print(f("[STYLE] warning: large image size {len(data)} bytes"))
-        return base64.b64encode(data).decode("ascii")
-    except Exception as e:
-        print(f"[STYLE] base64 encode failed: {e}")
-        return None
-
-async def _ollama_chat_descriptors(
-    *,
-    model: str,
-    host: str,
-    image_path: Path,
-    retries: int,
-    base_delay: float,
-    timeout: httpx.Timeout,
-) -> List[str]:
-    """Call Ollama /api/chat with multimodal message to extract style descriptors."""
-    if not image_path.exists():
-        return []
-    b64 = _encode_image_b64(image_path)
-    if not b64:
-        return []
-    url = f"{host.rstrip('/')}/api/chat"
-    payload = _OllamaChatReq(
-        model=model,
-        messages=[
-            _OllamaMessage(
-                role="user",
-                content=[
-                    _OllamaMsgContent(type="image", image=b64),
-                    _OllamaMsgContent(type="text", text=_vision_instruction()),
-                ],
-            )
-        ],
-        stream=False,
-        options={"temperature": 0.1},
-    )
-    delay = float(base_delay)
-    last_exc: Optional[Exception] = None
-    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=timeout, follow_redirects=True) as client:
-        for attempt in range(1, int(retries) + 1):
-            try:
-                resp = await client.post(url, json=payload.model_dump())
-                if resp.status_code >= 400:
-                    if resp.status_code in (408, 429, 500, 502, 503, 504):
-                        await asyncio.sleep(delay)
-                        delay *= 1.8
-                        continue
-                    print(f"[STYLE] ollama http {resp.status_code}: {resp.text[:256]}")
-                    return []
-                js = resp.json()
-                try:
-                    parsed = _OllamaChatResp(**js)
-                    content = parsed.message.content if (parsed.message and parsed.message.content) else None
-                except ValidationError:
-                    msg = js.get("message") or {}
-                    content = msg.get("content") if isinstance(msg, dict) else None
-                if not content:
-                    return []
-                return _normalize_descriptors_line(content, max_items=6)
-            except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
-                last_exc = e
-                if attempt >= retries:
-                    break
-                await asyncio.sleep(delay)
-                delay *= 1.8
-            except Exception as e:
-                last_exc = e
-                break
-    if last_exc:
-        print(f"[STYLE] ollama call failed: {last_exc}")
-    return []
-
-def _local_style_descriptors(image_path: Path, limit: int = 6) -> List[str]:
-    """Compute style descriptors locally via the optimized style_features pipeline."""
-    try:
-        if 'extract_style_descriptors' not in globals():
-            return []
-        ds = extract_style_descriptors(image_path, debug=False)  # type: ignore[name-defined]
-        out: List[str] = []
-        for d in ds:
-            d = (d or "").strip()
-            if not d:
-                continue
-            d = re.sub(r"[^A-Za-z0-9 _/\-]", "", d)
-            if d and d not in out:
-                out.append(d)
-            if len(out) >= limit:
-                break
-        return out
-    except Exception as e:
-        print(f"[STYLE] local style_features failed: {e}")
-        return []
-
-def resolve_style_descriptors_for_reference(
-    *,
-    ref_path: Path,
-    prefer_cloud: bool,
-) -> List[str]:
-    """
-    Resolve style descriptors for a given reference path using either cloud Vision (preferred when enabled)
-    or the local style pipeline as fallback. Synchronous wrapper that internally awaits cloud path if needed.
-    """
-    if not ref_path or not ref_path.exists():
-        return []
-    # Fast path: local
-    async def _resolve() -> List[str]:
-        if prefer_cloud and FEATURE_STYLE_REF_VISION_CLOUD and APP_OLLAMA_VISION_MODEL:
-            cloud = await _ollama_chat_descriptors(
-                model=APP_OLLAMA_VISION_MODEL,
-                host=APP_OLLAMA_HOST,
-                image_path=ref_path,
-                retries=APP_MAX_RETRIES,
-                base_delay=APP_RETRY_BASE_DELAY,
-                timeout=_timeout_generic(),
-            )
-            if cloud:
-                return cloud
-        # Fallback to local pipeline
-        return _local_style_descriptors(ref_path, limit=6)
-
-    # If already in an event loop, run directly; else run a new loop.
-    try:
-        loop = asyncio.get_running_loop()
-        return loop.run_until_complete(_resolve())  # type: ignore[no-any-return]
-    except RuntimeError:
-        return asyncio.run(_resolve())
-
-def _merge_descriptors_into_prompt(user_text: str, base_positive: str, descriptors: List[str], lean: bool) -> str:
-    """Append concise descriptors to either the lean or composed positive prompt."""
-    descr = [d for d in descriptors if isinstance(d, str) and d]
-    if not descr:
-        return base_positive if not lean else (user_text.strip() or base_positive or "high-quality image")
-    suffix = ", " + ", ".join(descr)
-    if lean:
-        base = user_text.strip() or base_positive.strip() or "high-quality image"
-        return (base + suffix).strip().strip(",")
-    return (base_positive.strip() + suffix).strip().strip(",")
-
-# =========================
 # Orchestration
 # =========================
 
@@ -732,14 +498,11 @@ async def generate_image_pollinations(
     seed: Optional[int] = None,
 ) -> Optional[Path]:
     """
-    Pollinations V1 Edits orchestration with optional Vision descriptors (enabled by default).
-    Falls back to local style pipeline when Vision is unavailable. Lean prompt can be enabled via env.
+    Pollinations V1 Edits orchestration with 'lean edit prompt' when a reference is used.
+    Aligns parameters with the working test script to ensure the reference actually guides the output.
     """
     try:
         STYLE_REFERENCE_LEAN_PROMPT = _env_bool01("STYLE_REFERENCE_LEAN_PROMPT", 1)
-        # For Pollinations, prefer cloud Vision by default to enrich the lean edit prompt.
-        POLLINATIONS_PREFER_CLOUD = True
-
         bname = type(backend).__name__.lower()
         w = int(width or APP_IMAGE_WIDTH)
         h = int(height or APP_IMAGE_HEIGHT)
@@ -770,20 +533,21 @@ async def generate_image_pollinations(
 
         # If we have a local reference and V1 edits are enabled, go multipart
         if FEATURE_POLLINATIONS_V1_EDITS and POLLINATIONS_SECRET and ref_path and ref_path.exists():
-            # Resolve descriptors (prefer cloud for Pollinations by default; UI toggle can override via cfg.reference_cloud)
-            prefer_cloud = bool(POLLINATIONS_PREFER_CLOUD or cfg.reference_cloud)
-            descriptors = resolve_style_descriptors_for_reference(ref_path=ref_path, prefer_cloud=prefer_cloud)
-
-            # Lean prompt; now inject descriptors conservatively
+            # Lean prompt (mimic the successful test): do not prepend style preset verbiage, just the user's intent
             if STYLE_REFERENCE_LEAN_PROMPT:
-                lean_prompt = user_text.strip() if user_text.strip() else base_prompts.positive or "high-quality image"
-                prompt_for_edits = _merge_descriptors_into_prompt(user_text, lean_prompt, descriptors, lean=True)
+                # Knapper Prompt wie im Test – dein Test hatte explizit "Donald Duck as a pencil sketch..."
+                lean_prompt = user_text.strip() if user_text.strip() else base_prompts.positive
+                if not lean_prompt:
+                    lean_prompt = "high-quality image"
+                prompt_for_edits = lean_prompt
             else:
-                prompt_for_edits = _merge_descriptors_into_prompt(user_text, base_prompts.positive, descriptors, lean=False)
+                # Fallback: benutze die positive Komposition
+                prompt_for_edits = base_prompts.positive
 
             print(f"[STYLE] pollinations: using multipart local reference | model={POLLINATIONS_IMAGE_MODEL} size={w}x{h}")
-            print(f"[STYLE] prompt(mode={'lean' if STYLE_REFERENCE_LEAN_PROMPT else 'full'}): {prompt_for_edits[:200]}")
+            print(f"[STYLE] prompt(mode={'lean' if STYLE_REFERENCE_LEAN_PROMPT else 'full'}): {prompt_for_edits[:180]}")
 
+            # Perform multipart call using the exact contract that worked in your test
             try:
                 img_url, b64 = await _v1_edits_multipart(
                     prompt=prompt_for_edits,
@@ -803,6 +567,7 @@ async def generate_image_pollinations(
                         print(f"[STYLE] backend.store_generated_result failed: {e}")
                 return None
             except Exception as e:
+                # Transparenter Fehler: 402, 4xx, 5xx inkl. body snippet
                 print(f"[STYLE] pollinations multipart failed: {e}")
                 return None
 
@@ -833,9 +598,6 @@ def _log_style_env() -> None:
         f"uploads={'on' if POLLINATIONS_ENABLE_UPLOAD else 'off'}",
         f"secret_set={'yes' if bool(POLLINATIONS_SECRET) else 'no'}",
         f"model={POLLINATIONS_IMAGE_MODEL}",
-        f"vision_cloud={'on' if FEATURE_STYLE_REF_VISION_CLOUD else 'off'}",
-        f"ollama_host={_env_str('APP_OLLAMA_HOST', '(unset)')}",
-        f"ollama_vision_model={APP_OLLAMA_VISION_MODEL or '(unset)'}",
     )
 
 with contextlib.suppress(Exception):

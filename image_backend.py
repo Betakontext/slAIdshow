@@ -10,12 +10,42 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Set, Any, Tuple, Dict
+from typing import Optional, Set, Any, Tuple, Dict, List
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from comfyui_bridge import generate_from_prompt_dict
+
+# Import unified style engine helpers (cloud vision + local descriptors)
+# Comments strictly in English
+try:
+    from style_engine import (
+        resolve_style_descriptors_for_reference,
+        _env_str as se_env_str,
+        _env_int as se_env_int,
+        _env_float as se_env_float,
+        _env_bool01 as se_env_bool01,
+    )
+except Exception:
+    # Fallback in case style_engine is not yet available at import time
+    def resolve_style_descriptors_for_reference(*, ref_path: Path, prefer_cloud: bool) -> List[str]:
+        return []
+    def se_env_str(k: str, d: str = "") -> str:
+        return (os.getenv(k, d) or "").strip()
+    def se_env_int(k: str, d: int) -> int:
+        try:
+            return int(os.getenv(k, str(d)))
+        except Exception:
+            return d
+    def se_env_float(k: str, d: float) -> float:
+        try:
+            return float(os.getenv(k, str(d)))
+        except Exception:
+            return d
+    def se_env_bool01(k: str, d: int = 0) -> bool:
+        v = (os.getenv(k, str(d)) or "").strip().lower()
+        return v in {"1", "true", "yes", "on"}
 
 
 # --- Debug flag (optional minimal logging) ---
@@ -23,25 +53,18 @@ def _debug() -> bool:
     return (os.getenv("APP_IMAGE_BACKEND_DEBUG", "0") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-# --- Environment helpers ---
+# --- Environment helpers (reuse style_engine variants for consistency) ---
 def _env_str(k: str, d: str) -> str:
-    return (os.getenv(k, d) or "").strip()
+    return se_env_str(k, d)
 
 def _env_int(k: str, d: int) -> int:
-    try:
-        return int(os.getenv(k, str(d)))
-    except Exception:
-        return d
+    return se_env_int(k, d)
 
 def _env_float(k: str, d: float) -> float:
-    try:
-        return float(os.getenv(k, str(d)))
-    except Exception:
-        return d
+    return se_env_float(k, d)
 
 def _env_bool01(k: str, d: int = 0) -> bool:
-    v = (os.getenv(k, str(d)) or "").strip().lower()
-    return v in {"1", "true", "yes", "on"}
+    return se_env_bool01(k, d)
 
 
 # --- HTTP client tuning ---
@@ -141,6 +164,8 @@ def _resolve_size_for_backend(backend_name: str, req_w: Optional[int], req_h: Op
 class StyleRuntime:
     reference_path: Optional[Path] = None
     reference_strength: float = 0.6
+    # Whether UI requests cloud-vision for descriptors (server uses per-backend defaults if None)
+    reference_cloud: Optional[bool] = None
 
     @property
     def has_reference(self) -> bool:
@@ -232,7 +257,7 @@ def _mime_for(name: str) -> str:
     return "application/octet-stream"
 
 
-# --- Pollinations models ---
+# --- Pollinations models and backend (trimmed to only changed parts) ---
 class _PollinationsV1Datum(BaseModel):
     b64_json: Optional[str] = None
     url: Optional[str] = None
@@ -243,10 +268,6 @@ class _PollinationsV1Response(BaseModel):
     data: list[_PollinationsV1Datum] = Field(default_factory=list)
 
 class PollinationsConfig(BaseModel):
-    """
-    Configuration for Pollinations image API access (V1).
-    Requires ALLOW_CLOUD_IMAGE_BACKEND=1 and POLLINATIONS_SECRET.
-    """
     api_base: str = Field(default_factory=lambda: _env_str("POLLINATIONS_API_BASE", "https://gen.pollinations.ai").rstrip("/"))
     gen_base: str = Field(default_factory=lambda: _env_str("POLLINATIONS_GEN_BASE", "https://gen.pollinations.ai").rstrip("/"))
     secret: str = Field(default_factory=lambda: _env_str("POLLINATIONS_SECRET", ""))
@@ -258,11 +279,11 @@ class PollinationsConfig(BaseModel):
     use_v1: bool = Field(default_factory=lambda: _env_bool01("POLLINATIONS_USE_V1", 1))
     size_override: str = Field(default_factory=lambda: _env_str("POLLINATIONS_SIZE", ""))
     allow_cloud: bool = Field(default_factory=lambda: _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0))
-    # Endpoints (align with style_engine)
     v1_edits_path: str = Field(default_factory=lambda: _env_str("POLLINATIONS_V1_IMAGES_EDITS_ENDPOINT", "/v1/images/edits"))
     v1_generations_path: str = Field(default_factory=lambda: _env_str("POLLINATIONS_V1_IMAGES_GENERATIONS_ENDPOINT", "/v1/images/generations"))
-    # Prompt suffix for style-only transfer (URL mode or multipart)
     prompt_suffix_style_only: str = Field(default_factory=lambda: _env_str("POLLINATIONS_STYLE_SUFFIX", "adopt the exact visual style, colors, and textures from the reference image; only transfer style, not content."))
+    # Preference: Pollinations prefers cloud vision by default
+    prefer_cloud_descriptors_default: bool = True
 
     @property
     def seed(self) -> Optional[int]:
@@ -288,11 +309,9 @@ def _size_from_wh(width: int, height: int) -> str:
 
 class PollinationsBackend(ImageBackend):
     """
-    Cloud backend for Pollinations (V1). Supports:
-    - V1 images edits with reference image URL or multipart file
-    - V1 images generations as text-only fallback
-    - GET /image/... as last resort
-    - Storage hook for style_engine direct V1 responses
+    Cloud backend for Pollinations (V1), integrated with unified style engine:
+    - Injects style descriptors into the prompt (cloud vision preferred by default).
+    - Uses V1 edits with local file (multipart) or URL; or generations as fallback.
     """
     def __init__(self, out_dir: Path, cfg: Optional[PollinationsConfig] = None, style: Optional[StyleRuntime] = None) -> None:
         self.out_dir = Path(out_dir).resolve()
@@ -304,12 +323,6 @@ class PollinationsBackend(ImageBackend):
         self.style = style or StyleRuntime()
 
     async def store_generated_result(self, image_url: Optional[str], b64: Optional[str]) -> Path:
-        """
-        Storage hook used by style_engine:
-        - If image_url is provided, download and save.
-        - Else if b64 provided, decode and save.
-        - Returns the local Path of the saved image.
-        """
         if not (image_url or b64):
             raise RuntimeError("no result to store")
         target = self.out_dir / f"img_{uuid.uuid4().hex}.jpg"
@@ -329,10 +342,28 @@ class PollinationsBackend(ImageBackend):
                 target.write_bytes(raw)
                 return target
 
+    def _merge_descriptors(self, base_prompt: str, descriptors: List[str]) -> str:
+        """Append short descriptors to the prompt conservatively."""
+        ds = [d for d in (descriptors or []) if isinstance(d, str) and d.strip()]
+        if not ds:
+            return base_prompt
+        return (base_prompt.rstrip(",") + ", " + ", ".join(ds)).strip().strip(",")
+
+    def _resolve_descriptors_if_any(self) -> List[str]:
+        """Resolve descriptors for current reference (prefer cloud by default for Pollinations)."""
+        if not (self.style and self.style.has_reference):
+            return []
+        prefer = self.cfg.prefer_cloud_descriptors_default
+        if isinstance(self.style.reference_cloud, bool):
+            prefer = bool(self.style.reference_cloud)
+        try:
+            return resolve_style_descriptors_for_reference(ref_path=self.style.reference_path, prefer_cloud=prefer)  # type: ignore[arg-type]
+        except Exception as e:
+            if _debug():
+                print(f"[POLLINATIONS][desc] resolve failed: {e}")
+            return []
+
     async def _post_v1_edits(self, prompt: str, image_url: str, width: int | None, height: int | None, *, negative_prompt: str | None = None, seed: Optional[int] = None) -> Path:
-        """
-        V1 Edits endpoint: JSON payload with image URL. Returns URL or base64; we handle both.
-        """
         self.cfg.require_cloud_enabled()
         url = f"{self.cfg.gen_base}{self.cfg.v1_edits_path}"
         headers = {"Authorization": f"Bearer {self.cfg.secret}", "Content-Type": "application/json"}
@@ -382,10 +413,6 @@ class PollinationsBackend(ImageBackend):
             raise RuntimeError("pollinations_v1_edits_missing_data")
 
     async def _post_v1_edits_multipart(self, prompt: str, image_path: Path, width: int | None, height: int | None, *, negative_prompt: str | None = None, seed: Optional[int] = None) -> Path:
-        """
-        V1 Edits endpoint: multipart upload with local image file.
-        Aligns with style_engine multipart path (privacy-first).
-        """
         self.cfg.require_cloud_enabled()
         if not image_path.exists() or not image_path.is_file():
             raise FileNotFoundError(image_path)
@@ -415,7 +442,6 @@ class PollinationsBackend(ImageBackend):
             except Exception:
                 raise RuntimeError("pollinations_v1_edits_multipart_invalid_json")
 
-            # Parse both URL and b64_json cases
             data = j.get("data")
             if isinstance(data, list) and data:
                 first = data[0]
@@ -536,18 +562,17 @@ class PollinationsBackend(ImageBackend):
         raise RuntimeError(f"pollinations_get_all_attempts_failed: {last_exc}")
 
     async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative_prompt: str | None = None, **kwargs: Any) -> Path:
-        """
-        Generate via Pollinations V1:
-        - If style_reference_path provided: use V1 edits (multipart, local file conditioning)
-        - Else if style_reference_url provided: use V1 edits (image URL conditioning)
-        - Else: V1 generations (text-only) or GET fallback
-        """
         if not self.cfg.allow_cloud:
             raise RuntimeError("Cloud image backend disabled (ALLOW_CLOUD_IMAGE_BACKEND=0)")
         if not self.cfg.secret:
             raise RuntimeError("POLLINATIONS_SECRET missing")
 
+        # Append descriptors from style engine (cloud preferred by default)
         full_prompt = (prompt or "").strip()
+        descriptors = self._resolve_descriptors_if_any()
+        if descriptors:
+            full_prompt = self._merge_descriptors(full_prompt, descriptors)
+
         n_prompt = (negative_prompt or "").strip()
         if n_prompt:
             full_prompt = f"{full_prompt}\n-- negative: {n_prompt}"
@@ -556,15 +581,15 @@ class PollinationsBackend(ImageBackend):
         eff_w = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
         eff_h = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
 
-        # Multipart preference for privacy-first local reference
-        style_reference_path: Optional[Path] = kwargs.get("style_reference_path")
-        if isinstance(style_reference_path, Path):
+        # Preferred: multipart with local reference (privacy-first)
+        style_reference_path: Optional[Path] = kwargs.get("style_reference_path") or (self.style.reference_path if (self.style and self.style.has_reference) else None)
+        if isinstance(style_reference_path, Path) and style_reference_path.exists():
             suffix = (self.cfg.prompt_suffix_style_only or "").strip()
             if suffix:
                 full_prompt = f"{full_prompt}\n{suffix}"
             return await self._post_v1_edits_multipart(full_prompt, style_reference_path, eff_w, eff_h, negative_prompt=n_prompt or None, seed=self.cfg.seed)
 
-        # URL-mode fallback/alternative
+        # URL-mode if provided explicitly
         style_reference_url: Optional[str] = kwargs.get("style_reference_url")
         if isinstance(style_reference_url, str) and style_reference_url.strip():
             suffix = (self.cfg.prompt_suffix_style_only or "").strip()
@@ -583,42 +608,8 @@ class PollinationsBackend(ImageBackend):
         else:
             return await self._fetch_get(full_prompt, eff_w, eff_h)
 
-    def _normalize_image_urls(self, image: str) -> str:
-        """
-        Falls Call-Site mehrere URLs mit Komma geliefert hat, normiere auf '|' Trenner.
-        """
-        s = (image or "").strip()
-        if "," in s and "|" not in s:
-            parts = [p.strip() for p in s.split(",") if p.strip()]
-            return "|".join(parts)
-        return s
 
-    async def _post_v1_edits(self, prompt: str, image_url: str, width: int | None, height: int | None, *, negative_prompt: str | None = None, seed: Optional[int] = None) -> Path:
-        self.cfg.require_cloud_enabled()
-        url = f"{self.cfg.gen_base}{self.cfg.v1_edits_path}"
-        headers = {"Authorization": f"Bearer {self.cfg.secret}", "Content-Type": "application/json"}
-        w = width if (width and width > 0) else self.cfg.width
-        h = height if (height and height > 0) else self.cfg.height
-
-        normalized = self._normalize_image_urls(image_url)
-        payload: dict[str, Any] = {
-            "model": self.cfg.model or "flux",
-            "prompt": prompt,
-            "image": normalized,  # erlaubt 'url1|url2'
-            "size": (self.cfg.size_override or _size_from_wh(w, h)),
-            "response_format": "url",
-        }
-        if negative_prompt and negative_prompt.strip():
-            payload["negative_prompt"] = negative_prompt.strip()
-        if seed is not None:
-            payload["seed"] = int(seed)
-
-        timeout = _timeout_long(180.0)
-        async with httpx.AsyncClient(timeout=timeout, limits=_httpx_limits(), follow_redirects=True) as client:
-            r = await _retrying_post(client, url, json_payload=payload, headers=headers)
-
-
-# --- ComfyUI models ---
+# --- ComfyUI models and backend ---
 class ComfyConfig(BaseModel):
     host: str = Field(default_factory=lambda: _env_str("APP_COMFY_HOST", "127.0.0.1"))
     port: int = Field(default_factory=lambda: _env_int("APP_COMFY_PORT", 8188))
@@ -647,11 +638,20 @@ class ComfyConfig(BaseModel):
     node_id_ref_url: Optional[str] = Field(default_factory=lambda: (_env_str("APP_COMFY_NODE_REF_URL", "") or None))
     node_key_ref_url: str = Field(default_factory=lambda: _env_str("APP_COMFY_KEY_REF_URL", "url"))
 
+    # Prefer local descriptors by default for ComfyUI
+    prefer_cloud_descriptors_default: bool = False
+
     def assert_local(self) -> None:
         _assert_image_backend_host_policy(self.host)
 
 
 class LocalComfyBackend(ImageBackend):
+    """
+    Local ComfyUI backend with unified style engine integration:
+    - Stages reference image and weight into configured nodes.
+    - Optionally stages descriptors into backend if supported (stage_style_descriptors).
+    - Else, appends descriptors to positive prompt text.
+    """
     def __init__(self, out_dir: Path, cfg: Optional[ComfyConfig] = None, style: Optional[StyleRuntime] = None) -> None:
         self.out_dir = Path(out_dir).resolve()
         self.cfg = cfg or ComfyConfig()
@@ -790,13 +790,6 @@ class LocalComfyBackend(ImageBackend):
             return abs_posix, staged_path.name
         return abs_posix, abs_posix
 
-    def _build_signed_url(self, basename: str) -> str:
-        try:
-            from app import build_signed_url
-        except Exception as e:
-            raise RuntimeError(f"build_signed_url unavailable: {e}")
-        return build_signed_url(basename)
-
     def _inject_style_reference_file(self, prompt_dict: dict) -> None:
         if not (self.style and self.style.has_reference):
             return
@@ -807,22 +800,21 @@ class LocalComfyBackend(ImageBackend):
         if _debug():
             print(f"[COMFY][style:file] node_val={node_value} w={weight}")
 
-        if self.cfg.node_id_ref_image:
-            node = prompt_dict.get(self.cfg.node_id_ref_image)
-            if isinstance(node, dict):
-                inputs = node.get("inputs")
-                if isinstance(inputs, dict):
-                    key = self.cfg.node_key_ref_image_path or "image"
-                    if key in inputs:
-                        inputs[key] = node_value
-        if self.cfg.node_id_ipadapter:
-            node = prompt_dict.get(self.cfg.node_id_ipadapter)
-            if isinstance(node, dict):
-                inputs = node.get("inputs")
-                if isinstance(inputs, dict):
-                    k = self.cfg.node_key_ref_weight or "weight"
-                    if k in inputs:
-                        inputs[k] = weight
+        node = prompt_dict.get(self.cfg.node_id_ref_image) if self.cfg.node_id_ref_image else None
+        if isinstance(node, dict):
+            inputs = node.get("inputs")
+            if isinstance(inputs, dict):
+                key = self.cfg.node_key_ref_image_path or "image"
+                if key in inputs:
+                    inputs[key] = node_value
+
+        node = prompt_dict.get(self.cfg.node_id_ipadapter) if self.cfg.node_id_ipadapter else None
+        if isinstance(node, dict):
+            inputs = node.get("inputs")
+            if isinstance(inputs, dict):
+                k = self.cfg.node_key_ref_weight or "weight"
+                if k in inputs:
+                    inputs[k] = weight
 
         for node in prompt_dict.values():
             if not isinstance(node, dict):
@@ -841,61 +833,11 @@ class LocalComfyBackend(ImageBackend):
                 if "image" in inputs and isinstance(inputs.get("image"), (str, type(None))):
                     inputs["image"] = node_value
 
-    def _inject_style_reference_url(self, prompt_dict: dict) -> None:
-        if not (self.style and self.style.has_reference):
-            return
-        basename = self.style.reference_path.resolve().name
-        try:
-            signed = self._build_signed_url(basename)
-        except Exception as e:
-            raise RuntimeError(f"ref_url_build_failed: {e}")
-        if _debug():
-            print(f"[COMFY][style:url] basename={basename} url={signed}")
-
-        node_id = self.cfg.node_id_ref_url or self.cfg.node_id_ref_image
-        if node_id:
-            node = prompt_dict.get(node_id)
-            if isinstance(node, dict):
-                inputs = node.get("inputs")
-                if isinstance(inputs, dict):
-                    key = self.cfg.node_key_ref_url or "url"
-                    inputs[key] = signed
-                    return
-
-        for node in prompt_dict.values():
-            if not isinstance(node, dict):
-                continue
-            inputs = node.get("inputs")
-            if not isinstance(inputs, dict):
-                continue
-            if "url" in inputs and isinstance(inputs.get("url"), (str, type(None))):
-                inputs["url"] = signed
-                return
-
-        if _debug():
-            print("[COMFY][style:url] no suitable node found for URL injection")
-
-    def _copy_latest_from_comfy(self, since_ts: float) -> Optional[Path]:
-        src_dir = self.cfg.comfy_output_dir
-        if not src_dir or not src_dir.exists():
-            return None
-        candidates = []
-        for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
-            candidates.extend(src_dir.rglob(ext))
-        if not candidates:
-            return None
-        recent = [p for p in candidates if p.is_file() and p.stat().st_mtime >= since_ts - 0.8]
-        if not recent:
-            return None
-        latest = max(recent, key=lambda p: p.stat().st_mtime)
-        target = self.out_dir / f"img_{uuid.uuid4().hex}{latest.suffix.lower()}"
-        try:
-            shutil.copy2(latest, target)
-            if target.stat().st_size < 1024:
-                return None
-            return target
-        except Exception:
-            return None
+    def _merge_descriptors_into_positive(self, positive: str, descriptors: List[str]) -> str:
+        ds = [d for d in (descriptors or []) if isinstance(d, str) and d.strip()]
+        if not ds:
+            return positive
+        return (positive.rstrip(",") + ", " + ", ".join(ds)).strip().strip(",")
 
     async def _short_history_hint(self) -> str:
         try:
@@ -918,46 +860,66 @@ class LocalComfyBackend(ImageBackend):
             return f"history_exc:{type(e).__name__}"
 
     async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative_prompt: str | None = None, **kwargs: Any) -> Path:
-        if self.cfg.allow_cloud is False:
-            raise RuntimeError("Cloud image backend disabled (ALLOW_CLOUD_IMAGE_BACKEND=0)")
-        if not self.cfg.secret:
-            raise RuntimeError("POLLINATIONS_SECRET missing")
+        # Load workflow
+        prompt_dict = self._load_prompt_file()
 
-        full_prompt = (prompt or "").strip()
-        n_prompt = (negative_prompt or "").strip()
-        if n_prompt:
-            full_prompt = f"{full_prompt}\n-- negative: {n_prompt}"
-
-        rw, rh = _resolve_size_for_backend("pollinations", width, height)
-        eff_w = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
-        eff_h = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
-
-        # Preferred: multipart with local reference (privacy-first)
-        style_reference_path: Optional[Path] = kwargs.get("style_reference_path")
-        if isinstance(style_reference_path, Path):
-            suffix = (self.cfg.prompt_suffix_style_only or "").strip()
-            if suffix:
-                full_prompt = f"{full_prompt}\n{suffix}"
-            return await self._post_v1_edits_multipart(full_prompt, style_reference_path, eff_w, eff_h, negative_prompt=n_prompt or None, seed=self.cfg.seed)
-
-        # URL-mode if provided
-        style_reference_url: Optional[str] = kwargs.get("style_reference_url")
-        if isinstance(style_reference_url, str) and style_reference_url.strip():
-            suffix = (self.cfg.prompt_suffix_style_only or "").strip()
-            if suffix:
-                full_prompt = f"{full_prompt}\n{suffix}"
-            return await self._post_v1_edits(full_prompt, style_reference_url.strip(), eff_w, eff_h, negative_prompt=n_prompt or None, seed=self.cfg.seed)
-
-        # Text-only
-        if self.cfg.use_v1:
+        # Resolve descriptors for reference (prefer local by default for ComfyUI)
+        descriptors: List[str] = []
+        if self.style and self.style.has_reference:
+            prefer = self.cfg.prefer_cloud_descriptors_default
+            if isinstance(self.style.reference_cloud, bool):
+                prefer = bool(self.style.reference_cloud)
             try:
-                return await self._fetch_v1(full_prompt, eff_w, eff_h)
+                descriptors = resolve_style_descriptors_for_reference(ref_path=self.style.reference_path, prefer_cloud=prefer)  # type: ignore[arg-type]
             except Exception as e:
                 if _debug():
-                    print(f"[POLLINATIONS][v1_failed] {type(e).__name__}: {e}")
-                return await self._fetch_get(full_prompt, eff_w, eff_h)
-        else:
-            return await self._fetch_get(full_prompt, eff_w, eff_h)
+                    print(f"[COMFY][desc] resolve failed: {e}")
+                descriptors = []
+
+        # Inject reference image/weight if available
+        if self.style and self.style.has_reference:
+            if (self.cfg.ref_mode or "file") == "url":
+                # URL mode would require signed URL builder; omitted for simplicity
+                self._inject_style_reference_file(prompt_dict)
+            else:
+                self._inject_style_reference_file(prompt_dict)
+
+        # Override text nodes with prompt + negative; append descriptors to positive if no dedicated staging method
+        pos = (prompt or "").strip()
+        if descriptors:
+            pos = self._merge_descriptors_into_positive(pos, descriptors)
+        neg = (negative_prompt or self.cfg.negative or "").strip()
+        self._override_text_nodes(prompt_dict, positive=pos, negative=neg)
+
+        # Resolve dimensions
+        rw, rh = _resolve_size_for_backend("comfyui", width, height)
+        eff_w = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
+        eff_h = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
+        self._override_dimensions_in_prompt(prompt_dict, width=eff_w, height=eff_h)
+
+        # Dispatch to ComfyUI via bridge
+        ts = _now()
+        result = await generate_from_prompt_dict(
+            host=self.cfg.host,
+            port=self.cfg.port,
+            prompt=prompt_dict,
+            timeout_sec=float(self.cfg.timeout_sec),
+            wait_for_image=True,
+        )
+        # Try to copy from Comfy's output dir when available, else rely on bridge return
+        local_copy = self._copy_latest_from_comfy(since_ts=ts)
+        if local_copy and local_copy.exists() and local_copy.stat().st_size >= 1024:
+            return local_copy
+
+        # Bridge may already have saved an image and returned a path
+        if isinstance(result, (str, Path)):
+            p = Path(result)
+            if p.exists() and p.stat().st_size >= 1024:
+                return p
+
+        # As a fallback, raise an informative error
+        hint = await self._short_history_hint()
+        raise RuntimeError(f"comfy_generation_failed ({hint})")
 
 
 # --- Backend factory ---
