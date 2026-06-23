@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -256,6 +257,7 @@ assert_local(OLLAMA_HOST)
 def _assert_image_backend_host() -> None:
     """
     Enforce local image backends unless explicitly allowed via APP_ALLOW_REMOTE_BACKENDS.
+    If remote is allowed, restrict by whitelist later.
     """
     allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
     comfy_host = _env_str("APP_COMFY_HOST", "127.0.0.1")
@@ -267,6 +269,9 @@ def _assert_image_backend_host() -> None:
             )
 
 _assert_image_backend_host()
+
+# Remote Comfy policy/whitelist (used only if APP_ALLOW_REMOTE_BACKENDS=1)
+COMFY_REMOTE_WHITELIST = [s.strip() for s in os.getenv("APP_COMFY_REMOTE_WHITELIST", "").split(",") if s.strip()]
 
 WARMUP_ENABLE = _env_bool01("APP_OLLAMA_WARMUP_ENABLE", 1)
 WARMUP_PROMPT = _env_str("APP_OLLAMA_WARMUP_PROMPT", "Sag Hallo auf Deutsch.")
@@ -467,6 +472,20 @@ class StyleSettingsPayload(BaseModel):
     reference_id: Optional[str] = None
     reference_strength: float = Field(default=0.6, ge=0.0, le=1.0)
 
+class StyleRefOnPayload(BaseModel):
+    # Activate a stored reference by its reference_id (filename in STYLE_REFS_DIR)
+    reference_id: str = Field(..., min_length=1)
+    reference_strength: float = Field(default=0.6, ge=0.0, le=1.0)
+    reference_cloud: Optional[bool] = None  # optional hint for cloud descriptor preference
+
+class StyleRefOnResponse(BaseModel):
+    ok: bool
+    reference_id: Optional[str] = None
+    error: Optional[str] = None
+
+class StyleRefOffResponse(BaseModel):
+    ok: bool
+
 class ReferenceUploadResponse(BaseModel):
     ok: bool
     reference_id: Optional[str] = None
@@ -493,6 +512,12 @@ class WorkflowSelect(BaseModel):
         if not re.fullmatch(r"[A-Za-z0-9._\\-]+", v):
             raise ValueError("Illegal characters in filename")
         return v
+
+# NEW: Comfy target toggle
+class ComfyTargetReq(BaseModel):
+    target: Literal["local", "remote"]
+    host: Optional[str] = None
+    port: Optional[int] = None
 
 # ---------- Audio utils ----------
 
@@ -691,6 +716,10 @@ def _timeout_normal() -> httpx.Timeout:
     t = min(max(5.0, OLLAMA_TIMEOUT_SEC), 120.0)
     return httpx.Timeout(connect=5.0, read=t, write=5.0, pool=5.0)
 
+def _debug_enabled() -> bool:
+    v = (os.getenv("APP_DEBUG", "0") or "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
 # ---------- Ollama helpers ----------
 
 def _ollama_url(path: str) -> str:
@@ -785,6 +814,11 @@ class PipelineState:
     audio_stream: Any = None
     audio_stopped_broadcasted: bool = False
     style_cfg: StyleConfig = field(default_factory=StyleConfig)
+    # NEW: Comfy target/host/port policy state
+    comfy_target: Literal["local", "remote"] = "local"
+    comfy_host: str = _env_str("APP_COMFY_HOST", "127.0.0.1")
+    comfy_port: int = _env_int("APP_COMFY_PORT", 8188)
+    comfy_whitelist: List[str] = field(default_factory=lambda: COMFY_REMOTE_WHITELIST.copy())
 
 STATE = PipelineState()
 STOP_DEBOUNCE_SEC = float(os.getenv("APP_STOP_DEBOUNCE_SEC", "2.0") or "2.0")
@@ -898,6 +932,8 @@ def _log_effective_config() -> None:
         f"interval={LLM_INTERVAL_SEC}s model={OLLAMA_MODEL}",
         "| image:",
         f"backend={STATE.image_backend_name} allow_cloud={STATE.allow_cloud} out={OUTPUT_DIR} default={APP_IMAGE_WIDTH}x{APP_IMAGE_HEIGHT}",
+        "| comfy:",
+        f"target={STATE.comfy_target} host={STATE.comfy_host}:{STATE.comfy_port}",
         "| style:",
         f"preset={STATE.style_cfg.style_preset} use_ref={STATE.style_cfg.use_reference}",
         "| sse:",
@@ -906,31 +942,47 @@ def _log_effective_config() -> None:
 
 # ---------- Runtime-aware backend wrapper ----------
 
+def _apply_env_for_backend() -> None:
+    """
+    Apply current STATE comfy target/host/port into environment variables,
+    so build_image_backend() picks them up consistently.
+    """
+    os.environ["IMAGE_BACKEND"] = STATE.image_backend_name
+    os.environ["ALLOW_CLOUD_IMAGE_BACKEND"] = "1" if STATE.allow_cloud else "0"
+
+    # Reflect comfy host/port to expected environment keys used by your backend
+    os.environ["APP_COMFY_HOST"] = STATE.comfy_host
+    os.environ["APP_COMFY_PORT"] = str(STATE.comfy_port)
+
 def build_image_backend_rt(backend_name: Optional[str] = None, allow_cloud: Optional[bool] = None) -> ImageBackend:
     """
     Rebuild the image backend at runtime (without process restart).
-    Temporarily sets env vars to reuse build_image_backend factory behavior.
+    Mirrors comfy host/port and cloud allow into env for factory usage.
     """
     wanted_backend = (backend_name or STATE.image_backend_name or _env_str("IMAGE_BACKEND", "comfyui")).lower()
     allowed = (STATE.allow_cloud if allow_cloud is None else bool(allow_cloud))
-    old_backend = os.environ.get("IMAGE_BACKEND")
-    old_allow = os.environ.get("ALLOW_CLOUD_IMAGE_BACKEND")
+
+    # Preserve previous env to restore after build
+    snap = {
+        "IMAGE_BACKEND": os.environ.get("IMAGE_BACKEND"),
+        "ALLOW_CLOUD_IMAGE_BACKEND": os.environ.get("ALLOW_CLOUD_IMAGE_BACKEND"),
+        "APP_COMFY_HOST": os.environ.get("APP_COMFY_HOST"),
+        "APP_COMFY_PORT": os.environ.get("APP_COMFY_PORT"),
+    }
     try:
-        os.environ["IMAGE_BACKEND"] = wanted_backend
-        os.environ["ALLOW_CLOUD_IMAGE_BACKEND"] = "1" if allowed else "0"
+        STATE.image_backend_name = wanted_backend
+        STATE.allow_cloud = allowed
+        _apply_env_for_backend()
         be = build_image_backend()
         return be
     finally:
-        if old_backend is None:
-            with contextlib.suppress(Exception):
-                del os.environ["IMAGE_BACKEND"]
-        else:
-            os.environ["IMAGE_BACKEND"] = old_backend
-        if old_allow is None:
-            with contextlib.suppress(Exception):
-                del os.environ["ALLOW_CLOUD_IMAGE_BACKEND"]
-        else:
-            os.environ["ALLOW_CLOUD_IMAGE_BACKEND"] = old_allow
+        # Restore original env to avoid unintended side-effects elsewhere
+        for k, v in snap.items():
+            if v is None:
+                with contextlib.suppress(Exception):
+                    del os.environ[k]
+            else:
+                os.environ[k] = v
 
 # ---------- Workflow helpers ----------
 
@@ -1049,8 +1101,8 @@ def _patch_workflow_with_reference_if_needed(workflow_json: Dict[str, Any]) -> D
         print(f"[STYLE] reference file missing for id={sc.reference_id}")
         return workflow_json
 
-    comfy_host = os.getenv("APP_COMFY_HOST", "127.0.0.1").strip()
-    comfy_port = int(os.getenv("APP_COMFY_PORT", "8188") or "8188")
+    comfy_host = os.getenv("APP_COMFY_HOST", STATE.comfy_host).strip()
+    comfy_port = int(os.getenv("APP_COMFY_PORT", str(STATE.comfy_port)) or STATE.comfy_port)
 
     try:
         patched = apply_ip_adapter_to_workflow(
@@ -1415,6 +1467,12 @@ async def lifespan(app: FastAPI):
     _log_effective_config()
     init_whisper_model()
 
+    # Sync initial comfy host/port from ENV into STATE
+    STATE.comfy_host = _env_str("APP_COMFY_HOST", STATE.comfy_host)
+    STATE.comfy_port = _env_int("APP_COMFY_PORT", STATE.comfy_port)
+    # Determine initial comfy_target based on strict policy
+    STATE.comfy_target = "local" if STATE.comfy_host in {"127.0.0.1", "localhost"} else "remote"
+
     global BACKEND
     try:
         _assert_image_backend_host()
@@ -1582,6 +1640,16 @@ async def get_config():
         "secret_set": bool(APP_REF_SECRET),
     }
 
+    # Comfy target diagnostics (host/port shown only in debug)
+    comfy_block = {
+        "enabled": bool(is_comfy and not comfy_disabled),
+        "disabled_via_env": comfy_disabled,
+        "comfyui_target": STATE.comfy_target,
+    }
+    if _debug_enabled():
+        comfy_block["host"] = STATE.comfy_host
+        comfy_block["port"] = STATE.comfy_port
+
     return {
         "env_file": ENV_PATH or "(env vars only)",
         "audio": {"device_pref": AUDIO_DEVICE_PREF, "sample_rate": SAMPLE_RATE, "frame_ms": FRAME_MS, "stream_latency_sec": APP_STREAM_LATENCY_SEC},
@@ -1602,10 +1670,7 @@ async def get_config():
             "negative_prompt": STATE.negative_prompt,
             "active_workflow": STATE.active_workflow,
             "show_workflow_selector": show_workflow_selector,
-            "comfy": {
-                "enabled": bool(is_comfy and not comfy_disabled),
-                "disabled_via_env": comfy_disabled
-            }
+            "comfy": comfy_block,
         },
         "style": style_ui,
         "style_ref_url": cfg_ref,
@@ -1643,6 +1708,73 @@ async def api_select_workflow(payload: WorkflowSelect):
 
     await broadcast("status", f"workflow:{STATE.active_workflow}")
     return {"ok": True, "active_workflow": STATE.active_workflow}
+
+# ---------- NEW: Comfy target switch (local/remote) ----------
+
+def _host_in_whitelist(host: str, rules: List[str]) -> bool:
+    """
+    Check host against whitelist entries: CIDR ranges or literal hostnames/IPs.
+    """
+    h = (host or "").strip()
+    if not h:
+        return False
+    # Try IP logic first
+    try:
+        ip = ipaddress.ip_address(h)
+        for r in rules:
+            r = r.strip()
+            if not r:
+                continue
+            try:
+                net = ipaddress.ip_network(r, strict=False)
+                if ip in net:
+                    return True
+            except ValueError:
+                # not a CIDR, checked later as literal
+                pass
+        # literal equality
+        return h in rules
+    except ValueError:
+        # not an IP: literal name check only
+        return h in rules
+
+@app.post("/api/settings/comfy_target")
+async def api_comfy_target(req: ComfyTargetReq):
+    """
+    Switch between local and remote ComfyUI target and set host/port if remote.
+    Respects APP_ALLOW_REMOTE_BACKENDS and APP_COMFY_REMOTE_WHITELIST.
+    """
+    allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
+    if req.target == "local":
+        STATE.comfy_target = "local"
+        STATE.comfy_host = "127.0.0.1"
+        # Keep current port unless environment overrides
+        STATE.comfy_port = _env_int("APP_COMFY_PORT", STATE.comfy_port)
+    else:
+        if not allow_remote:
+            return JSONResponse({"ok": False, "error": "remote_not_allowed"}, status_code=403)
+        host = (req.host or STATE.comfy_host or "").strip()
+        port = int(req.port or STATE.comfy_port or 8188)
+        if not host:
+            return JSONResponse({"ok": False, "error": "missing_host"}, status_code=400)
+        # Whitelist enforcement
+        if not _host_in_whitelist(host, STATE.comfy_whitelist):
+            return JSONResponse({"ok": False, "error": "host_not_whitelisted"}, status_code=403)
+        STATE.comfy_target = "remote"
+        STATE.comfy_host = host
+        STATE.comfy_port = port
+
+    # Rebuild backend so new target applies immediately
+    try:
+        _rebuild_backend()
+        try:
+            _apply_active_workflow_if_local()
+        except Exception as e:
+            print(f"[WF] apply after comfy_target switch failed: {e}")
+        await broadcast("status", f"comfy_target:{STATE.comfy_target}")
+        return {"ok": True, "target": STATE.comfy_target, "host": STATE.comfy_host, "port": STATE.comfy_port}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
 
 # ---------- SSE: /events ----------
 
@@ -1911,6 +2043,96 @@ async def reference_thumbnail(id: str = Query(..., min_length=1), size: int = Qu
     except Exception as e:
         return JSONResponse({"error": f"thumb_error:{e}"}, status_code=500)
 
+
+# --- ADD endpoints close to "Style settings & reference upload" section ---
+
+@app.post("/api/style/reference/on", response_model=StyleRefOnResponse)
+async def api_style_reference_on(p: StyleRefOnPayload):
+    """
+    Activate an existing reference image by id and set strength.
+    Persist to disk and refresh backend style runtime.
+    """
+    try:
+        rid = (p.reference_id or "").strip()
+        if not rid:
+            return StyleRefOnResponse(ok=False, error="missing_reference_id")
+        # Validate presence in store
+        store = ReferenceStore(STYLE_REFS_DIR)
+        path = store.get_path(rid)
+        if not path or not Path(path).exists():
+            return StyleRefOnResponse(ok=False, error="not_found")
+
+        sc = STATE.style_cfg
+        sc.use_reference = True
+        sc.reference_id = rid
+        sc.reference_strength = float(max(0.0, min(1.0, p.reference_strength)))
+        # Optional cloud preference flag (style_engine may use it)
+        if p.reference_cloud is not None:
+            try:
+                sc.reference_cloud = bool(p.reference_cloud)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+        _save_style_cfg(sc)
+
+        # Refresh backend staging (best-effort)
+        if BACKEND is not None:
+            try:
+                prepare_backend_style(BACKEND, STATE.style_cfg, STYLE_REFS_DIR)
+            except Exception as e:
+                print(f"[STYLE] prepare_backend_style(on) failed: {e}")
+
+        await broadcast("status", "style_reference:on")
+        return StyleRefOnResponse(ok=True, reference_id=rid)
+    except Exception as e:
+        return StyleRefOnResponse(ok=False, error=f"{e}")
+
+@app.post("/api/style/reference/off", response_model=StyleRefOffResponse)
+async def api_style_reference_off():
+    """
+    Deactivate reference usage cleanly (clear both flag and id).
+    Persist to disk and refresh backend style runtime (which will no-op).
+    """
+    try:
+        sc = STATE.style_cfg
+        sc.use_reference = False
+        sc.reference_id = None
+        _save_style_cfg(sc)
+
+        if BACKEND is not None:
+            try:
+                prepare_backend_style(BACKEND, STATE.style_cfg, STYLE_REFS_DIR)
+            except Exception as e:
+                print(f"[STYLE] prepare_backend_style(off) failed: {e}")
+
+        await broadcast("status", "style_reference:off")
+        return StyleRefOffResponse(ok=True)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
+
+@app.get("/api/style/reference/thumbnail")
+async def api_style_reference_thumbnail():
+    """
+    UI helper: return a thumbnail URL for the active reference, or {thumbnail:null} when off/missing.
+    This avoids stale URL retry loops on the client.
+    """
+    sc = STATE.style_cfg
+    if not sc or not getattr(sc, "use_reference", False) or not getattr(sc, "reference_id", None):
+        return {"thumbnail": None}
+    rid = getattr(sc, "reference_id", None)
+    try:
+        store = ReferenceStore(STYLE_REFS_DIR)
+        p = store.get_path(rid)
+        if not p or not Path(p).exists():
+            return {"thumbnail": None}
+        # Use the static mount path for style refs (read-only)
+        # Client can request /style_refs/<rid> directly, or use /api/reference/thumbnail for downscaled PNG
+        # We return the read-only mount URI here for simplicity.
+        return {"thumbnail": f"/style_refs/{rid}"}
+    except Exception:
+        return {"thumbnail": None}
+
+
 # ---------- Reference file delivery (local signed URLs) ----------
 
 @app.get("/ref/{filename}")
@@ -2077,9 +2299,10 @@ def _rebuild_backend(force_name: Optional[str] = None) -> ImageBackend:
     global BACKEND
     if force_name:
         STATE.image_backend_name = force_name.lower()
-    new_backend = build_image_backend_rt(backend_name=STATE.image_backend_name, allow_cloud=STATE.allow_cloud)
-    BACKEND = new_backend
-    return new_backend
+
+    # Ensure env reflects current comfy host/port before factory build
+    BACKEND = build_image_backend_rt(backend_name=STATE.image_backend_name, allow_cloud=STATE.allow_cloud)
+    return BACKEND
 
 class ImageAllowCloudReq(BaseModel):
     allow: Optional[bool] = None
@@ -2203,4 +2426,3 @@ if __name__ == "__main__":
     host = os.getenv("APP_BIND_HOST", "127.0.0.1")
     port = int(os.getenv("APP_BIND_PORT", "8080"))
     uvicorn.run("app:app", host=host, port=port, reload=False)
-

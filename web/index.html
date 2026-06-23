@@ -104,8 +104,9 @@
           <!-- Backend -->
           <div class="row" style="margin-bottom:8px;">
             <label for="backend-select" style="min-width:120px;" id="label-backend">Bild-Backend</label>
-            <select id="backend-select" title="Image-Backend wählen">
-              <option value="comfyui">ComfyUI (lokal)</option>
+            <select id="backend-select" title="Choose image backend">
+              <option value="comfyui_local">ComfyUI (lokal)</option>
+              <option value="comfyui_remote">ComfyUI (remote)</option>
               <option value="pollinations">Pollinations (Cloud)</option>
             </select>
             <button id="btn-apply-backend">Anwenden</button>
@@ -160,7 +161,7 @@
             <button id="btn-apply-ref-strength" title="Referenzstärke übernehmen">Übernehmen</button>
           </div>
 
-          <!-- NEW: Cloud vision toggle -->
+          <!-- Cloud vision toggle (shown only if a reference is active) -->
           <div id="ref-cloud-row" class="ref-controls" style="margin-bottom:8px; display:none;">
             <label for="ref-cloud">Use Cloud Vision for style descriptors</label>
             <input id="ref-cloud" type="checkbox" />
@@ -189,7 +190,7 @@
           </div>
 
           <!-- Negative Prompt -->
-          <div class="inline-input-line" style="margin-bottom:8px%;">
+          <div class="inline-input-line" style="margin-bottom:8%;">
             <input id="neg-input" type="text" placeholder="Negativer Prompt (z. B. niedrige Qualität, verschwommen, fehlerhafte Anatomie)" />
             <button id="btn-apply-neg" title="Negativen Prompt anwenden">Übernehmen</button>
           </div>
@@ -441,6 +442,14 @@
       }
 
       syncRefThumbTitle();
+
+      // Sync backend option labels with current UI language
+      const optLocal = document.querySelector('#backend-select option[value="comfyui_local"]');
+      const optRemote = document.querySelector('#backend-select option[value="comfyui_remote"]');
+      const optCloud = document.querySelector('#backend-select option[value="pollinations"]');
+      if (optLocal) optLocal.textContent = (LANG === 'de') ? 'ComfyUI (lokal)' : 'ComfyUI (local)';
+      if (optRemote) optRemote.textContent = (LANG === 'de') ? 'ComfyUI (remote)' : 'ComfyUI (remote)';
+      if (optCloud) optCloud.textContent = 'Pollinations (Cloud)';
     }
 
     langSelect.addEventListener('change', ()=>{ LANG = langSelect.value; localStorage.setItem('ui_lang', LANG); applyI18N(); });
@@ -486,7 +495,7 @@
     const refDenoiseVal = document.getElementById('ref-denoise-val');
     const btnApplyRefStrength = document.getElementById('btn-apply-ref-strength');
 
-    // NEW: Cloud vision toggle elements
+    // Cloud vision toggle elements
     const refCloudRow = document.getElementById('ref-cloud-row');
     const refCloud = document.getElementById('ref-cloud');
     const btnApplyRefCloud = document.getElementById('btn-apply-ref-cloud');
@@ -728,7 +737,7 @@
       return { width:w, height:h };
     }
 
-    // Plan
+    // Plan via LLM
     document.getElementById('btn-plan').addEventListener('click', async ()=>{
       const text = document.getElementById('plan-input').value.trim();
       if(!text) return;
@@ -748,7 +757,7 @@
       finally{ btn.disabled=false; }
     });
 
-    // Direct Generate (server-side style + descriptors)
+    // Direct Generate
     document.getElementById('btn-direct').addEventListener('click', async ()=>{
       const prompt = document.getElementById('plan-input').value.trim();
       const negative = document.getElementById('neg-input').value.trim();
@@ -777,7 +786,6 @@
       if (styleCfg && styleCfg.use_reference && styleCfg.reference_id) {
         payload.use_reference = true;
         payload.reference_id = styleCfg.reference_id;
-        // Cloud vision usage is saved server-side; the backend decides preference per backend.
       } else {
         payload.use_reference = false;
       }
@@ -823,7 +831,7 @@
       }
     });
 
-    // Upload UX
+    // Upload UX for style reference
     document.getElementById('btn-upload-ref').addEventListener('click', ()=>{ const f = document.getElementById('ref-file'); if(f) f.click(); });
 
     document.getElementById('ref-file').addEventListener('change', async ()=>{
@@ -882,7 +890,7 @@
       }
     });
 
-    // NEW: Cloud vision UI logic
+    // Cloud vision UI logic
     function syncRefCloudUI(visible){
       if(!refCloudRow) return;
       refCloudRow.style.display = visible ? '' : 'none';
@@ -913,6 +921,19 @@
     }
 
     // Backend switch
+    function normalizeBackendForApi(value){
+      // Map UI values to API contract expected by app.py: "comfyui" | "pollinations"
+      if(value === 'pollinations') return 'pollinations';
+      // Any comfy variant maps to 'comfyui'
+      return 'comfyui';
+    }
+    function chooseUiValueForConfig(backendFromConfig){
+      // Map server value back to a reasonable UI selection
+      if(backendFromConfig === 'pollinations') return 'pollinations';
+      // Default to local comfy for display; advanced users can pick remote
+      return 'comfyui_local';
+    }
+
     async function ensureCloudAllowed(){
       try{
         const r = await fetch('/api/settings/image_allow_cloud', {
@@ -924,8 +945,8 @@
     }
 
     document.getElementById('btn-apply-backend').addEventListener('click', async ()=>{
-      const backend = document.getElementById('backend-select').value;
-      const backendWarn = document.getElementById('backend-warn');
+      const uiBackend = document.getElementById('backend-select').value;
+      const backend = normalizeBackendForApi(uiBackend);
       const btn = document.getElementById('btn-apply-backend');
       backendWarn.style.display = 'none';
       btn.disabled = true;
@@ -960,7 +981,7 @@
       }
     });
 
-    // ---- Workflow helpers (unchanged) ----
+    // Workflow helpers
 
     function wfBasename(s){
       if(!s) return '';
@@ -1215,7 +1236,7 @@
       });
     }
 
-    // Initial config
+    // Initial config and UI bootstrap
     const widthInputEl = document.getElementById('width-input');
     const heightInputEl = document.getElementById('height-input');
 
@@ -1231,8 +1252,15 @@
         document.getElementById('poll-pill').textContent = `Images: ${j?.image?.backend || '?'}`;
         document.getElementById('sr-pill').textContent = `SR: ${j?.audio?.sample_rate || '?'}`;
 
-        const current = (j?.image?.backend || 'comfyui').toLowerCase();
-        document.getElementById('backend-select').value = current === 'pollinations' ? 'pollinations' : 'comfyui';
+        // Map server backend to UI selection
+        const backendConfig = (j?.image?.backend || 'comfyui');
+        const dd = document.getElementById('backend-select');
+        dd.value = chooseUiValueForConfig(backendConfig);
+
+        // Optionally disable cloud entry if server disallows cloud usage
+        const cloudAllowed = (j?.image?.cloud_allowed !== false);
+        const cloudOpt = document.querySelector('#backend-select option[value="pollinations"]');
+        if (cloudOpt) cloudOpt.disabled = !cloudAllowed;
 
         const w = Number(j?.image?.current_width ?? j?.image?.width_default ?? 512);
         const h = Number(j?.image?.current_height ?? j?.image?.height_default ?? 512);
@@ -1264,15 +1292,14 @@
         const sVal = (typeof styleCfg.reference_strength === 'number') ? styleCfg.reference_strength : 0.6;
         syncRefStrengthUI(hasRef, sVal);
 
-        // Cloud vision UI sync
+        // Cloud vision UI sync and hint per backend
         syncRefCloudUI(hasRef);
         if (typeof styleCfg.reference_cloud === 'boolean') {
           refCloud.checked = !!styleCfg.reference_cloud;
         } else {
           refCloud.checked = false;
         }
-        // Show hint about default behavior per backend (informational only)
-        const hint = (current === 'pollinations')
+        const hint = (backendConfig === 'pollinations')
           ? 'Default: cloud vision ON (descriptors preferred from Vision).'
           : 'Default: cloud vision OFF (local descriptors preferred).';
         refCloudHint.textContent = hint;
