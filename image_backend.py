@@ -1,6 +1,8 @@
 # slAIdshow : image_backend.py
 from __future__ import annotations
 
+# Comments strictly in English
+
 import asyncio
 import ipaddress
 import json
@@ -15,10 +17,11 @@ from typing import Optional, Set, Any, Tuple, Dict, List
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
-from comfyui_bridge import generate_from_prompt_dict
+# Bridge import: keep the module name exactly as provided by the project
+# The bridge returns List[Path] and already handles /prompt, /history polling, and image downloads.
+from comfyui_bridge import generate_from_prompt_dict  # type: ignore
 
-# Import unified style engine helpers (cloud vision + local descriptors)
-# Comments strictly in English
+# Unified style engine helpers (cloud vision + local descriptors)
 try:
     from style_engine import (
         resolve_style_descriptors_for_reference,
@@ -28,7 +31,7 @@ try:
         _env_bool01 as se_env_bool01,
     )
 except Exception:
-    # Fallback in case style_engine is not yet available at import time
+    # Fallbacks if style_engine is not available at import time
     def resolve_style_descriptors_for_reference(*, ref_path: Path, prefer_cloud: bool) -> List[str]:
         return []
     def se_env_str(k: str, d: str = "") -> str:
@@ -48,12 +51,12 @@ except Exception:
         return v in {"1", "true", "yes", "on"}
 
 
-# --- Debug flag (optional minimal logging) ---
+# ---------- Debug flag ----------
 def _debug() -> bool:
     return (os.getenv("APP_IMAGE_BACKEND_DEBUG", "0") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-# --- Environment helpers (reuse style_engine variants for consistency) ---
+# ---------- Environment helpers (reuse style_engine for consistency) ----------
 def _env_str(k: str, d: str) -> str:
     return se_env_str(k, d)
 
@@ -67,30 +70,24 @@ def _env_bool01(k: str, d: int = 0) -> bool:
     return se_env_bool01(k, d)
 
 
-# --- HTTP client tuning ---
+# ---------- HTTP client tuning (used for availability checks only) ----------
 def _httpx_limits() -> httpx.Limits:
     return httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=30.0)
 
 def _timeout_short() -> httpx.Timeout:
     return httpx.Timeout(connect=3.0, read=6.0, write=4.0, pool=4.0)
 
-def _timeout_long(total: float) -> httpx.Timeout:
-    total = max(10.0, min(total, 240.0))
-    return httpx.Timeout(connect=8.0, read=total, write=8.0, pool=8.0)
 
-
-# --- Utility ---
-def _clamp_dim(v: Optional[int]) -> Optional[int]:
-    if v is None:
-        return None
-    x = max(64, min(2048, int(v)))
-    return x - (x % 8)
+# ---------- Utilities ----------
+def _clamp8(v: int) -> int:
+    v = max(64, min(4096, int(v)))
+    return v - (v % 8)
 
 def _now() -> float:
     return time.time()
 
-
 def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
+    """Check whether IP is included in any of the comma/space separated CIDR subnets."""
     try:
         ip_addr = ipaddress.ip_address(ip)
     except Exception:
@@ -105,8 +102,8 @@ def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
             continue
     return False
 
-
 def _assert_image_backend_host_policy(host: str) -> None:
+    """Enforce privacy policy for ComfyUI host usage."""
     if host in {"127.0.0.1", "localhost"}:
         return
     allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
@@ -118,15 +115,10 @@ def _assert_image_backend_host_policy(host: str) -> None:
     try:
         ipaddress.ip_address(host)
     except ValueError:
+        # If host is not a raw IP, leave subnet validation to the bridge's resolver
         return
     if not _is_in_allowed_subnets(host, subnets):
         raise AssertionError(f"Remote host {host} not in allowed subnets ({subnets})")
-
-
-def _clamp8(v: int) -> int:
-    v = max(64, min(4096, int(v)))
-    return v - (v % 8)
-
 
 def _env_opt_int(name: str) -> Optional[int]:
     raw = (os.getenv(name) or "").strip()
@@ -137,8 +129,8 @@ def _env_opt_int(name: str) -> Optional[int]:
     except ValueError:
         return None
 
-
 def _resolve_size_for_backend(backend_name: str, req_w: Optional[int], req_h: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
+    """Resolve width/height with per-backend and global fallbacks; clamp to multiples of 8."""
     if isinstance(req_w, int) and req_w > 0 and isinstance(req_h, int) and req_h > 0:
         return _clamp8(req_w), _clamp8(req_h)
     gw = _env_opt_int("APP_IMAGE_WIDTH")
@@ -159,12 +151,12 @@ def _resolve_size_for_backend(backend_name: str, req_w: Optional[int], req_h: Op
     return None, None
 
 
-# --- Style runtime ---
+# ---------- Style runtime ----------
 @dataclass
 class StyleRuntime:
     reference_path: Optional[Path] = None
     reference_strength: float = 0.6
-    # Whether UI requests cloud-vision for descriptors (server uses per-backend defaults if None)
+    # Whether UI requests cloud-vision for descriptors (server will prefer per-backend default if None)
     reference_cloud: Optional[bool] = None
 
     @property
@@ -172,13 +164,56 @@ class StyleRuntime:
         return self.reference_path is not None and self.reference_path.exists() and self.reference_path.is_file()
 
 
-# --- Backend interface ---
+# ---------- Backend interface ----------
 class ImageBackend:
     async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative_prompt: str | None = None, **kwargs: Any) -> Path:
         raise NotImplementedError
 
 
-# --- Retry helpers (Pollinations) ---
+# ---------- Pollinations (cloud) backend, unchanged logic except comments ----------
+class _PollinationsV1Datum(BaseModel):
+    b64_json: Optional[str] = None
+    url: Optional[str] = None
+    revised_prompt: Optional[str] = None
+
+class _PollinationsV1Response(BaseModel):
+    created: Optional[int] = None
+    data: list[_PollinationsV1Datum] = Field(default_factory=list)
+
+class PollinationsConfig(BaseModel):
+    api_base: str = Field(default_factory=lambda: _env_str("POLLINATIONS_API_BASE", "https://gen.pollinations.ai").rstrip("/"))
+    gen_base: str = Field(default_factory=lambda: _env_str("POLLINATIONS_GEN_BASE", "https://gen.pollinations.ai").rstrip("/"))
+    secret: str = Field(default_factory=lambda: _env_str("POLLINATIONS_SECRET", ""))
+    model: Optional[str] = Field(default_factory=lambda: _env_str("POLLINATIONS_MODEL", "") or None)
+    width: int = Field(default_factory=lambda: _env_int("POLLINATIONS_WIDTH", 1024))
+    height: int = Field(default_factory=lambda: _env_int("POLLINATIONS_HEIGHT", 1024))
+    nologo: bool = Field(default_factory=lambda: _env_bool01("POLLINATIONS_NOLOGO", 1))
+    seed_raw: Optional[str] = Field(default_factory=lambda: os.getenv("POLLINATIONS_SEED"))
+    use_v1: bool = Field(default_factory=lambda: _env_bool01("POLLINATIONS_USE_V1", 1))
+    size_override: str = Field(default_factory=lambda: _env_str("POLLINATIONS_SIZE", ""))
+    allow_cloud: bool = Field(default_factory=lambda: _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0))
+    v1_edits_path: str = Field(default_factory=lambda: _env_str("POLLINATIONS_V1_IMAGES_EDITS_ENDPOINT", "/v1/images/edits"))
+    v1_generations_path: str = Field(default_factory=lambda: _env_str("POLLINATIONS_V1_IMAGES_GENERATIONS_ENDPOINT", "/v1/images/generations"))
+    prompt_suffix_style_only: str = Field(default_factory=lambda: _env_str("POLLINATIONS_STYLE_SUFFIX", "adopt the exact visual style, colors, and textures from the reference image; only transfer style, not content."))
+    # Preference: Pollinations prefers cloud vision by default
+    prefer_cloud_descriptors_default: bool = True
+
+    @property
+    def seed(self) -> Optional[int]:
+        if self.seed_raw is None:
+            return None
+        try:
+            return int(self.seed_raw)
+        except Exception:
+            return None
+
+    def require_cloud_enabled(self) -> None:
+        if not self.allow_cloud:
+            raise RuntimeError("Cloud image backend not allowed (set ALLOW_CLOUD_IMAGE_BACKEND=1 to enable)")
+        if not self.secret:
+            raise RuntimeError("POLLINATIONS_SECRET missing in environment")
+
+# Retry helpers for cloud backend
 async def _retrying_post(
     client: httpx.AsyncClient,
     url: str,
@@ -242,8 +277,6 @@ async def _retrying_get(
             delay *= 1.8
     raise RuntimeError(f"pollinations_get_failed after {max_attempts} attempts: {last_exc}")
 
-
-# --- Small helpers ---
 def _mime_for(name: str) -> str:
     n = name.lower()
     if n.endswith(".jpg") or n.endswith(".jpeg"):
@@ -256,63 +289,13 @@ def _mime_for(name: str) -> str:
         return "image/bmp"
     return "application/octet-stream"
 
-
-# --- Pollinations models and backend (trimmed to only changed parts) ---
-class _PollinationsV1Datum(BaseModel):
-    b64_json: Optional[str] = None
-    url: Optional[str] = None
-    revised_prompt: Optional[str] = None
-
-class _PollinationsV1Response(BaseModel):
-    created: Optional[int] = None
-    data: list[_PollinationsV1Datum] = Field(default_factory=list)
-
-class PollinationsConfig(BaseModel):
-    api_base: str = Field(default_factory=lambda: _env_str("POLLINATIONS_API_BASE", "https://gen.pollinations.ai").rstrip("/"))
-    gen_base: str = Field(default_factory=lambda: _env_str("POLLINATIONS_GEN_BASE", "https://gen.pollinations.ai").rstrip("/"))
-    secret: str = Field(default_factory=lambda: _env_str("POLLINATIONS_SECRET", ""))
-    model: Optional[str] = Field(default_factory=lambda: _env_str("POLLINATIONS_MODEL", "") or None)
-    width: int = Field(default_factory=lambda: _env_int("POLLINATIONS_WIDTH", 1024))
-    height: int = Field(default_factory=lambda: _env_int("POLLINATIONS_HEIGHT", 1024))
-    nologo: bool = Field(default_factory=lambda: _env_bool01("POLLINATIONS_NOLOGO", 1))
-    seed_raw: Optional[str] = Field(default_factory=lambda: os.getenv("POLLINATIONS_SEED"))
-    use_v1: bool = Field(default_factory=lambda: _env_bool01("POLLINATIONS_USE_V1", 1))
-    size_override: str = Field(default_factory=lambda: _env_str("POLLINATIONS_SIZE", ""))
-    allow_cloud: bool = Field(default_factory=lambda: _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0))
-    v1_edits_path: str = Field(default_factory=lambda: _env_str("POLLINATIONS_V1_IMAGES_EDITS_ENDPOINT", "/v1/images/edits"))
-    v1_generations_path: str = Field(default_factory=lambda: _env_str("POLLINATIONS_V1_IMAGES_GENERATIONS_ENDPOINT", "/v1/images/generations"))
-    prompt_suffix_style_only: str = Field(default_factory=lambda: _env_str("POLLINATIONS_STYLE_SUFFIX", "adopt the exact visual style, colors, and textures from the reference image; only transfer style, not content."))
-    # Preference: Pollinations prefers cloud vision by default
-    prefer_cloud_descriptors_default: bool = True
-
-    @property
-    def seed(self) -> Optional[int]:
-        if self.seed_raw is None:
-            return None
-        try:
-            return int(self.seed_raw)
-        except Exception:
-            return None
-
-    def require_cloud_enabled(self) -> None:
-        if not self.allow_cloud:
-            raise RuntimeError("Cloud image backend not allowed (set ALLOW_CLOUD_IMAGE_BACKEND=1 to enable)")
-        if not self.secret:
-            raise RuntimeError("POLLINATIONS_SECRET missing in environment")
-
-
 def _size_from_wh(width: int, height: int) -> str:
     if width > 0 and height > 0:
         return f"{width}x{height}"
     return "1024x1024"
 
-
 class PollinationsBackend(ImageBackend):
-    """
-    Cloud backend for Pollinations (V1), integrated with unified style engine:
-    - Injects style descriptors into the prompt (cloud vision preferred by default).
-    - Uses V1 edits with local file (multipart) or URL; or generations as fallback.
-    """
+    """Cloud backend for Pollinations (V1), integrated with unified style engine."""
     def __init__(self, out_dir: Path, cfg: Optional[PollinationsConfig] = None, style: Optional[StyleRuntime] = None) -> None:
         self.out_dir = Path(out_dir).resolve()
         self.cfg = cfg or PollinationsConfig()
@@ -322,35 +305,13 @@ class PollinationsBackend(ImageBackend):
     def set_style_runtime(self, style: Optional[StyleRuntime]) -> None:
         self.style = style or StyleRuntime()
 
-    async def store_generated_result(self, image_url: Optional[str], b64: Optional[str]) -> Path:
-        if not (image_url or b64):
-            raise RuntimeError("no result to store")
-        target = self.out_dir / f"img_{uuid.uuid4().hex}.jpg"
-        async with httpx.AsyncClient(timeout=_timeout_long(120.0), limits=_httpx_limits(), follow_redirects=True) as client:
-            if image_url:
-                r = await _retrying_get(client, image_url)
-                content = r.content
-                if not content or len(content) < 1024:
-                    raise RuntimeError("downloaded image too small")
-                target.write_bytes(content)
-                return target
-            else:
-                from base64 import b64decode
-                raw = b64decode(b64 or "", validate=True)
-                if not raw or len(raw) < 1024:
-                    raise RuntimeError("decoded image too small")
-                target.write_bytes(raw)
-                return target
-
     def _merge_descriptors(self, base_prompt: str, descriptors: List[str]) -> str:
-        """Append short descriptors to the prompt conservatively."""
         ds = [d for d in (descriptors or []) if isinstance(d, str) and d.strip()]
         if not ds:
             return base_prompt
         return (base_prompt.rstrip(",") + ", " + ", ".join(ds)).strip().strip(",")
 
     def _resolve_descriptors_if_any(self) -> List[str]:
-        """Resolve descriptors for current reference (prefer cloud by default for Pollinations)."""
         if not (self.style and self.style.has_reference):
             return []
         prefer = self.cfg.prefer_cloud_descriptors_default
@@ -381,8 +342,7 @@ class PollinationsBackend(ImageBackend):
         if seed is not None:
             payload["seed"] = int(seed)
 
-        timeout = _timeout_long(180.0)
-        async with httpx.AsyncClient(timeout=timeout, limits=_httpx_limits(), follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0), limits=_httpx_limits(), follow_redirects=True) as client:
             r = await _retrying_post(client, url, json_payload=payload, headers=headers)
             try:
                 j = r.json()
@@ -394,8 +354,7 @@ class PollinationsBackend(ImageBackend):
                 first = data[0]
                 if isinstance(first, dict):
                     if "url" in first and isinstance(first["url"], str) and first["url"].startswith("http"):
-                        img_url = first["url"]
-                        ir = await _retrying_get(client, img_url)
+                        ir = await _retrying_get(client, first["url"])
                         content = ir.content
                         target = self.out_dir / f"img_{uuid.uuid4().hex}.jpg"
                         target.write_bytes(content)
@@ -434,8 +393,7 @@ class PollinationsBackend(ImageBackend):
         if seed is not None:
             files["seed"] = (None, str(int(seed)))
 
-        timeout = _timeout_long(180.0)
-        async with httpx.AsyncClient(timeout=timeout, limits=_httpx_limits(), follow_redirects=True, http2=True) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0), limits=_httpx_limits(), follow_redirects=True, http2=True) as client:
             r = await _retrying_post(client, url, files=files, headers=headers)
             try:
                 j = r.json()
@@ -447,8 +405,7 @@ class PollinationsBackend(ImageBackend):
                 first = data[0]
                 if isinstance(first, dict):
                     if "url" in first and isinstance(first["url"], str) and first["url"].startswith("http"):
-                        img_url = first["url"]
-                        ir = await _retrying_get(client, img_url)
+                        ir = await _retrying_get(client, first["url"])
                         content = ir.content
                         target = self.out_dir / f"img_{uuid.uuid4().hex}.jpg"
                         target.write_bytes(content)
@@ -465,6 +422,28 @@ class PollinationsBackend(ImageBackend):
                         return target
             raise RuntimeError("pollinations_v1_edits_multipart_missing_data")
 
+    def _build_pollinations_image_url(self, api_base: str, prompt: str,
+                                      model: Optional[str], width: Optional[int], height: Optional[int],
+                                      nologo: bool, seed: Optional[int]) -> str:
+        from urllib.parse import quote, urlencode
+        base = (api_base or "").rstrip("/")
+        encoded_prompt = quote(prompt, safe="")
+        url = f"{base}/image/{encoded_prompt}"
+        params: dict[str, str] = {}
+        if model:
+            params["model"] = model
+        if width and width > 0:
+            params["width"] = str(width)
+        if height and height > 0:
+            params["height"] = str(height)
+        if nologo:
+            params["nologo"] = "true"
+        if seed is not None:
+            params["seed"] = str(seed)
+        if params:
+            url = f"{url}?{urlencode(params)}"
+        return url
+
     async def _fetch_v1(self, prompt: str, width: int | None, height: int | None) -> Path:
         self.cfg.require_cloud_enabled()
         url = f"{self.cfg.gen_base}{self.cfg.v1_generations_path}"
@@ -472,11 +451,10 @@ class PollinationsBackend(ImageBackend):
         w = width if (width and width > 0) else self.cfg.width
         h = height if (height and height > 0) else self.cfg.height
         payload = {"model": self.cfg.model or "flux", "prompt": prompt, "size": (self.cfg.size_override or _size_from_wh(w, h))}
-        timeout = _timeout_long(120.0)
         delay = 1.0
         last_exc: Optional[Exception] = None
-        async with httpx.AsyncClient(timeout=timeout, limits=_httpx_limits()) as client:
-            for attempt in range(1, 5 + 1):
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0), limits=_httpx_limits()) as client:
+            for attempt in range(1, 6):
                 try:
                     r = await client.post(url, headers=headers, json=payload)
                     r.raise_for_status()
@@ -509,28 +487,6 @@ class PollinationsBackend(ImageBackend):
                     continue
         raise RuntimeError(f"pollinations_v1_all_attempts_failed: {last_exc}")
 
-    def _build_pollinations_image_url(self, api_base: str, prompt: str,
-                                      model: Optional[str], width: Optional[int], height: Optional[int],
-                                      nologo: bool, seed: Optional[int]) -> str:
-        from urllib.parse import quote, urlencode
-        base = (api_base or "").rstrip("/")
-        encoded_prompt = quote(prompt, safe="")
-        url = f"{base}/image/{encoded_prompt}"
-        params: dict[str, str] = {}
-        if model:
-            params["model"] = model
-        if width and width > 0:
-            params["width"] = str(width)
-        if height and height > 0:
-            params["height"] = str(height)
-        if nologo:
-            params["nologo"] = "true"
-        if seed is not None:
-            params["seed"] = str(seed)
-        if params:
-            url = f"{url}?{urlencode(params)}"
-        return url
-
     async def _fetch_get(self, prompt: str, width: int | None, height: int | None) -> Path:
         self.cfg.require_cloud_enabled()
         w = width if (width and width > 0) else self.cfg.width
@@ -539,11 +495,10 @@ class PollinationsBackend(ImageBackend):
         params: dict[str, str] = {}
         if self.cfg.secret:
             params["key"] = self.cfg.secret
-        timeout = _timeout_long(120.0)
         delay = 1.0
         last_exc: Optional[Exception] = None
-        async with httpx.AsyncClient(timeout=timeout, limits=_httpx_limits(), follow_redirects=True) as client:
-            for attempt in range(1, 4 + 1):
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0), limits=_httpx_limits(), follow_redirects=True) as client:
+            for attempt in range(1, 5):
                 try:
                     r = await client.get(url, params=params)
                     r.raise_for_status()
@@ -581,7 +536,7 @@ class PollinationsBackend(ImageBackend):
         eff_w = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
         eff_h = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
 
-        # Preferred: multipart with local reference (privacy-first)
+        # Prefer multipart with local reference (privacy-first)
         style_reference_path: Optional[Path] = kwargs.get("style_reference_path") or (self.style.reference_path if (self.style and self.style.has_reference) else None)
         if isinstance(style_reference_path, Path) and style_reference_path.exists():
             suffix = (self.cfg.prompt_suffix_style_only or "").strip()
@@ -589,7 +544,7 @@ class PollinationsBackend(ImageBackend):
                 full_prompt = f"{full_prompt}\n{suffix}"
             return await self._post_v1_edits_multipart(full_prompt, style_reference_path, eff_w, eff_h, negative_prompt=n_prompt or None, seed=self.cfg.seed)
 
-        # URL-mode if provided explicitly
+        # URL-mode if provided
         style_reference_url: Optional[str] = kwargs.get("style_reference_url")
         if isinstance(style_reference_url, str) and style_reference_url.strip():
             suffix = (self.cfg.prompt_suffix_style_only or "").strip()
@@ -609,7 +564,7 @@ class PollinationsBackend(ImageBackend):
             return await self._fetch_get(full_prompt, eff_w, eff_h)
 
 
-# --- ComfyUI models and backend ---
+# ---------- ComfyUI backend ----------
 class ComfyConfig(BaseModel):
     host: str = Field(default_factory=lambda: _env_str("APP_COMFY_HOST", "127.0.0.1"))
     port: int = Field(default_factory=lambda: _env_int("APP_COMFY_PORT", 8188))
@@ -647,10 +602,10 @@ class ComfyConfig(BaseModel):
 
 class LocalComfyBackend(ImageBackend):
     """
-    Local ComfyUI backend with unified style engine integration:
-    - Stages reference image and weight into configured nodes.
-    - Optionally stages descriptors into backend if supported (stage_style_descriptors).
-    - Else, appends descriptors to positive prompt text.
+    Local/LAN ComfyUI backend integrated with the bridge:
+    - Loads a workflow file and applies positive/negative prompts and dimensions.
+    - Stages reference image path and optional IP-Adapter weight into nodes when configured.
+    - Delegates generation to comfyui_bridge.generate_from_prompt_dict and returns the first image.
     """
     def __init__(self, out_dir: Path, cfg: Optional[ComfyConfig] = None, style: Optional[StyleRuntime] = None) -> None:
         self.out_dir = Path(out_dir).resolve()
@@ -664,6 +619,7 @@ class LocalComfyBackend(ImageBackend):
         self.style = style or StyleRuntime()
 
     async def _available(self) -> bool:
+        """Quick availability check against /history endpoint."""
         if self.cfg.disabled:
             return False
         try:
@@ -675,6 +631,7 @@ class LocalComfyBackend(ImageBackend):
             return False
 
     async def _fetch_valid_samplers(self) -> Set[str]:
+        """Try to fetch KSampler choices; fall back to a conservative set."""
         if self._samplers_cache is not None:
             return self._samplers_cache
         url = f"http://{self.cfg.host}:{self.cfg.port}/object_info/KSampler"
@@ -696,18 +653,21 @@ class LocalComfyBackend(ImageBackend):
         return self._samplers_cache
 
     def _normalize_sampler(self, name: str) -> str:
+        """Normalize common aliases to Comfy's expected sampler names."""
         n = (name or "").strip().lower()
         if n in {"euler a", "euler_a", "euler-ancestral"}:
             return "euler_ancestral"
         return n
 
     def _load_prompt_file(self) -> dict:
+        """Load workflow JSON as dict of nodes (Comfy /prompt format)."""
         data = json.loads(self.cfg.workflow_path.read_text(encoding="utf-8"))
         if "prompt" in data and isinstance(data["prompt"], dict):
             return data["prompt"]
         return data
 
     def _override_text_nodes(self, prompt_dict: dict, positive: str, negative: str) -> None:
+        """Set CLIPTextEncode nodes for positive and negative prompts."""
         pos_set = False
         neg_set = False
         node_pos = prompt_dict.get(self.cfg.node_id_positive)
@@ -722,6 +682,7 @@ class LocalComfyBackend(ImageBackend):
             if isinstance(inputs, dict) and "text" in inputs:
                 inputs["text"] = negative
                 neg_set = True
+        # Fallback: use first/second CLIPTextEncode if explicit IDs are not present
         if not (pos_set and neg_set):
             clip_nodes = []
             for node in prompt_dict.values():
@@ -739,6 +700,7 @@ class LocalComfyBackend(ImageBackend):
                     neg_set = True
 
     def _override_dimensions_in_prompt(self, prompt_dict: dict, width: int, height: int) -> None:
+        """Set width/height on EmptyLatentImage (or similar) and KSampler nodes if present."""
         node_latent = prompt_dict.get(self.cfg.node_id_latent)
         if isinstance(node_latent, dict):
             cls = str(node_latent.get("class_type") or node_latent.get("class", "")).strip()
@@ -750,26 +712,25 @@ class LocalComfyBackend(ImageBackend):
                     if "height" in inputs:
                         inputs["height"] = height
                     return
+        # Fallback: scan for latent creators and optionally KSampler width/height inputs
         for node in prompt_dict.values():
             if not isinstance(node, dict):
                 continue
             cls = str(node.get("class_type") or node.get("class", "")).strip()
+            inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
             if cls in {"EmptyLatentImage", "EmptyLatentImageBatch", "LatentImage", "CreateLatentImage"}:
-                inputs = node.get("inputs")
-                if isinstance(inputs, dict):
-                    if "width" in inputs:
-                        inputs["width"] = width
-                    if "height" in inputs:
-                        inputs["height"] = height
+                if "width" in inputs:
+                    inputs["width"] = width
+                if "height" in inputs:
+                    inputs["height"] = height
             if cls.startswith("KSampler"):
-                inputs = node.get("inputs")
-                if isinstance(inputs, dict):
-                    if "width" in inputs:
-                        inputs["width"] = width
-                    if "height" in inputs:
-                        inputs["height"] = height
+                if "width" in inputs:
+                    inputs["width"] = width
+                if "height" in inputs:
+                    inputs["height"] = height
 
     def _copy_to_comfy_input(self, src: Path) -> Path:
+        """Copy reference into ComfyUI/input when configured; otherwise return original path."""
         try:
             if not self.cfg.comfy_input_dir:
                 return src
@@ -785,12 +746,18 @@ class LocalComfyBackend(ImageBackend):
             return src
 
     def _path_strategy_for_comfy_input(self, staged_path: Path) -> Tuple[str, str]:
+        """
+        Return a tuple of (abs_posix, node_value).
+        - If comfy_input_dir is set, node_value will be 'basename' (preferred by LoadImage nodes).
+        - Otherwise, node_value is the absolute path.
+        """
         abs_posix = staged_path.resolve().as_posix()
         if self.cfg.comfy_input_dir:
             return abs_posix, staged_path.name
         return abs_posix, abs_posix
 
     def _inject_style_reference_file(self, prompt_dict: dict) -> None:
+        """Inject reference filename and optional IP-Adapter weight into configured nodes."""
         if not (self.style and self.style.has_reference):
             return
         ref_path_abs = self.style.reference_path.resolve()
@@ -800,14 +767,22 @@ class LocalComfyBackend(ImageBackend):
         if _debug():
             print(f"[COMFY][style:file] node_val={node_value} w={weight}")
 
+        # Explicit reference image node by ID
         node = prompt_dict.get(self.cfg.node_id_ref_image) if self.cfg.node_id_ref_image else None
         if isinstance(node, dict):
             inputs = node.get("inputs")
             if isinstance(inputs, dict):
                 key = self.cfg.node_key_ref_image_path or "image"
+                # Support both string and dict-based inputs
                 if key in inputs:
-                    inputs[key] = node_value
+                    if isinstance(inputs[key], dict):
+                        ov = dict(inputs[key])
+                        ov["image"] = node_value
+                        inputs[key] = ov
+                    else:
+                        inputs[key] = node_value
 
+        # Optional IP-Adapter node by ID
         node = prompt_dict.get(self.cfg.node_id_ipadapter) if self.cfg.node_id_ipadapter else None
         if isinstance(node, dict):
             inputs = node.get("inputs")
@@ -816,22 +791,33 @@ class LocalComfyBackend(ImageBackend):
                 if k in inputs:
                     inputs[k] = weight
 
+        # Broad fallback: scan common node classes
         for node in prompt_dict.values():
             if not isinstance(node, dict):
                 continue
             cls = str(node.get("class_type") or node.get("class", "")).strip()
             inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
             if cls in {"LoadImage", "ImageFromPath", "LoadImageMask"}:
-                if "image" in inputs and isinstance(inputs.get("image"), (str, type(None))):
-                    inputs["image"] = node_value
+                if "image" in inputs and isinstance(inputs.get("image"), (str, type(None), dict)):
+                    if isinstance(inputs.get("image"), dict):
+                        ov = dict(inputs["image"])
+                        ov["image"] = node_value
+                        inputs["image"] = ov
+                    else:
+                        inputs["image"] = node_value
             if "ipadapter" in cls.lower() or cls in {"IPAdapter", "IPAdapterModelApply", "IPAdapterAdvanced"}:
                 if "weight" in inputs:
                     try:
                         inputs["weight"] = weight
                     except Exception:
                         pass
-                if "image" in inputs and isinstance(inputs.get("image"), (str, type(None))):
-                    inputs["image"] = node_value
+                if "image" in inputs and isinstance(inputs.get("image"), (str, type(None), dict)):
+                    if isinstance(inputs.get("image"), dict):
+                        ov = dict(inputs["image"])
+                        ov["image"] = node_value
+                        inputs["image"] = ov
+                    else:
+                        inputs["image"] = node_value
 
     def _merge_descriptors_into_positive(self, positive: str, descriptors: List[str]) -> str:
         ds = [d for d in (descriptors or []) if isinstance(d, str) and d.strip()]
@@ -840,6 +826,7 @@ class LocalComfyBackend(ImageBackend):
         return (positive.rstrip(",") + ", " + ", ".join(ds)).strip().strip(",")
 
     async def _short_history_hint(self) -> str:
+        """Fetch a small hint from /history for error context."""
         try:
             async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short()) as c:
                 r = await c.get(f"http://{self.cfg.host}:{self.cfg.port}/history")
@@ -860,10 +847,11 @@ class LocalComfyBackend(ImageBackend):
             return f"history_exc:{type(e).__name__}"
 
     async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative_prompt: str | None = None, **kwargs: Any) -> Path:
-        # Load workflow
+        """Generate a single image using ComfyUI via the bridge and return its Path."""
+        # Load workflow as prompt-dict
         prompt_dict = self._load_prompt_file()
 
-        # Resolve descriptors for reference (prefer local by default for ComfyUI)
+        # Resolve descriptors for reference (prefer local descriptors by default)
         descriptors: List[str] = []
         if self.style and self.style.has_reference:
             prefer = self.cfg.prefer_cloud_descriptors_default
@@ -876,59 +864,70 @@ class LocalComfyBackend(ImageBackend):
                     print(f"[COMFY][desc] resolve failed: {e}")
                 descriptors = []
 
-        # Inject reference image/weight if available
+        # Inject reference file/weight (file mode is default; URL mode would require a signer)
         if self.style and self.style.has_reference:
-            if (self.cfg.ref_mode or "file") == "url":
-                # URL mode would require signed URL builder; omitted for simplicity
-                self._inject_style_reference_file(prompt_dict)
-            else:
-                self._inject_style_reference_file(prompt_dict)
+            self._inject_style_reference_file(prompt_dict)
 
-        # Override text nodes with prompt + negative; append descriptors to positive if no dedicated staging method
+        # Merge positive prompt and descriptors; override negative prompt
         pos = (prompt or "").strip()
         if descriptors:
             pos = self._merge_descriptors_into_positive(pos, descriptors)
         neg = (negative_prompt or self.cfg.negative or "").strip()
         self._override_text_nodes(prompt_dict, positive=pos, negative=neg)
 
-        # Resolve dimensions
+        # Resolve and override dimensions
         rw, rh = _resolve_size_for_backend("comfyui", width, height)
         eff_w = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
         eff_h = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
         self._override_dimensions_in_prompt(prompt_dict, width=eff_w, height=eff_h)
 
-        # Dispatch to ComfyUI via bridge
+        # Dispatch to bridge (the bridge already downloads images and returns List[Path])
         ts = _now()
-        result = await generate_from_prompt_dict(
+        images: List[Path] = await generate_from_prompt_dict(
+            prompt_dict=prompt_dict,
+            out_dir=self.out_dir,
             host=self.cfg.host,
             port=self.cfg.port,
-            prompt=prompt_dict,
-            timeout_sec=float(self.cfg.timeout_sec),
-            wait_for_image=True,
+            max_wait_sec=float(self.cfg.timeout_sec),
         )
-        # Try to copy from Comfy's output dir when available, else rely on bridge return
-        local_copy = self._copy_latest_from_comfy(since_ts=ts)
-        if local_copy and local_copy.exists() and local_copy.stat().st_size >= 1024:
-            return local_copy
 
-        # Bridge may already have saved an image and returned a path
-        if isinstance(result, (str, Path)):
-            p = Path(result)
+        # Prefer the first returned image
+        if images:
+            p = Path(images[0])
             if p.exists() and p.stat().st_size >= 1024:
                 return p
 
-        # As a fallback, raise an informative error
+        # Optional: try FS fallback from Comfy output directory if configured
+        if self.cfg.comfy_output_dir and self.cfg.comfy_output_dir.exists():
+            candidates = sorted(
+                [p for p in self.cfg.comfy_output_dir.glob("**/*") if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}],
+                key=lambda x: x.stat().st_mtime,
+                reverse=True,
+            )
+            for p in candidates[:6]:
+                if p.stat().st_mtime >= ts - 5 and p.stat().st_size >= 1024:
+                    # Copy into out_dir for consistent serving
+                    target = self.out_dir / f"img_{uuid.uuid4().hex}{p.suffix.lower()}"
+                    try:
+                        shutil.copy2(p, target)
+                        return target
+                    except Exception:
+                        # If copy fails, return original path as last resort
+                        return p
+
+        # If we get here, we failed; add a short history hint
         hint = await self._short_history_hint()
         raise RuntimeError(f"comfy_generation_failed ({hint})")
 
 
-# --- Backend factory ---
+# ---------- Backend factory ----------
 class BackendEnv(BaseModel):
     image_backend: str = Field(default_factory=lambda: _env_str("IMAGE_BACKEND", "comfyui").lower())
     allow_cloud: bool = Field(default_factory=lambda: _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0))
     output_dir: Path = Field(default_factory=lambda: Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")).resolve())
 
 def build_image_backend(style: Optional[StyleRuntime] = None) -> ImageBackend:
+    """Factory for image backends based on environment configuration."""
     env = BackendEnv()
     out_dir = env.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
