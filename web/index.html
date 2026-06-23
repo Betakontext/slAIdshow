@@ -105,6 +105,7 @@
           <div class="row" style="margin-bottom:8px;">
             <label for="backend-select" style="min-width:120px;" id="label-backend">Bild-Backend</label>
             <select id="backend-select" title="Choose image backend">
+              <!-- UI exposes three options; server maps them to comfyui+preset or pollinations -->
               <option value="comfyui_local">ComfyUI (lokal)</option>
               <option value="comfyui_remote">ComfyUI (remote)</option>
               <option value="pollinations">Pollinations (Cloud)</option>
@@ -113,7 +114,7 @@
             <span id="backend-warn" class="warn" style="display:none;"></span>
           </div>
 
-          <!-- Workflow (optional) -->
+          <!-- Workflow selector (visible if server allows it) -->
           <div id="workflow-block" style="display:none;">
             <div class="row" style="margin-bottom:8px;">
               <label for="workflow-select" style="min-width:120px;" id="label-workflow">Workflow</label>
@@ -161,7 +162,7 @@
             <button id="btn-apply-ref-strength" title="Referenzstärke übernehmen">Übernehmen</button>
           </div>
 
-          <!-- Cloud vision toggle (shown only if a reference is active) -->
+          <!-- Cloud vision toggle (only with active reference) -->
           <div id="ref-cloud-row" class="ref-controls" style="margin-bottom:8px; display:none;">
             <label for="ref-cloud">Use Cloud Vision for style descriptors</label>
             <input id="ref-cloud" type="checkbox" />
@@ -169,7 +170,7 @@
             <span class="mono" id="ref-cloud-hint" style="opacity:.8;"></span>
           </div>
 
-          <!-- Style Prompt -->
+          <!-- Style Prompt text -->
           <div style="margin-bottom:8px;">
             <label for="style-text" style="display:block; margin-bottom:6px;" id="label-style">Style-Prompt</label>
             <div class="style-line">
@@ -223,166 +224,10 @@
   <script>
     // --- All comments strictly in English ---
 
-    // i18n dictionary
+    // Lightweight i18n dictionary
     const I18N = {
-      de: {
-        brand: "slAIdshow | Lokale Speech-to-Image Pipeline",
-        status_connecting: "Verbinde…",
-        status_connected: "Verbunden",
-        status_ready: "Bereit",
-        status_fullscreen_on: "Vollbild aktiv",
-        status_fullscreen_off: "Bereit",
-        title_viewer: "Bildanzeige",
-        title_controls: "Steuerung & Logs",
-        caption_none: "Kein Bild",
-        fs_enter: "Vollbild",
-        fs_exit: "Verkleinern",
-        btn_open_dir: "Ordner",
-        btn_start: "Aufnahme starten",
-        btn_stop: "Stopp",
-        btn_plan: "An Ollama senden",
-        btn_direct: "Direkt generieren",
-        btn_apply_backend: "Anwenden",
-        btn_apply_size: "Übernehmen",
-        btn_apply_neg: "Übernehmen",
-        btn_apply_workflow: "Übernehmen",
-        btn_upload_ref: "Hochladen",
-        btn_disable_ref: "Deaktivieren",
-        ref_upload_label: "Stil-Referenz (Bild)",
-        ref_none: "Keine Referenz",
-        ref_ok: "Referenz aktiviert",
-        ref_fail: "Upload fehlgeschlagen",
-        ref_disabled_ok: "Referenz deaktiviert.",
-        ref_disabled_fail: "Referenz konnte nicht deaktiviert werden.",
-        ref_thumb_title_active: "Aktives Referenzbild (Klick für Fokus)",
-        ref_thumb_title_inactive: "Referenz deaktiviert",
-        ref_thumb_missing: "Keine Vorschau verfügbar",
-        style_text_label: "Style-Prompt",
-        btn_save_style_text: "Speichern",
-        style_text_ok: "Style-Prompt gespeichert.",
-        style_text_fail: "Style-Prompt konnte nicht gespeichert werden.",
-        label_backend: "Bild-Backend",
-        label_width: "Breite",
-        label_height: "Höhe",
-        label_workflow: "Workflow",
-        ph_plan: "Text eingeben – Prompt erstellen und Bild generieren",
-        ph_neg: "Negativer Prompt (z. B. niedrige Qualität, verschwommen, fehlerhafte Anatomie)",
-        ph_style_text: "z. B. Aquarell, Studio Ghibli, warme Pastellfarben",
-        label_last_prompt: "Letzter Prompt",
-        label_transcripts: "Transkripte",
-        label_status: "Status",
-        shutdown: "Server beenden",
-        reconnect: "Server verbinden",
-        reconnecting: "Verbinde…",
-        confirm_shutdown: "Server wirklich beenden? Die Seite verliert die Verbindung.",
-        server_offline: "Server offline – bitte Server starten",
-        sse_connecting: "SSE: Verbinde…",
-        sse_connected: "SSE verbunden",
-        sse_disconnected: "SSE getrennt",
-        manual_connect_start: "Manueller Verbindungsversuch gestartet",
-        manual_connect_ok: "Server erreichbar – starte SSE",
-        start_ok: "Aufnahme läuft",
-        start_fail: "Start fehlgeschlagen",
-        stop_ok: "Gestoppt",
-        stop_fail: "Stopp fehlgeschlagen",
-        config_error: "Konfig-Fehler",
-        prompt_created: "Prompt erzeugt",
-        shutdown_in_progress: "Server wird beendet…",
-        shutdown_failed: "Shutdown fehlgeschlagen",
-        shutdown_error: "Shutdown-Fehler",
-        backend_warn_cloud_blocked: "Cloud-Backends sind in der Server-Konfiguration deaktiviert.",
-        backend_warn_missing_secret: "Pollinations-Secret fehlt auf dem Server.",
-        backend_switched_ok: "Backend umgeschaltet.",
-        backend_switch_failed: "Umschalten fehlgeschlagen.",
-        size_applied_ok: "Größe übernommen.",
-        size_applied_fail: "Größe konnte nicht übernommen werden.",
-        neg_applied_ok: "Negativer Prompt gespeichert.",
-        neg_applied_fail: "Negativer Prompt konnte nicht gespeichert werden.",
-        wf_applied_ok: "Workflow übernommen.",
-        wf_applied_fail: "Workflow-Übernahme fehlgeschlagen.",
-        wf_none_placeholder: "Keine Workflows gefunden (Ordner: ./workflows)",
-        wf_list_unavailable: "Workflow-Liste nicht verfügbar",
-        image_prompt_label: "Bild Prompt"
-      },
-      en: {
-        brand: "slAIdshow | Local Speech-to-Image Pipeline",
-        status_connecting: "Connecting…",
-        status_connected: "Connected",
-        status_ready: "Ready",
-        status_fullscreen_on: "Fullscreen active",
-        status_fullscreen_off: "Ready",
-        title_viewer: "Image Viewer",
-        title_controls: "Controls & Logs",
-        caption_none: "No image",
-        fs_enter: "Fullscreen",
-        fs_exit: "Exit",
-        btn_open_dir: "Folder",
-        btn_start: "Start Recording",
-        btn_stop: "Stop",
-        btn_plan: "Send to Ollama",
-        btn_direct: "Direct Generate",
-        btn_apply_backend: "Apply",
-        btn_apply_size: "Apply",
-        btn_apply_neg: "Apply",
-        btn_apply_workflow: "Apply",
-        btn_upload_ref: "Upload",
-        btn_disable_ref: "Disable",
-        ref_upload_label: "Style reference (image)",
-        ref_none: "No reference",
-        ref_ok: "Reference enabled",
-        ref_fail: "Upload failed",
-        ref_disabled_ok: "Reference disabled",
-        ref_disabled_fail: "Failed to disable reference.",
-        ref_thumb_title_active: "Active reference image (click to focus)",
-        ref_thumb_title_inactive: "Reference disabled",
-        ref_thumb_missing: "No thumbnail available",
-        style_text_label: "Style Prompt",
-        btn_save_style_text: "Save",
-        style_text_ok: "Style prompt saved.",
-        style_text_fail: "Failed to save style prompt.",
-        label_backend: "Image backend",
-        label_width: "Width",
-        label_height: "Height",
-        label_workflow: "Workflow",
-        ph_plan: "Enter text – create prompt and generate image",
-        ph_neg: "Negative prompt (e.g., low quality, blurry, incorrect anatomy)",
-        ph_style_text: "e.g., watercolor, Studio Ghibli, warm pastels",
-        label_last_prompt: "Last Prompt",
-        label_transcripts: "Transcripts",
-        label_status: "Status",
-        shutdown: "Shut down server",
-        reconnect: "Connect to server",
-        reconnecting: "Connecting…",
-        confirm_shutdown: "Really shut down the server? This page will lose the connection.",
-        server_offline: "Server offline — please start the server",
-        sse_connecting: "SSE: Connecting…",
-        sse_connected: "SSE connected",
-        sse_disconnected: "SSE disconnected",
-        manual_connect_start: "Manual reconnect started",
-        manual_connect_ok: "Server reachable — starting SSE",
-        start_ok: "Recording running",
-        start_fail: "Start failed",
-        stop_ok: "Stopped",
-        stop_fail: "Stop failed",
-        config_error: "Config error",
-        prompt_created: "Prompt created",
-        shutdown_in_progress: "Server is shutting down…",
-        shutdown_failed: "Shutdown failed",
-        shutdown_error: "Shutdown error",
-        backend_warn_cloud_blocked: "Cloud backends are disabled in server settings.",
-        backend_warn_missing_secret: "Pollinations secret is missing on the server.",
-        backend_switched_ok: "Backend switched.",
-        backend_switch_failed: "Switch failed.",
-        size_applied_ok: "Size applied.",
-        size_applied_fail: "Failed to apply size.",
-        neg_applied_ok: "Negative prompt saved.",
-        neg_applied_fail: "Failed to save negative prompt.",
-        wf_applied_ok: "Workflow applied.",
-        wf_applied_fail: "Workflow apply failed.",
-        wf_none_placeholder: "No workflows found (folder: ./workflows)",
-        wf_list_unavailable: "Workflow list unavailable",
-        image_prompt_label: "Image Prompt"
-      }
+      de: { brand:"slAIdshow | Lokale Speech-to-Image Pipeline", status_connecting:"Verbinde…", status_connected:"Verbunden", status_ready:"Bereit", status_fullscreen_on:"Vollbild aktiv", status_fullscreen_off:"Bereit", title_viewer:"Bildanzeige", title_controls:"Steuerung & Logs", caption_none:"Kein Bild", fs_enter:"Vollbild", fs_exit:"Verkleinern", btn_open_dir:"Ordner", btn_start:"Aufnahme starten", btn_stop:"Stopp", btn_plan:"An Ollama senden", btn_direct:"Direkt generieren", btn_apply_backend:"Anwenden", btn_apply_size:"Übernehmen", btn_apply_neg:"Übernehmen", btn_apply_workflow:"Übernehmen", btn_upload_ref:"Hochladen", btn_disable_ref:"Deaktivieren", ref_upload_label:"Stil-Referenz (Bild)", ref_none:"Keine Referenz", ref_ok:"Referenz aktiviert", ref_fail:"Upload fehlgeschlagen", ref_disabled_ok:"Referenz deaktiviert.", ref_disabled_fail:"Referenz konnte nicht deaktiviert werden.", ref_thumb_title_active:"Aktives Referenzbild (Klick für Fokus)", ref_thumb_title_inactive:"Referenz deaktiviert", ref_thumb_missing:"Keine Vorschau verfügbar", style_text_label:"Style-Prompt", btn_save_style_text:"Speichern", style_text_ok:"Style-Prompt gespeichert.", style_text_fail:"Style-Prompt konnte nicht gespeichert werden.", label_backend:"Bild-Backend", label_width:"Breite", label_height:"Höhe", label_workflow:"Workflow", ph_plan:"Text eingeben – Prompt erstellen und Bild generieren", ph_neg:"Negativer Prompt (z. B. niedrige Qualität, verschwommen, fehlerhafte Anatomie)", ph_style_text:"z. B. Aquarell, Studio Ghibli, warme Pastellfarben", label_last_prompt:"Letzter Prompt", label_transcripts:"Transkripte", label_status:"Status", shutdown:"Server beenden", reconnect:"Server verbinden", reconnecting:"Verbinde…", confirm_shutdown:"Server wirklich beenden? Die Seite verliert die Verbindung.", server_offline:"Server offline – bitte Server starten", sse_connecting:"SSE: Verbinde…", sse_connected:"SSE verbunden", sse_disconnected:"SSE getrennt", manual_connect_start:"Manueller Verbindungsversuch gestartet", manual_connect_ok:"Server erreichbar – starte SSE", start_ok:"Aufnahme läuft", start_fail:"Start fehlgeschlagen", stop_ok:"Gestoppt", stop_fail:"Stopp fehlgeschlagen", config_error:"Konfig-Fehler", prompt_created:"Prompt erzeugt", shutdown_in_progress:"Server wird beendet…", shutdown_failed:"Shutdown fehlgeschlagen", shutdown_error:"Shutdown-Fehler", backend_warn_cloud_blocked:"Cloud-Backends sind in der Server-Konfiguration deaktiviert.", backend_warn_missing_secret:"Pollinations-Secret fehlt auf dem Server.", backend_switched_ok:"Backend umgeschaltet.", backend_switch_failed:"Umschalten fehlgeschlagen.", size_applied_ok:"Größe übernommen.", size_applied_fail:"Größe konnte nicht übernommen werden.", neg_applied_ok:"Negativer Prompt gespeichert.", neg_applied_fail:"Negativer Prompt konnte nicht gespeichert werden.", wf_applied_ok:"Workflow übernommen.", wf_applied_fail:"Workflow-Übernahme fehlgeschlagen.", wf_none_placeholder:"Keine Workflows gefunden (Ordner: ./workflows)", wf_list_unavailable:"Workflow-Liste nicht verfügbar", image_prompt_label:"Bild Prompt" },
+      en: { brand:"slAIdshow | Local Speech-to-Image Pipeline", status_connecting:"Connecting…", status_connected:"Connected", status_ready:"Ready", status_fullscreen_on:"Fullscreen active", status_fullscreen_off:"Ready", title_viewer:"Image Viewer", title_controls:"Controls & Logs", caption_none:"No image", fs_enter:"Fullscreen", fs_exit:"Exit", btn_open_dir:"Folder", btn_start:"Start Recording", btn_stop:"Stop", btn_plan:"Send to Ollama", btn_direct:"Direct Generate", btn_apply_backend:"Apply", btn_apply_size:"Apply", btn_apply_neg:"Apply", btn_apply_workflow:"Apply", btn_upload_ref:"Upload", btn_disable_ref:"Disable", ref_upload_label:"Style reference (image)", ref_none:"No reference", ref_ok:"Reference enabled", ref_fail:"Upload failed", ref_disabled_ok:"Reference disabled", ref_disabled_fail:"Failed to disable reference.", ref_thumb_title_active:"Active reference image (click to focus)", ref_thumb_title_inactive:"Reference disabled", ref_thumb_missing:"No thumbnail available", style_text_label:"Style Prompt", btn_save_style_text:"Save", style_text_ok:"Style prompt saved.", style_text_fail:"Failed to save style prompt.", label_backend:"Image backend", label_width:"Width", label_height:"Height", label_workflow:"Workflow", ph_plan:"Enter text – create prompt and generate image", ph_neg:"Negative prompt (e.g., low quality, blurry, incorrect anatomy)", ph_style_text:"e.g., watercolor, Studio Ghibli, warm pastels", label_last_prompt:"Last Prompt", label_transcripts:"Transcripts", label_status:"Status", shutdown:"Shut down server", reconnect:"Connect to server", reconnecting:"Connecting…", confirm_shutdown:"Really shut down the server? This page will lose the connection.", server_offline:"Server offline — please start the server", sse_connecting:"SSE: Connecting…", sse_connected:"SSE connected", sse_disconnected:"SSE disconnected", manual_connect_start:"Manual reconnect started", manual_connect_ok:"Server reachable — starting SSE", start_ok:"Recording running", start_fail:"Start failed", stop_ok:"Stopped", stop_fail:"Stop failed", config_error:"Config error", prompt_created:"Prompt created", shutdown_in_progress:"Server is shutting down…", shutdown_failed:"Shutdown failed", shutdown_error:"Shutdown error", backend_warn_cloud_blocked:"Cloud backends are disabled in server settings.", backend_warn_missing_secret:"Pollinations secret is missing on the server.", backend_switched_ok:"Backend switched.", backend_switch_failed:"Switch failed.", size_applied_ok:"Size applied.", size_applied_fail:"Failed to apply size.", neg_applied_ok:"Negative prompt saved.", neg_applied_fail:"Failed to save negative prompt.", wf_applied_ok:"Workflow applied.", wf_applied_fail:"Workflow apply failed.", wf_none_placeholder:"No workflows found (folder: ./workflows)", wf_list_unavailable:"Workflow list unavailable", image_prompt_label:"Image Prompt" }
     };
 
     // Language state
@@ -392,6 +237,7 @@
     function t(key){ return I18N[LANG][key] || key; }
 
     function applyI18N(){
+      // Update static labels and placeholders
       document.getElementById('brand-title').textContent = t('brand');
       document.getElementById('title-viewer').textContent = t('title_viewer');
       document.getElementById('title-controls').textContent = t('title_controls');
@@ -399,7 +245,6 @@
       document.getElementById('fs-label').textContent = t('fs_enter');
       document.getElementById('btn-open-dir').textContent = t('btn_open_dir');
       document.getElementById('btn-open-dir').title = t('btn_open_dir');
-
       document.getElementById('btn-start').textContent = t('btn_start');
       document.getElementById('btn-stop').textContent = t('btn_stop');
       document.getElementById('btn-plan').textContent = t('btn_plan');
@@ -407,10 +252,8 @@
       document.getElementById('btn-apply-backend').textContent = t('btn_apply_backend');
       document.getElementById('btn-apply-size').textContent = t('btn_apply_size');
       document.getElementById('btn-apply-neg').textContent = t('btn_apply_neg');
-      document.getElementById('btn-save-style-text').textContent = t('btn_save_style_text');
       const wfBtn = document.getElementById('btn-apply-workflow');
       if (wfBtn) wfBtn.textContent = t('btn_apply_workflow');
-
       document.getElementById('label-backend').textContent = t('label_backend');
       document.getElementById('label-workflow').textContent = t('label_workflow');
       document.getElementById('label-ref-upload').textContent = t('ref_upload_label');
@@ -420,13 +263,10 @@
       document.getElementById('label-status').textContent = t('label_status');
       document.getElementById('label-width').textContent = t('label_width');
       document.getElementById('label-height').textContent = t('label_height');
-
       const lblImg = document.getElementById('label-image-prompt');
       if (lblImg) lblImg.textContent = t('image_prompt_label');
-
       document.getElementById('btn-upload-ref').textContent = t('btn_upload_ref');
       document.getElementById('btn-disable-ref').textContent = t('btn_disable_ref');
-
       const planInput = document.getElementById('plan-input');
       const negInput = document.getElementById('neg-input');
       const styleText = document.getElementById('style-text');
@@ -440,10 +280,9 @@
       if(!CURRENT_REF.id || !CURRENT_REF.use){
         document.getElementById('ref-info').textContent = t('ref_none');
       }
-
       syncRefThumbTitle();
 
-      // Sync backend option labels with current UI language
+      // Update backend option labels with language
       const optLocal = document.querySelector('#backend-select option[value="comfyui_local"]');
       const optRemote = document.querySelector('#backend-select option[value="comfyui_remote"]');
       const optCloud = document.querySelector('#backend-select option[value="pollinations"]');
@@ -451,10 +290,9 @@
       if (optRemote) optRemote.textContent = (LANG === 'de') ? 'ComfyUI (remote)' : 'ComfyUI (remote)';
       if (optCloud) optCloud.textContent = 'Pollinations (Cloud)';
     }
-
     langSelect.addEventListener('change', ()=>{ LANG = langSelect.value; localStorage.setItem('ui_lang', LANG); applyI18N(); });
 
-    // Utility
+    // DOM shortcuts
     const $ = s => document.querySelector(s);
     const statusEl = $('#status');
     const promptLog = $('#prompt-log');
@@ -463,23 +301,18 @@
     const img = $('#current-image');
     const caption = $('#img-caption');
     const viewer = $('#image-viewer');
-
     const backendSelect = $('#backend-select');
     const backendWarn = $('#backend-warn');
     const btnApplyBackend = $('#btn-apply-backend');
-
     const workflowBlock = document.getElementById('workflow-block');
     const workflowSelect = $('#workflow-select');
     const workflowPreview = $('#workflow-preview');
     const wfWarn = $('#wf-warn');
     const btnApplyWorkflow = $('#btn-apply-workflow');
-
     const widthInput = $('#width-input');
     const heightInput = $('#height-input');
     const btnApplySize = $('#btn-apply-size');
     const sizePill = $('#size-pill');
-
-    // Style Prompt + Reference
     const refFile = $('#ref-file');
     const btnUploadRef = $('#btn-upload-ref');
     const btnDisableRef = $('#btn-disable-ref');
@@ -487,27 +320,29 @@
     const refThumb = $('#ref-thumb');
     const styleText = $('#style-text');
     const btnSaveStyleText = $('#btn-save-style-text');
-
-    // Reference strength elements
     const refStrengthRow = document.getElementById('ref-strength-row');
     const refStrength = document.getElementById('ref-strength');
     const refStrengthVal = document.getElementById('ref-strength-val');
     const refDenoiseVal = document.getElementById('ref-denoise-val');
     const btnApplyRefStrength = document.getElementById('btn-apply-ref-strength');
-
-    // Cloud vision toggle elements
     const refCloudRow = document.getElementById('ref-cloud-row');
     const refCloud = document.getElementById('ref-cloud');
     const btnApplyRefCloud = document.getElementById('btn-apply-ref-cloud');
     const refCloudHint = document.getElementById('ref-cloud-hint');
 
+    // Cached comfy presets reported by the server, e.g. {local:{host,port}, remote:{host,port}}
+    let COMFY_PRESETS = null;
+
     let CURRENT_REF = { id: null, use: false };
 
+    // Logging helper
     function log(el, msg){
       const ts = new Date().toLocaleTimeString();
       el.textContent = `[${ts}] ${msg}\n` + el.textContent;
       if (el.textContent.length > 20000) el.textContent = el.textContent.slice(0, 20000);
     }
+
+    // Clamp and reflect size
     function clampSize(v){
       const n = Math.round(Number(v) || 0);
       return Math.max(64, Math.min(2048, n));
@@ -518,18 +353,21 @@
       sizePill.textContent = `Size: ${w}×${h}`;
     }
 
+    // Initial status
     statusEl.dataset.state = 'connecting';
     statusEl.textContent = t('status_connecting');
 
+    // Image handling
     img.addEventListener('load', ()=> img.classList.add('loaded'));
     function setImage(filenameRel, captionText){
+      // Ensure static file path resolution
       const url = filenameRel.startsWith('/static/') ? filenameRel : `/static/${filenameRel.replace(/^\/+/, '')}`;
       img.classList.remove('loaded');
       img.src = url;
       caption.textContent = captionText || filenameRel;
     }
 
-    // Fullscreen
+    // Fullscreen helpers
     const btnFS = $('#btn-fullscreen');
     const iconEnter = $('#fs-icon-enter');
     const iconExit = $('#fs-icon-exit');
@@ -549,21 +387,19 @@
     img.addEventListener('dblclick', ()=> toggleFullscreenFor(viewer));
     document.addEventListener('fullscreenchange', syncFullscreenUI);
 
-    // Thumb helpers
+    // Reference thumbnail title state
     function syncRefThumbTitle(){
       if(!refThumb) return;
       if(CURRENT_REF.use && CURRENT_REF.id){
-        refThumb.title = t('ref_thumb_title_active');
-        refThumb.alt = t('ref_thumb_title_active');
+        refThumb.title = t('ref_thumb_title_active'); refThumb.alt = t('ref_thumb_title_active');
       }else if(CURRENT_REF.id){
-        refThumb.title = t('ref_thumb_title_inactive');
-        refThumb.alt = t('ref_thumb_title_inactive');
+        refThumb.title = t('ref_thumb_title_inactive'); refThumb.alt = t('ref_thumb_title_inactive');
       }else{
-        refThumb.title = t('ref_thumb_missing');
-        refThumb.alt = t('ref_thumb_missing');
+        refThumb.title = t('ref_thumb_missing'); refThumb.alt = t('ref_thumb_missing');
       }
     }
 
+    // Fetch a thumbnail URL for the reference image
     async function resolveRefThumbUrl(referenceId){
       const urls = [
         `/api/reference/thumbnail?id=${encodeURIComponent(referenceId)}`,
@@ -578,12 +414,11 @@
       return null;
     }
 
+    // Update reference thumbnail and strength/cloud UI
     async function updateRefThumb(referenceId, useReference){
       CURRENT_REF.id = referenceId || null;
       CURRENT_REF.use = !!useReference;
       syncRefThumbTitle();
-
-      // Toggle visibility for strength and cloud rows based on reference state
       syncRefStrengthUI(CURRENT_REF.use && !!CURRENT_REF.id, undefined);
       syncRefCloudUI(CURRENT_REF.use && !!CURRENT_REF.id);
 
@@ -605,10 +440,9 @@
       refThumb.onerror = ()=>{ refThumb.classList.remove('skeleton','visible'); refThumb.src=''; log(statusLog, 'reference thumbnail load error'); };
       refThumb.src = url;
     }
-
     if(refThumb){ refThumb.addEventListener('click', ()=>{ try{ refThumb.focus(); }catch{} }); }
 
-    // SSE connect
+    // SSE connection
     let sse = null;
     function connectSSE(){
       try{ if(sse) sse.close(); }catch{}
@@ -634,6 +468,7 @@
     }
     connectSSE();
 
+    // Server availability checks
     async function isServerUp(){
       try{ const r = await fetch('/status', {cache:'no-store'}); if(!r.ok) return false; const j = await r.json(); return !!j.ok; }catch{ return false; }
     }
@@ -651,6 +486,7 @@
       }
     }
 
+    // Shutdown/Reconnect button logic
     const btnShutdown = document.getElementById('btn-shutdown');
     function setShutdownMode(connected){
       if(connected){
@@ -705,7 +541,7 @@
       }
     });
 
-    // Start/Stop
+    // Start/Stop recording handlers
     document.getElementById('btn-start').addEventListener('click', async ()=>{
       try{
         const size = currentSizePayload();
@@ -728,16 +564,19 @@
         else{ statusEl.textContent = t('stop_fail'); log(statusLog, `stop failed: HTTP ${r.status}`); }
       }catch(e){
         statusEl.textContent = t('stop_fail'); log(statusLog, `stop exception: ${e}`);
-      }finally{ setTimeout(()=>{ btn.disabled=false; }, 300); }
+      }finally{
+        setTimeout(()=>{ btn.disabled=false; }, 300);
+      }
     });
 
+    // Build current size payload
     function currentSizePayload(){
       const w = clampSize(widthInput.value);
       const h = clampSize(heightInput.value);
       return { width:w, height:h };
     }
 
-    // Plan via LLM
+    // LLM planning via server-side Ollama
     document.getElementById('btn-plan').addEventListener('click', async ()=>{
       const text = document.getElementById('plan-input').value.trim();
       if(!text) return;
@@ -757,17 +596,16 @@
       finally{ btn.disabled=false; }
     });
 
-    // Direct Generate
+    // Direct image generation
     document.getElementById('btn-direct').addEventListener('click', async ()=>{
       const prompt = document.getElementById('plan-input').value.trim();
       const negative = document.getElementById('neg-input').value.trim();
       if(!prompt) return;
-
       const btn = document.getElementById('btn-direct');
       btn.disabled=true;
-
       const size = currentSizePayload();
 
+      // Pull style settings to include style_details/reference if present
       let styleCfg = null;
       try {
         const rs = await fetch('/api/settings/style', { cache: 'no-store' });
@@ -814,7 +652,7 @@
       }
     });
 
-    // Negative prompt
+    // Save negative prompt on server
     document.getElementById('btn-apply-neg').addEventListener('click', async ()=>{
       const txt = document.getElementById('neg-input').value.trim();
       try{
@@ -831,9 +669,8 @@
       }
     });
 
-    // Upload UX for style reference
+    // Upload style reference (image only)
     document.getElementById('btn-upload-ref').addEventListener('click', ()=>{ const f = document.getElementById('ref-file'); if(f) f.click(); });
-
     document.getElementById('ref-file').addEventListener('change', async ()=>{
       const f = document.getElementById('ref-file').files && document.getElementById('ref-file').files[0];
       if(!f) return;
@@ -865,7 +702,7 @@
       }
     });
 
-    // Reference disable
+    // Disable style reference
     document.getElementById('btn-disable-ref').addEventListener('click', async ()=>{
       const btn = document.getElementById('btn-disable-ref');
       btn.disabled = true;
@@ -890,7 +727,7 @@
       }
     });
 
-    // Cloud vision UI logic
+    // Toggle cloud-vision for descriptor extraction (requires active reference)
     function syncRefCloudUI(visible){
       if(!refCloudRow) return;
       refCloudRow.style.display = visible ? '' : 'none';
@@ -920,20 +757,19 @@
       });
     }
 
-    // Backend switch
+    // Map UI backend selection to server engine
     function normalizeBackendForApi(value){
-      // Map UI values to API contract expected by app.py: "comfyui" | "pollinations"
+      // Server supports "comfyui" or "pollinations"
       if(value === 'pollinations') return 'pollinations';
-      // Any comfy variant maps to 'comfyui'
       return 'comfyui';
     }
-    function chooseUiValueForConfig(backendFromConfig){
-      // Map server value back to a reasonable UI selection
+    function chooseUiValueForConfig(backendFromConfig, comfyPreset){
+      // comfyPreset: "local" | "remote" | undefined
       if(backendFromConfig === 'pollinations') return 'pollinations';
-      // Default to local comfy for display; advanced users can pick remote
-      return 'comfyui_local';
+      return comfyPreset === 'remote' ? 'comfyui_remote' : 'comfyui_local';
     }
 
+    // Ask server to allow cloud usage before switching to pollinations
     async function ensureCloudAllowed(){
       try{
         const r = await fetch('/api/settings/image_allow_cloud', {
@@ -944,35 +780,80 @@
       }catch{ return false; }
     }
 
+    // Apply a comfy preset if server exposes a route; else fallback to host override
+    async function applyComfyPresetIfAvailable(preset){
+      // Defensive: fetch current config for presets and fallback host/port
+      const cfg = window.__CONFIG_CACHED || {};
+      const presets = cfg?.image?.comfy_presets || COMFY_PRESETS || null;
+      if(presets) COMFY_PRESETS = presets;
+
+      // Try dedicated preset endpoint
+      try{
+        const r = await fetch('/api/settings/comfy_preset', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ preset })
+        });
+        if(r.ok) return true;
+      }catch{}
+
+      // Fallback: try direct host/port override if server provides such route
+      const target = (presets && presets[preset]) ? presets[preset] : null;
+      if(target && target.host && target.port){
+        try{
+          const rh = await fetch('/api/settings/comfy_host', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ host: String(target.host), port: Number(target.port) })
+          });
+          return rh.ok;
+        }catch{}
+      }
+      return false;
+    }
+
+    // Apply backend selection (engine + comfy preset if needed)
     document.getElementById('btn-apply-backend').addEventListener('click', async ()=>{
       const uiBackend = document.getElementById('backend-select').value;
-      const backend = normalizeBackendForApi(uiBackend);
+      const engine = normalizeBackendForApi(uiBackend);
       const btn = document.getElementById('btn-apply-backend');
       backendWarn.style.display = 'none';
       btn.disabled = true;
       try{
-        if(backend==='pollinations'){
+        // Enable cloud if needed
+        if(engine==='pollinations'){
           const ok = await ensureCloudAllowed();
           if(!ok) log(statusLog, 'Could not enable cloud.');
         }
+
+        // Switch engine first
         const r = await fetch('/api/settings/image_backend', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ backend })
+          body: JSON.stringify({ backend: engine })
         });
         const j = await r.json().catch(()=> ({}));
-        if(r.ok && j.ok){
-          log(statusLog, I18N[LANG]['backend_switched_ok'] || 'Backend switched.');
-          await refreshConfig();
-          if(document.getElementById('workflow-block').style.display!=='none'){
-            await refreshWorkflowList();
-          }else{
-            workflowSelect.innerHTML=''; workflowPreview.textContent=''; wfWarn.style.display='none';
-          }
-        }else{
+        if(!(r.ok && j.ok)){
           const err = j?.error || `${r.status}`;
           log(statusLog, `${I18N[LANG]['backend_switch_failed'] || 'Switch failed.'}: ${err}`);
           if(j?.reason==='cloud_blocked'){ backendWarn.textContent = I18N[LANG]['backend_warn_cloud_blocked']; backendWarn.style.display=''; }
           else if(j?.reason==='missing_secret'){ backendWarn.textContent = I18N[LANG]['backend_warn_missing_secret']; backendWarn.style.display=''; }
+          return;
+        }
+
+        // If comfyui selected, apply preset (local vs remote)
+        if(engine === 'comfyui'){
+          const preset = (uiBackend === 'comfyui_remote') ? 'remote' : 'local';
+          const ok = await applyComfyPresetIfAvailable(preset);
+          if(!ok){
+            // Not fatal; server may already default to local; we log for transparency
+            log(statusLog, `comfy preset apply skipped or unsupported (requested: ${preset})`);
+          }
+        }
+
+        log(statusLog, I18N[LANG]['backend_switched_ok'] || 'Backend switched.');
+        await refreshConfig();
+        if(document.getElementById('workflow-block').style.display!=='none'){
+          await refreshWorkflowList();
+        }else{
+          workflowSelect.innerHTML=''; workflowPreview.textContent=''; wfWarn.style.display='none';
         }
       }catch(e){
         log(statusLog, `${I18N[LANG]['backend_switch_failed'] || 'Switch failed.'}: ${e}`);
@@ -982,13 +863,11 @@
     });
 
     // Workflow helpers
-
     function wfBasename(s){
       if(!s) return '';
       const parts = String(s).split(/[\\/]/);
       return parts[parts.length - 1];
     }
-
     async function listWorkflowsFromServer(){
       try{
         const r = await fetch('/api/workflows', {cache:'no-store'});
@@ -1009,8 +888,8 @@
       }catch{}
       return [];
     }
-
     function normalizeWorkflowItems(items){
+      // Normalize to [{filename,name}] and sanitize filename for safe fetching
       const norm = [];
       for(const it of (items || [])){
         const raw = (it && (it.filename || it.name)) ? (it.filename || it.name) : it;
@@ -1022,10 +901,7 @@
       norm.sort((a,b)=> a.filename.localeCompare(b.filename, 'en', {sensitivity:'base'}));
       return norm;
     }
-
-    function wfEmptyText(){
-      return t('wf_none_placeholder');
-    }
+    function wfEmptyText(){ return t('wf_none_placeholder'); }
 
     async function loadWorkflowPreview(filename){
       workflowPreview.textContent='';
@@ -1048,7 +924,6 @@
         if (btnApplyWorkflow) btnApplyWorkflow.disabled = true;
         return;
       }
-
       wfWarn.style.display='none';
       workflowSelect.title = './workflows';
 
@@ -1057,7 +932,6 @@
       const list = normalizeWorkflowItems(items);
 
       workflowSelect.innerHTML='';
-
       if(list.length === 0){
         const opt = document.createElement('option');
         opt.value = '';
@@ -1065,7 +939,6 @@
         opt.disabled = true;
         opt.selected = true;
         workflowSelect.appendChild(opt);
-
         if (btnApplyWorkflow) btnApplyWorkflow.disabled = true;
         workflowPreview.textContent = '';
         wfWarn.textContent = t('wf_list_unavailable');
@@ -1081,6 +954,7 @@
       }
       if (btnApplyWorkflow) btnApplyWorkflow.disabled = false;
 
+      // Try using active workflow from server; fallback to user's last selection
       const serverActiveRaw = (window.__CONFIG_CACHED?.image?.active_workflow) || '';
       const serverActive = wfBasename(serverActiveRaw);
       const storedRaw = localStorage.getItem('active_workflow') || '';
@@ -1088,13 +962,9 @@
       const exists = (fn)=> !!Array.from(workflowSelect.options).find(o => o.value === fn);
 
       let target = null;
-      if (serverActive && exists(serverActive)) {
-        target = serverActive;
-      } else if (stored && exists(stored)) {
-        target = stored;
-      } else {
-        target = workflowSelect.options[0].value;
-      }
+      if (serverActive && exists(serverActive)) target = serverActive;
+      else if (stored && exists(stored)) target = stored;
+      else target = workflowSelect.options[0].value;
 
       workflowSelect.value = target;
       localStorage.setItem('active_workflow', target);
@@ -1135,7 +1005,7 @@
       }
     });
 
-    // Save style prompt
+    // Persist style prompt on server
     document.getElementById('btn-save-style-text').addEventListener('click', async ()=>{
       const val = document.getElementById('style-text').value || '';
       try{
@@ -1152,7 +1022,7 @@
       }
     });
 
-    // Size apply
+    // Apply and persist image size
     document.getElementById('btn-apply-size').addEventListener('click', async ()=>{
       const size = currentSizePayload();
       document.getElementById('width-input').value = size.width;
@@ -1172,7 +1042,7 @@
       }
     });
 
-    // Open dir
+    // Open outputs folder (server returns a static URL hint)
     document.getElementById('btn-open-dir').addEventListener('click', async ()=>{
       try{
         const r = await fetch('/open_dir_hint');
@@ -1182,7 +1052,7 @@
       }catch{}
     });
 
-    // Strength-to-denoise mapping + UI sync
+    // Map reference strength to an indicative denoise (display only)
     function mapStrengthToDenoise(s){
       s = Math.max(0, Math.min(1, Number(s) || 0));
       const d = 0.85 - 0.55 * s;
@@ -1236,7 +1106,7 @@
       });
     }
 
-    // Initial config and UI bootstrap
+    // Pull initial server config and bind UI
     const widthInputEl = document.getElementById('width-input');
     const heightInputEl = document.getElementById('height-input');
 
@@ -1245,39 +1115,44 @@
         const r = await fetch('/config', {cache:'no-store'});
         if(!r.ok) throw new Error('config fetch failed');
         const j = await r.json();
-
         window.__CONFIG_CACHED = j;
 
+        // Cache comfy presets if server exposes them
+        if(j?.image?.comfy_presets) COMFY_PRESETS = j.image.comfy_presets;
+
+        // Update system pills
         document.getElementById('ollama-pill').textContent = `Ollama: ${j?.ollama?.model || '?'}`;
         document.getElementById('poll-pill').textContent = `Images: ${j?.image?.backend || '?'}`;
         document.getElementById('sr-pill').textContent = `SR: ${j?.audio?.sample_rate || '?'}`;
 
-        // Map server backend to UI selection
+        // Server → UI backend mapping
         const backendConfig = (j?.image?.backend || 'comfyui');
+        const comfyPreset = j?.image?.comfy_preset || 'local'; // expected: "local" | "remote"
         const dd = document.getElementById('backend-select');
-        dd.value = chooseUiValueForConfig(backendConfig);
+        dd.value = chooseUiValueForConfig(backendConfig, comfyPreset);
 
-        // Optionally disable cloud entry if server disallows cloud usage
+        // Disable cloud entry when server denies cloud usage
         const cloudAllowed = (j?.image?.cloud_allowed !== false);
         const cloudOpt = document.querySelector('#backend-select option[value="pollinations"]');
         if (cloudOpt) cloudOpt.disabled = !cloudAllowed;
 
+        // Size and negative prompt sync
         const w = Number(j?.image?.current_width ?? j?.image?.width_default ?? 512);
         const h = Number(j?.image?.current_height ?? j?.image?.height_default ?? 512);
         widthInputEl.value = w; heightInputEl.value = h; updateSizePill();
-
         const neg = (j?.image?.negative_prompt || '').trim();
         if(neg) document.getElementById('neg-input').value = neg;
 
+        // Workflow UI visibility and content
         const showWF = !!(j?.image?.show_workflow_selector);
         document.getElementById('workflow-block').style.display = showWF ? '' : 'none';
-        if(showWF){
-          await refreshWorkflowList();
-        }else{
+        if(showWF){ await refreshWorkflowList(); }
+        else{
           workflowSelect.innerHTML=''; workflowSelect.title=''; workflowPreview.textContent=''; wfWarn.style.display='none';
           if (btnApplyWorkflow) btnApplyWorkflow.disabled = true;
         }
 
+        // Style settings, reference thumb and controls
         const styleCfg = j?.style || {};
         document.getElementById('style-text').value = styleCfg.style_details || '';
         if(styleCfg.use_reference && styleCfg.reference_id){
@@ -1287,12 +1162,11 @@
         }
         await updateRefThumb(styleCfg.reference_id || null, !!styleCfg.use_reference);
 
-        // Strength UI sync
         const hasRef = !!(styleCfg.use_reference && styleCfg.reference_id);
         const sVal = (typeof styleCfg.reference_strength === 'number') ? styleCfg.reference_strength : 0.6;
         syncRefStrengthUI(hasRef, sVal);
 
-        // Cloud vision UI sync and hint per backend
+        // Cloud-vision hint depends on backend defaults
         syncRefCloudUI(hasRef);
         if (typeof styleCfg.reference_cloud === 'boolean') {
           refCloud.checked = !!styleCfg.reference_cloud;
@@ -1311,15 +1185,14 @@
       }
     }
 
+    // Bootstrap
     (async function init(){
       applyI18N();
       await refreshConfig();
       function onSizeInputChange(){ updateSizePill(); }
       widthInputEl.addEventListener('input', onSizeInputChange);
       heightInputEl.addEventListener('input', onSizeInputChange);
-      if(document.getElementById('workflow-block').style.display!=='none'){
-        await refreshWorkflowList();
-      }
+      if(document.getElementById('workflow-block').style.display!=='none'){ await refreshWorkflowList(); }
     })();
   </script>
 

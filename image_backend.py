@@ -18,9 +18,34 @@ from typing import Optional, Set, Any, Tuple, Dict, List
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
-# Bridge import: keep the module name exactly as provided by the project
-# The bridge returns List[Path] and already handles /prompt, /history polling, and image downloads.
-from comfyui_bridge import generate_from_prompt_dict  # type: ignore
+# ---------- Bridge imports (robust dual import) ----------
+# generate_from_prompt_dict is mandatory (lives in comfyui_bridge)
+# stage_reference_url_and_patch_prompt_sync is optional; try comfy_bridge first, then comfyui_bridge
+_BRIDGE_URL_PATCH_FN = None  # bound to callable if available
+_HAS_URL_PATCH = False
+
+try:
+    # Mandatory ComfyUI HTTP flow (/prompt, /history, downloads)
+    from comfyui_bridge import generate_from_prompt_dict  # type: ignore
+except Exception as e:
+    # Fail fast: this module is required to talk to ComfyUI
+    raise ImportError(f"Missing required bridge: comfyui_bridge.generate_from_prompt_dict ({e})") from e
+
+# Optional URL-mode helper: creates signed URL and injects it into the prompt payload
+try:
+    from comfy_bridge import stage_reference_url_and_patch_prompt_sync as _url_patch  # type: ignore
+    _BRIDGE_URL_PATCH_FN = _url_patch
+    _HAS_URL_PATCH = True
+except Exception:
+    # If the helper is not found under comfy_bridge, try if it exists within comfyui_bridge
+    try:
+        from comfyui_bridge import stage_reference_url_and_patch_prompt_sync as _url_patch_alt  # type: ignore
+        _BRIDGE_URL_PATCH_FN = _url_patch_alt
+        _HAS_URL_PATCH = True
+    except Exception:
+        # URL mode will gracefully fall back to file mode later
+        _BRIDGE_URL_PATCH_FN = None
+        _HAS_URL_PATCH = False
 
 # ---------- Optional unified style engine (soft dependency) ----------
 try:
@@ -32,6 +57,7 @@ try:
         _env_bool01 as se_env_bool01,
     )
 except Exception:
+    # Fallback no-op implementations if style_engine is not present
     def resolve_style_descriptors_for_reference(*, ref_path: Path, prefer_cloud: bool) -> List[str]:
         return []
     def se_env_str(k: str, d: str = "") -> str:
@@ -105,14 +131,14 @@ def _assert_image_backend_host_policy(host: str) -> None:
     allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
     if not allow_remote:
         raise AssertionError(f"Only localhost allowed, got {host}")
-    # Use unified whitelist var
+    # Unified whitelist var (alias maintained in .env for parity with comfy_bridge)
     subnets = _env_str("APP_COMFY_REMOTE_WHITELIST", "")
     if not subnets:
         return
     try:
         ipaddress.ip_address(host)
     except ValueError:
-        # Non-IP (DNS) is allowed if remote allowed; subnet check cannot be applied here.
+        # If host is a DNS name, subnet check cannot be reliably applied here
         return
     if not _is_in_allowed_subnets(host, subnets):
         raise AssertionError(f"Remote host {host} not in allowed subnets ({subnets})")
@@ -483,7 +509,7 @@ class PollinationsBackend(ImageBackend):
         self.cfg.require_cloud_enabled()
         w = width if (width and width > 0) else self.cfg.width
         h = height if (height and height > 0) else self.cfg.height
-        url = self._build_pollinations_image_url(self.cfg.gen_base, prompt, self.cfg.model, w, h, self.cfg.nlogo, self.cfg.seed)
+        url = self._build_pollinations_image_url(self.cfg.gen_base, prompt, self.cfg.model, w, h, self.cfg.nologo, self.cfg.seed)
         params: dict[str, str] = {}
         if self.cfg.secret:
             params["key"] = self.cfg.secret
@@ -604,7 +630,7 @@ class LocalComfyBackend(ImageBackend):
     """
     Local/LAN ComfyUI backend integrated with the bridge:
     - Loads a workflow file and applies positive/negative prompts and dimensions.
-    - Stages reference image path and optional IP-Adapter weight into nodes when configured.
+    - Stages reference image path (file-mode) OR injects signed URL (url-mode) based on env.
     - Delegates generation to comfyui_bridge.generate_from_prompt_dict and returns the first image.
     - Exposes get_workflow_json/set_workflow_json best-effort hooks for app.py patching.
     """
@@ -883,9 +909,30 @@ class LocalComfyBackend(ImageBackend):
                     print(f"[COMFY][desc] resolve failed: {e}")
                 descriptors = []
 
-        # Inject reference file/weight
+        # Reference injection strategy:
+        # - url mode: inject signed URL into the prompt payload using optional helper
+        # - file mode: stage into LoadImage/IP-Adapter nodes inside the workflow
         if self.style and self.style.has_reference:
-            self._inject_style_reference_file(prompt_dict)
+            ref_mode = (os.getenv("APP_COMFY_REF_MODE", self.cfg.ref_mode or "file") or "file").strip().lower()
+            if ref_mode == "url" and _HAS_URL_PATCH and callable(_BRIDGE_URL_PATCH_FN):
+                try:
+                    # Wrap into {'prompt': {...}} for the helper and unwrap back
+                    body: Dict[str, Any] = {"prompt": prompt_dict}
+                    body = _BRIDGE_URL_PATCH_FN(  # type: ignore[misc]
+                        prompt_dict=body,
+                        reference_local_path=self.style.reference_path.resolve(),
+                    )
+                    prompt_dict = body["prompt"]
+                    if _debug():
+                        print("[COMFY][style:url] injected signed URL into prompt")
+                except Exception as e:
+                    # Fallback to file-mode if URL helper fails (keeps lessons running)
+                    if _debug():
+                        print(f"[COMFY][style:url] failed -> fallback to file mode. err={e}")
+                    self._inject_style_reference_file(prompt_dict)
+            else:
+                # Default/forced path: file-mode injection
+                self._inject_style_reference_file(prompt_dict)
 
         # Merge positive prompt and descriptors; override negative prompt natively
         pos = (prompt or "").strip()
