@@ -1,7 +1,7 @@
-# slAIdshow : image_backend.py
-from __future__ import annotations
-
+# image_backend.py
 # Comments strictly in English
+
+from __future__ import annotations
 
 import asyncio
 import contextlib
@@ -649,6 +649,8 @@ class LocalComfyBackend(ImageBackend):
     async def get_workflow_json(self) -> Dict[str, Any]:
         """Return current workflow JSON (prompt dict or file contents)."""
         try:
+            if not self.cfg.workflow_path.exists():
+                return {}
             data = json.loads(self.cfg.workflow_path.read_text(encoding="utf-8"))
             return data
         except Exception:
@@ -658,6 +660,7 @@ class LocalComfyBackend(ImageBackend):
         """Best-effort: replace the workflow file contents with provided JSON."""
         try:
             txt = json.dumps(wf, ensure_ascii=False, indent=2)
+            self.cfg.workflow_path.parent.mkdir(parents=True, exist_ok=True)
             self.cfg.workflow_path.write_text(txt, encoding="utf-8")
         except Exception as e:
             if _debug():
@@ -783,6 +786,7 @@ class LocalComfyBackend(ImageBackend):
                 return src
             inp = self.cfg.comfy_input_dir
             inp.mkdir(parents=True, exist_ok=True)
+            # Sanitize: keep basename only
             dst = inp / src.name
             if not dst.exists() or dst.stat().st_mtime < src.stat().st_mtime:
                 shutil.copy2(src, dst)
@@ -808,6 +812,8 @@ class LocalComfyBackend(ImageBackend):
         if not (self.style and self.style.has_reference):
             return
         ref_path_abs = self.style.reference_path.resolve()
+        if not ref_path_abs.exists() or not ref_path_abs.is_file():
+            return
         ref_staged = self._copy_to_comfy_input(ref_path_abs)
         _, node_value = self._path_strategy_for_comfy_input(ref_staged)
         weight = float(max(0.0, min(1.0, self.style.reference_strength)))
@@ -837,7 +843,7 @@ class LocalComfyBackend(ImageBackend):
                 if k in inputs:
                     inputs[k] = weight
 
-        # Broad fallback: scan by class
+        # Broad fallback: scan by class and typical keys
         for node in prompt_dict.values():
             if not isinstance(node, dict):
                 continue
@@ -851,10 +857,12 @@ class LocalComfyBackend(ImageBackend):
                         inputs["image"] = ov
                     else:
                         inputs["image"] = node_value
+            # Heuristic match for IP-Adapter-like classes and keys
             if "ipadapter" in cls.lower() or cls in {"IPAdapter", "IPAdapterModelApply", "IPAdapterAdvanced"}:
                 if "weight" in inputs:
                     with contextlib.suppress(Exception):
                         inputs["weight"] = weight
+                # Some graphs carry image reference under 'image' key too
                 if "image" in inputs and isinstance(inputs.get("image"), (str, type(None), dict)):
                     if isinstance(inputs.get("image"), dict):
                         ov = dict(inputs["image"])
@@ -976,6 +984,7 @@ class LocalComfyBackend(ImageBackend):
                         shutil.copy2(p, target)
                         return target
                     except Exception:
+                        # As a last resort, return the original Comfy output path
                         return p
 
         hint = await self._short_history_hint()

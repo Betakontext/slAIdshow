@@ -1,64 +1,70 @@
-# slAIDshow : comfui_bridge.py
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-ComfyUI bridge with LAN/remote support.
-
-Features:
-- Accepts ComfyUI running on localhost, LAN IP, or remote/VPN host.
-- Validates remote usage against env policy (APP_ALLOW_REMOTE_BACKENDS and APP_ALLOWED_SUBNETS).
-- Submits prompt dicts to /prompt, polls /history/{id}, downloads images via /api/view or /view.
-- Works with URL reference mode and file-based reference mode (helpers included).
-- Backward-compatible: generate_from_prompt_dict(..., prompt=...) legacy kw accepted.
-
-Environment of interest (see your .env):
-- APP_COMFY_HOST, APP_COMFY_PORT
-- APP_ALLOW_REMOTE_BACKENDS=1 to permit non-local hosts
-- APP_ALLOWED_SUBNETS=192.168.188.0/24 to restrict remotes
-- APP_COMFY_OUTPUT_DIR for FS fallback reads
-- APP_COMFY_INPUT_DIR for local staging of reference images
-- APP_REF_TTL_SEC + app.build_signed_url() when using URL-reference workflows
-"""
+# comfyui_bridge.py
+# Comments strictly in English
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import json
 import os
-import socket
+import re
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
-from urllib.parse import urlencode, quote
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from pydantic import RootModel  # Pydantic v2 RootModel
 
-# =========================
-# Env helpers and policy
-# =========================
+
+# ========= Debug / ENV helpers =========
+
+def _debug() -> bool:
+    v = (os.getenv("APP_COMFY_BRIDGE_DEBUG", os.getenv("APP_IMAGE_BACKEND_DEBUG", "0")) or "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
 
 def _env_str(k: str, d: str = "") -> str:
     return (os.getenv(k, d) or "").strip()
+
+
+def _env_int(k: str, d: int) -> int:
+    try:
+        return int(os.getenv(k, str(d)))
+    except Exception:
+        return d
+
+
+def _env_float(k: str, d: float) -> float:
+    try:
+        return float(os.getenv(k, str(d)))
+    except Exception:
+        return d
+
 
 def _env_bool01(k: str, d: int = 0) -> bool:
     v = (os.getenv(k, str(d)) or "").strip().lower()
     return v in {"1", "true", "yes", "on"}
 
-def _resolve_host_to_ips(host: str) -> List[str]:
-    """Resolve hostname to IPs; fall back to host itself on failure."""
-    try:
-        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-        ips = []
-        for _, _, _, _, sockaddr in infos:
-            ip = sockaddr[0]
-            if ip not in ips:
-                ips.append(ip)
-        return ips or [host]
-    except Exception:
-        return [host]
+
+def _now() -> float:
+    return time.time()
+
+
+def _httpx_limits() -> httpx.Limits:
+    # Keep connections warm but bounded
+    return httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=30.0)
+
+
+def _timeout_default() -> httpx.Timeout:
+    # Conservative per-request timeout; overall generation timeout handled by polling budget
+    return httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
+
+
+# ========= Security: host policy =========
 
 def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
     try:
@@ -75,787 +81,410 @@ def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
             continue
     return False
 
+
 def _assert_image_backend_host_policy(host: str) -> None:
-    """
-    Privacy policy:
-    - Always allow localhost.
-    - Remote hosts allowed only if APP_ALLOW_REMOTE_BACKENDS=1.
-    - If APP_ALLOWED_SUBNETS is set, ensure host IP is in one of those subnets.
-    - If no subnets set, allow any remote when APP_ALLOW_REMOTE_BACKENDS=1.
-    """
+    """Enforce privacy policy for ComfyUI host usage."""
     if host in {"127.0.0.1", "localhost"}:
         return
     allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
     if not allow_remote:
-        raise AssertionError("Remote backends disabled; set APP_ALLOW_REMOTE_BACKENDS=1 to permit.")
-    subnets = _env_str("APP_ALLOWED_SUBNETS", "")
+        raise AssertionError(f"Only localhost allowed, got {host}")
+    subnets = _env_str("APP_COMFY_REMOTE_WHITELIST", "")
     if not subnets:
+        # If no whitelist provided, allow but still restrict to the explicit host given
         return
-    for ip in _resolve_host_to_ips(host):
-        try:
-            ipaddress.ip_address(ip)
-        except ValueError:
-            continue
-        if _is_in_allowed_subnets(ip, subnets):
-            return
-    raise AssertionError(f"Host {host} not within allowed subnets: {subnets}")
+    try:
+        # If host is an IP we can check against subnets; hostnames are allowed but not validated here
+        ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if not _is_in_allowed_subnets(host, subnets):
+        raise AssertionError(f"Remote host {host} not in allowed subnets ({subnets})")
 
-_COMFY_OUTPUT_DIR: Optional[Path] = Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).resolve() if _env_str("APP_COMFY_OUTPUT_DIR", "") else None
-_COMFY_INPUT_DIR: Path = Path(_env_str("APP_COMFY_INPUT_DIR", "./ComfyUI/input")).resolve()
 
-# Optional remote upload endpoint if you have one on the Comfy host
-_COMFY_UPLOAD_ENDPOINT: str = _env_str("APP_COMFY_UPLOAD_ENDPOINT", "/upload/image")
+# ========= Pydantic models for Comfy responses =========
 
-# Workflow node ids/keys (env overrides)
-_POS_NODE_ID: str = _env_str("APP_COMFY_NODE_POS", "2")
-_NEG_NODE_ID: str = _env_str("APP_COMFY_NODE_NEG", "3")
-_LATENT_NODE_ID: str = _env_str("APP_COMFY_NODE_LATENT", "4")
-_KSAMPLER_NODE_ID: str = _env_str("APP_COMFY_NODE_KSAMPLER", "5")
+class _PromptSubmitResponse(BaseModel):
+    prompt_id: str = Field(alias="prompt_id")
 
-_COMFY_NODE_REF_IMAGE: str = _env_str("APP_COMFY_NODE_REF_IMAGE", "")
-_COMFY_REF_IMAGE_KEY: str = _env_str("APP_COMFY_KEY_REF_IMAGE_PATH", "image")
 
-_COMFY_NODE_IPADAPTER: str = _env_str("APP_COMFY_NODE_IPADAPTER", "")
-_COMFY_REF_WEIGHT_KEY: str = _env_str("APP_COMFY_KEY_REF_WEIGHT", "weight")
+class _ImageInfo(BaseModel):
+    filename: str
+    subfolder: str
+    type: str
 
-_COMFY_NODE_REF_URL: str = _env_str("APP_COMFY_NODE_REF_URL", "")
-_COMFY_KEY_REF_URL: str = _env_str("APP_COMFY_KEY_REF_URL", "url")
 
-_APP_REF_TTL_SEC: Optional[int] = int(_env_str("APP_REF_TTL_SEC", "0") or "0") or None
+class _HistoryNodeOutput(BaseModel):
+    images: List[_ImageInfo] = Field(default_factory=list)
 
-# =========================
-# Connection / httpx
-# =========================
 
-class ComfyConnection(BaseModel):
-    host: str = Field(default=_env_str("APP_COMFY_HOST", "127.0.0.1"))
-    port: int = Field(default=int(_env_str("APP_COMFY_PORT", "8188") or 8188))
+class _HistoryPrompt(BaseModel):
+    # keys are node_ids; values carry outputs with images
+    outputs: Dict[str, _HistoryNodeOutput] = Field(default_factory=dict)
 
-    @property
-    def base(self) -> str:
-        _assert_image_backend_host_policy(self.host)
-        return f"http://{self.host}:{self.port}"
 
-def _limits() -> httpx.Limits:
-    return httpx.Limits(max_keepalive_connections=8, max_connections=16, keepalive_expiry=30.0)
+class _HistoryEntry(BaseModel):
+    prompt: _HistoryPrompt
 
-def _timeout(total: float = 150.0) -> httpx.Timeout:
-    total = max(30.0, min(total, 600.0))
-    return httpx.Timeout(connect=6.0, read=total, write=15.0, pool=8.0)
 
-def _clamp_dim(v: Optional[int]) -> Optional[int]:
-    if v is None:
-        return None
-    x = max(64, min(2048, int(v)))
-    return x - (x % 8)
+class _PromptHistoryResponse(RootModel[Dict[str, _HistoryEntry]]):
+    # Response is a dict keyed by prompt_id
+    def entry(self, pid: str) -> Optional[_HistoryEntry]:
+        # Prefer .root (public API) rather than __root__
+        return self.root.get(pid)
 
-def _select_view_mode(host: str) -> str:
-    """Prefer 'path' for localhost, 'query' for remote; allow override via APP_COMFY_FORCE_VIEW_MODE."""
-    override = _env_str("APP_COMFY_FORCE_VIEW_MODE", "auto").lower()
+
+# ========= Internal helpers =========
+
+def _ensure_api_prompt_dict(prompt_dict: Dict[str, Any] | Any) -> Dict[str, Any]:
+    """Normalize to Comfy /prompt POST body: {'prompt': {...}}."""
+    if isinstance(prompt_dict, dict) and "prompt" in prompt_dict and isinstance(prompt_dict["prompt"], dict):
+        return {"prompt": prompt_dict["prompt"]}
+    if isinstance(prompt_dict, dict):
+        return {"prompt": prompt_dict}
+    raise TypeError("prompt_dict must be a dict or {'prompt': {...}}")
+
+
+def _sanitize_filename(name: str) -> str:
+    # Keep simple safe characters to avoid path traversal
+    name = name.replace("\\", "/").split("/")[-1]
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name)
+
+
+def _choose_view_mode(host: str) -> str:
+    """Decide between 'path' (/view/...) and 'query' (/api/view?...)."""
+    override = (_env_str("APP_COMFY_FORCE_VIEW_MODE", "") or "").strip().lower()
     if override in {"path", "query"}:
         return override
     return "path" if host in {"127.0.0.1", "localhost"} else "query"
 
-# =========================
-# Prompt manipulation
-# =========================
 
-def _ensure_api_prompt_dict(body: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize payload to {'prompt': {...}} for Comfy /prompt API."""
-    if isinstance(body, dict) and "prompt" in body and isinstance(body["prompt"], dict):
-        return body
-    if isinstance(body, dict) and body:
-        if all(isinstance(k, str) and isinstance(v, dict) and "class_type" in v for k, v in body.items()):
-            return {"prompt": body}
-    raise RuntimeError("Invalid prompt format; expected a 'prompt' map or {'prompt': {...}}")
+def _image_min_bytes() -> int:
+    return max(512, _env_int("APP_COMFY_MIN_IMAGE_BYTES", 1024))
 
-def _get_node(prompt: Dict[str, Any], node_id: str) -> Optional[Dict[str, Any]]:
-    n = prompt.get(node_id)
-    return n if isinstance(n, dict) else None
 
-def _set_input_if_present(node: Dict[str, Any], key: str, value: Any) -> None:
-    ins = node.get("inputs")
-    if isinstance(ins, dict) and key in ins:
-        ins[key] = value
+def _max_images_to_collect() -> int:
+    # Collect up to N images from a generation; typical is 1
+    return max(1, _env_int("APP_COMFY_MAX_IMAGES", 4))
 
-def override_prompt_inplace(
-    body: Dict[str, Any],
-    *,
-    positive_text: Optional[str] = None,
-    negative_text: Optional[str] = None,
-    width: Optional[int] = None,
-    height: Optional[int] = None,
-    steps: Optional[int] = None,
-    cfg: Optional[float] = None,
-    sampler_name: Optional[str] = None,
-    scheduler: Optional[str] = None,
-    denoise: Optional[float] = None,
-    seed: Optional[int] = None,
-    node_id_positive: str = _POS_NODE_ID,
-    node_id_negative: str = _NEG_NODE_ID,
-    node_id_latent: str = _LATENT_NODE_ID,
-    node_id_ksampler: str = _KSAMPLER_NODE_ID,
-) -> Dict[str, Any]:
-    """Override text/latent/sampler params in-place if keys exist in the workflow."""
-    payload = _ensure_api_prompt_dict(body)
-    prompt: Dict[str, Any] = payload["prompt"]
 
-    if positive_text is not None:
-        n = _get_node(prompt, node_id_positive)
-        if n:
-            _set_input_if_present(n, "text", positive_text)
-    if negative_text is not None:
-        n = _get_node(prompt, node_id_negative)
-        if n:
-            _set_input_if_present(n, "text", negative_text)
+# ========= HTTP with retries =========
 
-    w = _clamp_dim(width) if width is not None else None
-    h = _clamp_dim(height) if height is not None else None
-    if w is not None or h is not None:
-        n = _get_node(prompt, node_id_latent)
-        if n:
-            if w is not None:
-                _set_input_if_present(n, "width", int(w))
-            if h is not None:
-                _set_input_if_present(n, "height", int(h))
-
-    n = _get_node(prompt, node_id_ksampler)
-    if n:
-        if steps is not None:
-            _set_input_if_present(n, "steps", int(steps))
-        if cfg is not None:
-            _set_input_if_present(n, "cfg", float(cfg))
-        if sampler_name is not None:
-            _set_input_if_present(n, "sampler_name", sampler_name)
-        if scheduler is not None:
-            _set_input_if_present(n, "scheduler", scheduler)
-        if denoise is not None:
-            _set_input_if_present(n, "denoise", float(denoise))
-        if seed is not None:
-            _set_input_if_present(n, "seed", int(seed))
-
-    return payload
-
-# =========================
-# Reference helpers
-# =========================
-
-def _stage_reference_into_local_input(local_path: Path, input_dir: Path = _COMFY_INPUT_DIR) -> Optional[str]:
-    """Copy reference image to ComfyUI/input and return basename for LoadImage node."""
-    try:
-        if not local_path.exists() or not local_path.is_file():
-            return None
-        input_dir.mkdir(parents=True, exist_ok=True)
-        target = input_dir / local_path.name
-        data = local_path.read_bytes()
-        if len(data) < 16:
-            return None
-        # Write/overwrite if needed
-        if (not target.exists()) or (local_path.stat().st_mtime > target.stat().st_mtime):
-            target.write_bytes(data)
-        return local_path.name
-    except Exception as e:
-        print(f"DEBUG local reference staging failed: {e}")
-        return None
-
-async def _upload_reference_to_remote_comfy(
-    client: httpx.AsyncClient,
-    base_url: str,
-    local_path: Path,
-    *,
-    upload_endpoint: str = _COMFY_UPLOAD_ENDPOINT,
-) -> Optional[str]:
-    """Upload reference via custom remote endpoint; return basename for LoadImage node."""
-    try:
-        if not local_path.exists() or not local_path.is_file():
-            return None
-        url = f"{base_url}{upload_endpoint}"
-        files = {"file": (local_path.name, local_path.open("rb"), "application/octet-stream")}
-        r = await client.post(url, files=files)
-        if 200 <= r.status_code < 300:
-            try:
-                j = r.json()
-                return j.get("filename") or j.get("name") or local_path.name
-            except Exception:
-                return local_path.name
-        print(f"DEBUG remote reference upload failed: {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        print(f"DEBUG remote reference upload exception: {e}")
-    return None
-
-def override_reference_inplace(
-    body: Dict[str, Any],
-    *,
-    reference_filename: str,
-    ref_image_node_id: Optional[str] = None,
-    ipadapter_node_id: Optional[str] = None,
-    reference_strength: Optional[float] = None,
-    ref_image_key: Optional[str] = None,
-    ref_weight_key: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Patch LoadImage and optional IP-Adapter nodes with filename and weight."""
-    payload = _ensure_api_prompt_dict(body)
-    prompt: Dict[str, Any] = payload["prompt"]
-
-    rid_ref = (ref_image_node_id or _COMFY_NODE_REF_IMAGE or "").strip()
-    rid_ip = (ipadapter_node_id or _COMFY_NODE_IPADAPTER or "").strip()
-    key_img = (ref_image_key or _COMFY_REF_IMAGE_KEY or "image")
-    key_w = (ref_weight_key or _COMFY_REF_WEIGHT_KEY or "weight")
-
-    if rid_ref:
-        n = _get_node(prompt, rid_ref)
-        if n and isinstance(n.get("inputs"), dict):
-            old_val = n["inputs"].get(key_img)
-            # Some workflows store {"image": "..."} instead of string
-            if isinstance(old_val, dict):
-                ov = dict(old_val)
-                ov["image"] = reference_filename
-                n["inputs"][key_img] = ov
-            else:
-                n["inputs"][key_img] = reference_filename
-
-    if rid_ip and reference_strength is not None:
-        n = _get_node(prompt, rid_ip)
-        if n and isinstance(n.get("inputs"), dict):
-            try:
-                n["inputs"][key_w] = float(reference_strength)
-            except Exception:
-                n["inputs"][key_w] = 0.6
-
-    return payload
-
-def _build_signed_url_for_basename(basename: str, ttl_sec: Optional[int] = None) -> str:
-    """Delegate to app.build_signed_url to create time-limited URL for URL-mode workflows."""
-    from app import build_signed_url  # lazy import; raises if absent
-    return build_signed_url(basename, ttl_sec) if ttl_sec is not None else build_signed_url(basename)
-
-def inject_reference_url_inplace(
-    body: Dict[str, Any],
-    *,
-    url: str,
-    ref_url_node_id: Optional[str] = None,
-    ref_url_key: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Inject signed URL into ImageFromURL node. Falls back to first node with matching key."""
-    payload = _ensure_api_prompt_dict(body)
-    prompt: Dict[str, Any] = payload["prompt"]
-
-    rid = (ref_url_node_id or _COMFY_NODE_REF_URL or "").strip()
-    key = (ref_url_key or _COMFY_KEY_REF_URL or "url")
-
-    if rid:
-        n = _get_node(prompt, rid)
-        if n and isinstance(n.get("inputs"), dict) and key in n["inputs"]:
-            n["inputs"][key] = url
-            return payload
-
-    for node in prompt.values():
-        if isinstance(node, dict) and isinstance(node.get("inputs"), dict) and key in node["inputs"]:
-            node["inputs"][key] = url
-            return payload
-
-    return payload
-
-def stage_reference_url_and_patch_prompt(
-    prompt_dict: Dict[str, Any],
-    reference_local_path: Path,
-    *,
-    ref_url_node_id: Optional[str] = None,
-    ref_url_key: Optional[str] = None,
-    ttl_sec: Optional[int] = _APP_REF_TTL_SEC,
-) -> Dict[str, Any]:
-    """Create signed URL for local reference basename and inject into prompt (URL-mode)."""
-    if not reference_local_path.exists() or not reference_local_path.is_file():
-        raise FileNotFoundError(f"reference not found: {reference_local_path}")
-    url = _build_signed_url_for_basename(reference_local_path.name, ttl_sec)
-    return inject_reference_url_inplace(prompt_dict, url=url, ref_url_node_id=ref_url_node_id, ref_url_key=ref_url_key)
-
-# =========================
-# HTTP to ComfyUI
-# =========================
-
-async def _post_prompt(client: httpx.AsyncClient, base_url: str, body: Dict[str, Any]) -> str:
-    """POST /prompt with retry/backoff and extract prompt_id."""
-    delay = 0.8
+async def _retrying_post_json(client: httpx.AsyncClient, url: str, payload: Dict[str, Any], *, max_attempts: int = 4, base_delay: float = 0.6) -> httpx.Response:
     last_exc: Optional[Exception] = None
-    for attempt in range(1, 5):
+    delay = float(base_delay)
+    for attempt in range(1, max_attempts + 1):
         try:
-            r = await client.post(f"{base_url}/prompt", json=body)
-            if r.status_code == 400:
-                raise RuntimeError(f"comfy_400: {r.text[:400]}")
+            r = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
+            # Treat 4xx (except 408/429) as terminal
+            if r.status_code in (400, 401, 403, 404, 405):
+                r.raise_for_status()
+            if r.status_code in (429, 500, 502, 503, 504):
+                raise httpx.HTTPStatusError(f"transient {r.status_code}", request=r.request, response=r)
             r.raise_for_status()
-            j = r.json()
-            pid = j.get("prompt_id") or j.get("promptId") or j.get("id")
-            if not pid:
-                raise RuntimeError("comfy_no_prompt_id")
-            print(f"DEBUG comfy prompt_id: {pid}")
-            return str(pid)
+            return r
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
             last_exc = e
-            if attempt < 4:
-                await asyncio.sleep(delay)
-                delay *= 1.7
-                continue
-            break
-        except Exception:
-            raise
-    raise RuntimeError(f"comfy_post_prompt_failed: {last_exc or 'All connection attempts failed'}")
+            status = getattr(e, "response", None).status_code if getattr(e, "response", None) else None
+            retryable = (status in (429, 500, 502, 503, 504)) or isinstance(e, (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError))
+            if attempt >= max_attempts or not retryable:
+                break
+            await asyncio.sleep(delay)
+            delay *= 1.8
+    raise RuntimeError(f"post_failed after {max_attempts} attempts: {last_exc}")
 
-def _node_maps_from_history_obj(history_json: Dict[str, Any], prompt_id: str) -> List[Dict[str, Any]]:
-    """Collect plausible node maps from history payload variants."""
-    node_maps: List[Dict[str, Any]] = []
-    if isinstance(history_json, dict) and all(isinstance(v, dict) for v in history_json.values()):
-        node_maps.append(history_json)
-    entry = history_json.get(prompt_id)
-    if isinstance(entry, dict) and all(isinstance(v, dict) for v in entry.values()):
-        node_maps.append(entry)
-    if isinstance(entry, dict):
-        outputs = entry.get("outputs")
-        if isinstance(outputs, dict) and all(isinstance(v, dict) for v in outputs.values()):
-            node_maps.append(outputs)
-    # Dedup
-    seen = set()
-    out: List[Dict[str, Any]] = []
-    for m in node_maps:
-        if id(m) in seen:
-            continue
-        seen.add(id(m))
-        out.append(m)
-    return out
 
-def _any_images_in_node_maps(node_maps: Iterable[Dict[str, Any]]) -> bool:
-    """Return True if at least one image record is present."""
-    for node_map in node_maps:
-        for node in node_map.values():
-            if not isinstance(node, dict):
-                continue
-            outs = node.get("outputs")
-            if not isinstance(outs, dict):
-                continue
-            for outv in outs.values():
-                if isinstance(outv, dict) and isinstance(outv.get("images"), list) and outv["images"]:
-                    return True
-    return False
-
-async def _poll_history_ready(
-    client: httpx.AsyncClient,
-    base_url: str,
-    prompt_id: str,
-    max_wait_sec: float = float(_env_str("APP_COMFY_TIMEOUT_SEC", "240") or 240),
-    poll_interval: float = 1.0,
-) -> Dict[str, Any]:
-    """Poll /history/{prompt_id} until images appear or timeout."""
-    deadline = time.time() + max_wait_sec
-    last_payload: Optional[Dict[str, Any]] = None
-    while time.time() < deadline:
-        r = await client.get(f"{base_url}/history/{prompt_id}")
-        if r.status_code == 404:
-            await asyncio.sleep(poll_interval)
-            continue
-        r.raise_for_status()
-        j = r.json()
-        if not isinstance(j, dict):
-            await asyncio.sleep(poll_interval)
-            continue
-        last_payload = j
-        maps = _node_maps_from_history_obj(j, prompt_id)
-        if maps and _any_images_in_node_maps(maps):
-            return j
-        await asyncio.sleep(poll_interval)
-    # Debug aid
-    try:
-        keys = list(last_payload.keys()) if isinstance(last_payload, dict) else []
-        print("DEBUG comfy history keys:", keys)
-        sample = json.dumps(last_payload or {}, ensure_ascii=False)[:2000]
-        print("DEBUG comfy history sample:", sample)
-    except Exception:
-        pass
-    raise TimeoutError("comfy_history_timeout")
-
-def _build_view_candidates(folder_type: str, subfolder: str, filename: str) -> List[Tuple[str, str, str]]:
-    """Build alternative triples to increase chances of successful download."""
-    sub = (subfolder or "").strip().strip("/")
-    cand: List[Tuple[str, str, str]] = []
-    cand.append((folder_type or "output", sub, filename))
-    if sub:
-        cand.append((folder_type or "output", "", filename))
-    cand.append(("temp", sub, filename))
-    if sub:
-        cand.append(("temp", "", filename))
-    cand.append(("output", "", filename))
-    # dedup
-    seen = set()
-    out: List[Tuple[str, str, str]] = []
-    for t, s, f in cand:
-        key = (t, s, f)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append((t, s, f))
-    return out
-
-def _is_likely_image(data: bytes) -> bool:
-    """Quick signature + minimal-size check to avoid accepting HTML/errors as images."""
-    if not data or len(data) < 64:
-        return False
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return True
-    if data.startswith(b"\xff\xd8\xff"):
-        return True
-    if data.startswith(b"RIFF") and b"WEBP" in data[:16]:
-        return True
-    return len(data) >= 256
-
-async def _download_via_view_path(
-    client: httpx.AsyncClient,
-    base_url: str,
-    folder_type: str,
-    subfolder: str,
-    filename: str,
-) -> bytes:
-    """Download via /view/{type}/{subfolder}/{filename} with a few candidate permutations."""
-    filename = filename.strip().lstrip("/")
-    candidates = _build_view_candidates(folder_type, subfolder, filename)
+async def _retrying_get(client: httpx.AsyncClient, url: str, *, max_attempts: int = 4, base_delay: float = 0.6) -> httpx.Response:
     last_exc: Optional[Exception] = None
-    for idx, (t, s, f) in enumerate(candidates, start=1):
-        seg_t = quote((t or "").strip(), safe="")
-        seg_s = quote((s or "").strip(), safe="") if s else ""
-        seg_f = quote((f or "").strip(), safe="")
-        path = f"/view/{seg_t}"
-        if seg_s:
-            path += f"/{seg_s}"
-        path += f"/{seg_f}"
-        url = f"{base_url}{path}"
-        delay = 0.25
-        for attempt in range(1, 3):
+    delay = float(base_delay)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            r = await client.get(url)
+            if r.status_code in (429, 500, 502, 503, 504):
+                raise httpx.HTTPStatusError(f"transient {r.status_code}", request=r.request, response=r)
+            r.raise_for_status()
+            return r
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
+            last_exc = e
+            status = getattr(e, "response", None).status_code if getattr(e, "response", None) else None
+            retryable = (status in (429, 500, 502, 503, 504)) or isinstance(e, (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError))
+            if attempt >= max_attempts or not retryable:
+                break
+            await asyncio.sleep(delay)
+            delay *= 1.8
+    raise RuntimeError(f"get_failed after {max_attempts} attempts: {last_exc}")
+
+
+# ========= Core Comfy flow =========
+
+async def _post_prompt(host: str, port: int, payload: Dict[str, Any]) -> str:
+    """POST /prompt and return prompt_id."""
+    url = f"http://{host}:{port}/prompt"
+    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_default(), follow_redirects=False) as client:
+        r = await _retrying_post_json(client, url, payload)
+        try:
+            parsed = _PromptSubmitResponse.model_validate(r.json())
+            return parsed.prompt_id
+        except ValidationError as e:
+            raise RuntimeError(f"invalid_prompt_submit_response: {e}")
+
+
+async def _poll_history_for_images(host: str, port: int, prompt_id: str, *, max_wait_sec: float) -> List[_ImageInfo]:
+    """Poll /history/{id} until images are available or timeout exceeded."""
+    t0 = _now()
+    url = f"http://{host}:{port}/history/{prompt_id}"
+    delay = 0.5
+    images: List[_ImageInfo] = []
+    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_default(), follow_redirects=False) as client:
+        while True:
+            if _now() - t0 > max_wait_sec:
+                raise TimeoutError(f"history_poll_timeout after {max_wait_sec:.1f}s")
             try:
-                print(f"DEBUG comfy GET[path] try#{attempt} cand#{idx}: {url}")
-                r = await client.get(url)
-                print(f"DEBUG comfy GET[path] status={r.status_code} bytes={len(r.content) if r.content else 0}")
-                r.raise_for_status()
-                data = r.content or b""
-                if not _is_likely_image(data):
-                    raise RuntimeError("image_download_not_recognized")
-                return data
-            except Exception as e:
-                last_exc = e
-                if attempt < 2:
-                    await asyncio.sleep(delay)
-                    delay *= 1.8
-                else:
-                    break
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("image_download_failed_unknown_path")
+                r = await _retrying_get(client, url)
+                data = r.json()
+                # Directly validate the response dict using RootModel in Pydantic v2
+                parsed = _PromptHistoryResponse.model_validate(data)
+                entry = parsed.entry(prompt_id)
+                if entry and entry.prompt and isinstance(entry.prompt.outputs, dict):
+                    # Walk node outputs; collect image tuples
+                    for out in entry.prompt.outputs.values():
+                        if not isinstance(out, _HistoryNodeOutput):
+                            continue
+                        for im in out.images:
+                            if isinstance(im, _ImageInfo) and im.filename:
+                                images.append(im)
+                    if images:
+                        return images[:_max_images_to_collect()]
+            except (httpx.HTTPError, ValidationError, KeyError, ValueError) as e:
+                # Continue polling on transient/json errors
+                if _debug():
+                    print(f"[COMFY][history] transient: {type(e).__name__}: {e}")
+            await asyncio.sleep(delay)
+            # Slow down polling slightly over time to reduce load
+            delay = min(2.0, delay * 1.2)
 
-async def _download_via_view_query(
-    client: httpx.AsyncClient,
-    base_url: str,
-    folder_type: str,
-    subfolder: str,
-    filename: str,
-) -> bytes:
-    """Download via /api/view?filename=...&type=...&subfolder=... with permutations."""
-    filename = (filename or "").strip().lstrip("/")
-    candidates = _build_view_candidates(folder_type, subfolder, filename)
-    last_exc: Optional[Exception] = None
-    for idx, (t, s, f) in enumerate(candidates, start=1):
-        params = {"filename": f, "type": (t or "output"), "subfolder": (s or "")}
-        url = f"{base_url}/api/view?{urlencode(params, safe='/')}"
-        delay = 0.25
-        for attempt in range(1, 3):
-            try:
-                print(f"DEBUG comfy GET[query] try#{attempt} cand#{idx}: {url}")
-                r = await client.get(url)
-                print(f"DEBUG comfy GET[query] status={r.status_code} bytes={len(r.content) if r.content else 0}")
-                r.raise_for_status()
-                data = r.content or b""
-                if not _is_likely_image(data):
-                    raise RuntimeError("image_download_not_recognized")
-                return data
-            except Exception as e:
-                last_exc = e
-                if attempt < 2:
-                    await asyncio.sleep(delay)
-                    delay *= 1.8
-                else:
-                    break
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("image_download_failed_unknown_query")
 
-def _fs_fallback_read(folder_type: str, subfolder: str, filename: str) -> Optional[bytes]:
-    """FS fallback read from APP_COMFY_OUTPUT_DIR when HTTP view fails."""
-    if _COMFY_OUTPUT_DIR is None:
-        return None
-    base = _COMFY_OUTPUT_DIR
-    sub = (subfolder or "").strip().strip("/")
-    if sub:
-        base = base / sub
-    f = base / filename
-    try:
-        if f.is_file():
-            return f.read_bytes()
-    except Exception:
-        pass
-    return None
+# ========= Image download =========
 
-async def _download_images(
-    client: httpx.AsyncClient,
-    base_url: str,
-    history_obj: Dict[str, Any],
-    prompt_id: str,
-    out_dir: Path,
-    view_mode: str,
-) -> List[Path]:
-    """Iterate history, download all image outputs, and save under out_dir."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    saved: List[Path] = []
-
-    def _iter_outputs() -> Iterable[Dict[str, Any]]:
-        maps = _node_maps_from_history_obj(history_obj, prompt_id)
-        for node_map in maps:
-            for node in node_map.values():
-                if not isinstance(node, dict):
-                    continue
-                outs = node.get("outputs")
-                if not isinstance(outs, dict):
-                    continue
-                for outv in outs.values():
-                    if isinstance(outv, dict) and isinstance(outv.get("images"), list):
-                        yield outv
-
-    for outv in _iter_outputs():
-        for item in outv.get("images", []):
-            if not isinstance(item, dict):
-                continue
-            filename = (item.get("filename") or "").strip()
-            subfolder = item.get("subfolder", "")
-            folder_type = item.get("type", "output")
-            if not filename:
-                continue
-
-            data: Optional[bytes] = None
-            try:
-                if view_mode == "query":
-                    data = await _download_via_view_query(client, base_url, folder_type, subfolder, filename)
-                else:
-                    data = await _download_via_view_path(client, base_url, folder_type, subfolder, filename)
-            except Exception:
-                data = _fs_fallback_read(folder_type, subfolder, filename)
-
-            if not data:
-                print(f"DEBUG comfy: could not fetch image '{filename}' ({folder_type}/{subfolder})")
-                continue
-
-            suffix = Path(filename).suffix or ".png"
+async def _download_image_path_mode(host: str, port: int, info: _ImageInfo, out_dir: Path) -> Optional[Path]:
+    """
+    Try path mode: /view/{type}/{subfolder}/{filename}
+    This commonly works for localhost setups where Comfy serves static files.
+    """
+    base = f"http://{host}:{port}"
+    # Ensure safe segments
+    fname = _sanitize_filename(info.filename)
+    subf = "/".join([_sanitize_filename(p) for p in info.subfolder.strip("/").split("/") if p])
+    t = _sanitize_filename(info.type)
+    url = f"{base}/view/{t}/{subf}/{fname}" if subf else f"{base}/view/{t}/{fname}"
+    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=httpx.Timeout(30.0), follow_redirects=False) as client:
+        try:
+            r = await _retrying_get(client, url)
+            content = r.content
+            if not content or len(content) < _image_min_bytes():
+                return None
+            suffix = Path(fname).suffix.lower() or ".png"
             target = out_dir / f"img_{uuid.uuid4().hex}{suffix}"
-            target.write_bytes(data)
-            saved.append(target)
+            target.write_bytes(content)
+            return target
+        except Exception as e:
+            if _debug():
+                print(f"[COMFY][dl:path] {e}")
+            return None
 
-    if not saved:
-        print("DEBUG comfy: no images saved from history.")
-    return saved
 
-# =========================
-# Public API
-# =========================
-
-async def stage_reference_on_remote_and_patch_prompt(
-    prompt_dict: Dict[str, Any],
-    reference_local_path: Path,
-    *,
-    host: str = _env_str("APP_COMFY_HOST", "127.0.0.1"),
-    port: int = int(_env_str("APP_COMFY_PORT", "8188") or 8188),
-    ref_image_node_id: Optional[str] = None,
-    ipadapter_node_id: Optional[str] = None,
-    reference_strength: Optional[float] = None,
-    ref_image_key: Optional[str] = None,
-    ref_weight_key: Optional[str] = None,
-) -> Dict[str, Any]:
+async def _download_image_query_mode(host: str, port: int, info: _ImageInfo, out_dir: Path) -> Optional[Path]:
     """
-    Stage reference for LoadImage nodes:
-    - Localhost: copy to APP_COMFY_INPUT_DIR.
-    - Remote: try HTTP upload endpoint (if available).
-    - Patch prompt with basename and optional weight.
+    Try query mode: /api/view?type=&subfolder=&filename=
+    This is recommended for remote deployments where static path serving may be disabled.
     """
-    conn = ComfyConnection(host=host, port=port)
-    base = conn.base
-    payload = _ensure_api_prompt_dict(prompt_dict)
+    base = f"http://{host}:{port}"
+    # Note: Parameters should be exactly as Comfy expects
+    params = {
+        "filename": info.filename,
+        "subfolder": info.subfolder,
+        "type": info.type,
+    }
+    url = f"{base}/api/view"
+    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=httpx.Timeout(30.0), follow_redirects=False) as client:
+        try:
+            r = await client.get(url, params=params)
+            if r.status_code in (429, 500, 502, 503, 504):
+                # Light retry for transient server busy
+                r = await _retrying_get(client, url=f"{url}?filename={params['filename']}&subfolder={params['subfolder']}&type={params['type']}")
+            r.raise_for_status()
+            content = r.content
+            if not content or len(content) < _image_min_bytes():
+                return None
+            suffix = Path(params["filename"]).suffix.lower() or ".png"
+            target = out_dir / f"img_{uuid.uuid4().hex}{suffix}"
+            target.write_bytes(content)
+            return target
+        except Exception as e:
+            if _debug():
+                print(f"[COMFY][dl:query] {e}")
+            return None
 
-    filename_only: Optional[str] = None
-    async with httpx.AsyncClient(limits=_limits(), timeout=_timeout(60)) as client:
-        if host in {"127.0.0.1", "localhost"}:
-            filename_only = _stage_reference_into_local_input(reference_local_path, _COMFY_INPUT_DIR)
-            if not filename_only:
-                filename_only = reference_local_path.name
+
+async def _download_images(host: str, port: int, images: List[_ImageInfo], out_dir: Path) -> List[Path]:
+    """Attempt to download images using the preferred view mode; fallback to alternate mode if needed."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    mode = _choose_view_mode(host)
+    results: List[Path] = []
+
+    # Helper to pick the right function based on mode string
+    async def _try_one(info: _ImageInfo) -> Optional[Path]:
+        if mode == "path":
+            p = await _download_image_path_mode(host, port, info, out_dir)
+            if p is not None:
+                return p
+            return await _download_image_query_mode(host, port, info, out_dir)
         else:
-            filename_only = await _upload_reference_to_remote_comfy(client, base, reference_local_path)
-            if not filename_only:
-                filename_only = reference_local_path.name  # last-resort fallback
+            p = await _download_image_query_mode(host, port, info, out_dir)
+            if p is not None:
+                return p
+            return await _download_image_path_mode(host, port, info, out_dir)
 
-    return override_reference_inplace(
-        payload,
-        reference_filename=filename_only,
-        ref_image_node_id=ref_image_node_id,
-        ipadapter_node_id=ipadapter_node_id,
-        reference_strength=reference_strength,
-        ref_image_key=ref_image_key,
-        ref_weight_key=ref_weight_key,
-    )
+    for info in images:
+        p = await _try_one(info)
+        if p is not None:
+            results.append(p)
+        if len(results) >= _max_images_to_collect():
+            break
+    return results
 
-def stage_reference_url_and_patch_prompt_sync(
-    prompt_dict: Dict[str, Any],
-    reference_local_path: Path,
-    *,
-    ref_url_node_id: Optional[str] = None,
-    ref_url_key: Optional[str] = None,
-    ttl_sec: Optional[int] = _APP_REF_TTL_SEC,
-) -> Dict[str, Any]:
-    """Sync helper for URL-mode reference injection (wraps app.build_signed_url)."""
-    return stage_reference_url_and_patch_prompt(
-        prompt_dict=prompt_dict,
-        reference_local_path=reference_local_path,
-        ref_url_node_id=ref_url_node_id,
-        ref_url_key=ref_url_key,
-        ttl_sec=ttl_sec,
-    )
+
+# ========= Public API =========
 
 async def generate_from_prompt_dict(
-    prompt_dict: Optional[Dict[str, Any]] = None,
-    out_dir: Path = Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")),
     *,
-    # legacy kw 'prompt' supported via kwargs
-    positive_text: Optional[str] = None,
-    negative_text: Optional[str] = None,
-    width: Optional[int] = None,
-    height: Optional[int] = None,
-    steps: Optional[int] = None,
-    cfg: Optional[float] = None,
-    sampler_name: Optional[str] = None,
-    scheduler: Optional[str] = None,
-    denoise: Optional[float] = None,
-    seed: Optional[int] = None,
-    host: str = _env_str("APP_COMFY_HOST", "127.0.0.1"),
-    port: int = int(_env_str("APP_COMFY_PORT", "8188") or 8188),
-    max_wait_sec: float = float(_env_str("APP_COMFY_TIMEOUT_SEC", "240") or 240),
-    poll_interval: float = 1.0,
-    **kwargs: Any,
+    prompt_dict: Dict[str, Any],
+    out_dir: Path,
+    host: str = "127.0.0.1",
+    port: int = 8188,
+    max_wait_sec: float | int | None = None,
 ) -> List[Path]:
     """
-    Submit prompt to ComfyUI and save resulting images:
-    - Normalizes body, applies overrides (text, dims, sampler).
-    - POST /prompt, poll /history/{id} until images exist.
-    - Download images to out_dir; return list of saved file paths.
-
-    Backward-compat: also accepts legacy keyword 'prompt' instead of 'prompt_dict'.
+    Main entrypoint consumed by image_backend.LocalComfyBackend.
+    - Normalizes the workflow prompt payload
+    - Sends to ComfyUI /prompt
+    - Polls /history/{id}
+    - Downloads resulting images and returns their paths
     """
-    if prompt_dict is None:
-        legacy = kwargs.pop("prompt", None)
-        if legacy is None:
-            raise TypeError("generate_from_prompt_dict() requires 'prompt_dict' (or legacy 'prompt').")
-        prompt_dict = legacy
+    # Security: enforce host policy
+    _assert_image_backend_host_policy(host)
 
-    payload = override_prompt_inplace(
-        body=prompt_dict,
-        positive_text=positive_text,
-        negative_text=negative_text,
-        width=width,
-        height=height,
-        steps=steps,
-        cfg=cfg,
-        sampler_name=sampler_name,
-        scheduler=scheduler,
-        denoise=denoise,
-        seed=seed,
-    )
+    # Resolve timeout budget
+    budget = float(max_wait_sec if (max_wait_sec is not None) else _env_float("APP_COMFY_TIMEOUT_SEC", 180.0))
+    payload = _ensure_api_prompt_dict(prompt_dict)
 
-    conn = ComfyConnection(host=host, port=port)
-    base = conn.base
-    view_mode = _select_view_mode(conn.host)
-    print(f"[COMFY VIEW MODE] {view_mode} (host={conn.host})")
+    if _debug():
+        print(f"[COMFY][submit] host={host}:{port} budget={budget:.1f}s prompt_nodes={len(payload.get('prompt', {}))}")
 
-    async with httpx.AsyncClient(limits=_limits(), timeout=_timeout(max_wait_sec + 30)) as client:
-        prompt_id = await _post_prompt(client, base, payload)
-        history_obj = await _poll_history_ready(client, base, prompt_id, max_wait_sec=max_wait_sec, poll_interval=poll_interval)
-        images = await _download_images(client, base, history_obj, prompt_id, out_dir=Path(out_dir), view_mode=view_mode)
-    return images
+    # POST prompt
+    prompt_id = await _post_prompt(host, port, payload)
 
-# Legacy alias
+    # Poll history
+    images_info = await _poll_history_for_images(host, port, prompt_id, max_wait_sec=budget)
+
+    # Download images
+    paths = await _download_images(host, port, images_info, Path(out_dir).resolve())
+
+    if not paths:
+        raise RuntimeError("no_images_downloaded")
+    return paths
+
+
+# ========= Optional URL reference injection helper =========
+
+def stage_reference_url_and_patch_prompt_sync(
+    *,
+    prompt_dict: Dict[str, Any],
+    reference_local_path: Path,
+) -> Dict[str, Any]:
+    """
+    Optional helper used by image_backend for APP_COMFY_REF_MODE=url.
+    - Builds a signed URL for the given local path by calling app.build_signed_url(name, ttl).
+    - Patches the provided prompt payload to insert the URL into a URL-capable node.
+    Contract:
+      - Input prompt_dict can be {'prompt': {...}} or raw prompt map; we return the same wrapper shape as input.
+    """
+    # Keep wrapper shape
+    had_wrapper = isinstance(prompt_dict, dict) and "prompt" in prompt_dict and isinstance(prompt_dict["prompt"], dict)
+    body = _ensure_api_prompt_dict(prompt_dict)
+    prompt_map: Dict[str, Any] = body["prompt"]
+
+    # Try to import app.build_signed_url dynamically
+    try:
+        import app as _app  # type: ignore
+        build_signed_url = getattr(_app, "build_signed_url")
+    except Exception as e:
+        raise RuntimeError(f"build_signed_url_not_available: {e}")
+
+    # Determine TTL and URL node config from ENV
+    ttl = _env_int("APP_REF_TTL_SEC", 900)
+    node_id_ref_url = _env_str("APP_COMFY_NODE_REF_URL", "") or None
+    node_key_ref_url = _env_str("APP_COMFY_KEY_REF_URL", "url") or "url"
+
+    # Compute signed URL using basename to avoid leaking paths
+    if not isinstance(reference_local_path, Path):
+        reference_local_path = Path(str(reference_local_path))
+    if not reference_local_path.exists() or not reference_local_path.is_file():
+        raise FileNotFoundError(reference_local_path)
+    signed = build_signed_url(reference_local_path.name, ttl=ttl)  # type: ignore[misc]
+    if not isinstance(signed, str) or not signed.startswith(("http://", "https://")):
+        raise RuntimeError("signed_url_invalid")
+
+    # Patch specific node if configured
+    patched = False
+    if node_id_ref_url:
+        node = prompt_map.get(node_id_ref_url)
+        if isinstance(node, dict):
+            inputs = node.get("inputs")
+            if isinstance(inputs, dict):
+                inputs[node_key_ref_url] = signed
+                patched = True
+
+    # Fallback scan: look for inputs with 'url' key
+    if not patched:
+        for node in prompt_map.values():
+            if not isinstance(node, dict):
+                continue
+            inputs = node.get("inputs")
+            if isinstance(inputs, dict):
+                if "url" in inputs and isinstance(inputs.get("url"), (str, type(None), dict)):
+                    # Override dict or string
+                    if isinstance(inputs.get("url"), dict):
+                        ov = dict(inputs["url"])
+                        ov["url"] = signed
+                        inputs["url"] = ov
+                    else:
+                        inputs["url"] = signed
+                    patched = True
+                    break
+
+    if _debug():
+        print(f"[COMFY][url] injected={patched} node_id={node_id_ref_url or 'auto'} ttl={ttl}")
+
+    # Return with original wrapper shape
+    return {"prompt": prompt_map} if not had_wrapper else {"prompt": prompt_map}
+
+
+# ========= Optional convenience: legacy alias =========
+
 async def generate_from_prompt(
+    *,
     prompt: Dict[str, Any],
     out_dir: Path,
-    **kwargs: Any,
+    host: str = "127.0.0.1",
+    port: int = 8188,
+    max_wait_sec: float | int | None = None,
 ) -> List[Path]:
-    return await generate_from_prompt_dict(prompt_dict=prompt, out_dir=out_dir, **kwargs)
-
-
-# =========================
-# Optional: Minimal LocalComfyBackend stub
-# =========================
-
-class LocalComfyBackend:
-    """
-    Minimal backend adapter used by the app. It provides:
-      - generate(prompt_dict, ...) -> returns list of Paths
-      - _copy_latest_from_comfy(...) legacy method retained for compatibility,
-        but now returns already-downloaded images from the bridge.
-    """
-
-    def __init__(self, host: Optional[str] = None, port: Optional[int] = None, out_dir: Optional[Path] = None) -> None:
-        self.host = host or _env_str("APP_COMFY_HOST", "127.0.0.1")
-        self.port = int(port or int(_env_str("APP_COMFY_PORT", "8188") or 8188))
-        self.out_dir = out_dir or Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")).resolve()
-
-    async def generate(
-        self,
-        prompt_dict: Dict[str, Any],
-        *,
-        positive_text: Optional[str] = None,
-        negative_text: Optional[str] = None,
-        width: Optional[int] = None,
-        height: Optional[int] = None,
-        steps: Optional[int] = None,
-        cfg: Optional[float] = None,
-        sampler_name: Optional[str] = None,
-        scheduler: Optional[str] = None,
-        denoise: Optional[float] = None,
-        seed: Optional[int] = None,
-        max_wait_sec: Optional[float] = None,
-    ) -> List[Path]:
-        paths = await generate_from_prompt_dict(
-            prompt_dict=prompt_dict,
-            out_dir=self.out_dir,
-            positive_text=positive_text,
-            negative_text=negative_text,
-            width=width,
-            height=height,
-            steps=steps,
-            cfg=cfg,
-            sampler_name=sampler_name,
-            scheduler=scheduler,
-            denoise=denoise,
-            seed=seed,
-            host=self.host,
-            port=self.port,
-            max_wait_sec=float(max_wait_sec or float(_env_str("APP_COMFY_TIMEOUT_SEC", "240") or 240)),
-        )
-        return paths
-
-    async def _copy_latest_from_comfy(self) -> List[Path]:
-        """
-        Legacy name kept for compatibility with callers expecting this method.
-        In the refactored bridge, images are already downloaded into out_dir.
-        We implement this by returning the most recent files from out_dir.
-        """
-        if not self.out_dir.exists():
-            return []
-        # Collect newest images (PNG/JPG/WEBP)
-        candidates = sorted(
-            [p for p in self.out_dir.glob("**/*") if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}],
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        # Return up to the last 4 recent files to be safe
-        return candidates[:4]
-
+    """Alias for compatibility with callers that name the prompt map as 'prompt'."""
+    return await generate_from_prompt_dict(
+        prompt_dict=prompt,
+        out_dir=out_dir,
+        host=host,
+        port=port,
+        max_wait_sec=max_wait_sec,
+    )

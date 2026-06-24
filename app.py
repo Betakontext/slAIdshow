@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-# NOTE: This is your provided app.py with a focused fix:
-# - Remove httpx.AsyncClient monkeypatch with private kwargs
-# - Introduce a guarded client wrapper using composition
-# - Replace call sites to use the factory instead of global monkeypatch
-# - Add a small helper to filter httpx kwargs
-# All other logic remains the same.
+"""slAIdshow main application entrypoint (cleaned)."""
 
 from __future__ import annotations
 
+# Standard library imports
 import asyncio
 import contextlib
 import hashlib
@@ -23,7 +18,9 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
+from urllib.parse import urlparse
 
+# Third-party imports
 import httpx
 import numpy as np
 import sounddevice as sd
@@ -38,31 +35,49 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-# Image backend factory and interface
+# Local modules
 from image_backend import build_image_backend, ImageBackend
 try:
     from image_backend import LocalComfyBackend  # type: ignore
 except Exception:
     LocalComfyBackend = None  # type: ignore
 
-# Style engine
 from style_engine import (
     StyleConfig,
     build_prompt as build_style_prompt,
     ReferenceStore,
     prepare_backend_style,
 )
-
 try:
     from style_engine import apply_ip_adapter_to_workflow, reference_store  # type: ignore
 except Exception:
     apply_ip_adapter_to_workflow = None  # type: ignore
     reference_store = None  # type: ignore
-
 try:
     from style_engine import resolve_reference_urls_for_pollinations  # type: ignore
 except Exception:
     resolve_reference_urls_for_pollinations = None  # type: ignore
+
+# ---------- Optional dotenv ----------
+ENV_PATH: Optional[str] = None
+try:
+    from dotenv import find_dotenv, load_dotenv
+    explicit = os.environ.get("ENV_FILE")
+    if explicit:
+        found = find_dotenv(explicit, usecwd=True)
+        if found:
+            load_dotenv(found, override=True)
+            ENV_PATH = found
+        elif os.path.isfile(explicit):
+            load_dotenv(explicit, override=True)
+            ENV_PATH = os.path.abspath(explicit)
+    if ENV_PATH is None:
+        found = find_dotenv(".env", usecwd=True)
+        if found:
+            load_dotenv(found, override=True)
+            ENV_PATH = found
+except Exception as e:
+    print(f"[ENV] dotenv not available or failed: {e}")
 
 # ---------- ENV helpers ----------
 def _env_str(k: str, d: str) -> str:
@@ -84,6 +99,405 @@ def _env_bool01(k: str, d: int = 0) -> bool:
     v = (os.getenv(k, str(d)) or "").strip().lower()
     return v in {"1", "true", "yes", "on"}
 
+def _debug_enabled() -> bool:
+    v = (os.getenv("APP_DEBUG", "0") or "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+# ---------- Directories ----------
+BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = Path(_env_str("APP_OUTPUT_DIR", str(BASE_DIR / "outputs" / "images"))).resolve()
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+STYLE_CFG_DIR = Path(_env_str("APP_STYLE_CFG_DIR", str(BASE_DIR / "outputs" / "config"))).resolve()
+STYLE_CFG_DIR.mkdir(parents=True, exist_ok=True)
+STYLE_CFG_PATH = STYLE_CFG_DIR / "style.json"
+STYLE_REFS_DIR = Path(_env_str("APP_STYLE_REF_DIR", str(BASE_DIR / "outputs" / "style_refs"))).resolve()
+STYLE_REFS_DIR.mkdir(parents=True, exist_ok=True)
+WORKFLOWS_DIR = Path(os.getenv("WORKFLOWS_DIR", str(BASE_DIR / "workflows"))).resolve()
+WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---------- Audio config ----------
+AUDIO_DEVICE_PREF = _env_str("APP_AUDIO_DEVICE", "") or None
+SAMPLE_RATE = _env_int("APP_SAMPLE_RATE", 48000)
+FRAME_MS = _env_int("APP_FRAME_DURATION_MS", 20)
+APP_STREAM_LATENCY_SEC = _env_float("APP_STREAM_LATENCY_SEC", 0.12)
+DISABLE_VAD = _env_bool01("APP_DISABLE_VAD", 1)
+RMS_VAD_THRESHOLD = _env_float("APP_RMS_VAD_THRESHOLD", 0.015)
+SNAPSHOT_SEC = _env_float("APP_SNAPSHOT_SEC", 2.5)
+MIN_BUF_SEC = _env_float("APP_MIN_BUF_SEC", 0.35)
+MAX_SILENCE_MS = _env_int("APP_MAX_SILENCE_MS", 700)
+MAX_SEGMENT_SEC = _env_float("APP_MAX_SEGMENT_SEC", 12.0)
+FIRST_SNAPSHOT_DEADLINE_SEC = _env_float("APP_FIRST_SNAPSHOT_DEADLINE_SEC", 1.2)
+APP_SSE_TICK_SEC = _env_float("APP_SSE_TICK_SEC", 1.0)
+
+# ---------- Whisper (pywhispercpp) ----------
+WHISPER_MODEL_PATH = _env_str("APP_WHISPER_MODEL_PATH", "")
+WHISPER_LANGUAGE = _env_str("APP_WHISPER_LANGUAGE", "de")
+WHISPER_THREADS = _env_int("APP_WHISPER_THREADS", 2)
+WHISPER_TEMPERATURE = _env_float("APP_WHISPER_TEMPERATURE", 0.0)
+WHISPER_MIN_SEC = _env_float("APP_WHISPER_MIN_SEC", 0.35)
+WHISPER_MIN_PEAK = _env_float("APP_WHISPER_MIN_PEAK", 0.0009)
+WHISPER_AVAILABLE = True
+try:
+    from pywhispercpp.model import Model as WhisperModel  # type: ignore
+except Exception as e:
+    print(f"[WARN] could not import pywhispercpp: {e}")
+    WhisperModel = None  # type: ignore
+    WHISPER_AVAILABLE = False
+_WHISPER_MODEL: Optional[WhisperModel] = None
+
+def init_whisper_model() -> None:
+    """Initialize whisper.cpp model if path present."""
+    global _WHISPER_MODEL
+    if not WHISPER_AVAILABLE or _WHISPER_MODEL is not None:
+        return
+    if not WHISPER_MODEL_PATH or not Path(WHISPER_MODEL_PATH).is_file():
+        print(f"[WHISPER] model not found/disabled: {WHISPER_MODEL_PATH}")
+        return
+    try:
+        _WHISPER_MODEL = WhisperModel(
+            WHISPER_MODEL_PATH,
+            n_threads=WHISPER_THREADS,
+            print_progress=False,
+            print_realtime=False,
+            language=WHISPER_LANGUAGE or None,
+            translate=False,
+            temperature=WHISPER_TEMPERATURE,
+        )
+        print(f"[WHISPER] model loaded: {Path(WHISPER_MODEL_PATH).name}, threads={WHISPER_THREADS}, lang={WHISPER_LANGUAGE}")
+    except Exception as e:
+        print(f"[WHISPER] initialization failed: {e}")
+        _WHISPER_MODEL = None
+
+TEXT_FIELD_RE = re.compile(r"text\s*=\s*(.+?)(?:,|$)")
+META_RE = re.compile(
+    r"\b(musik|music|applaus|applause|lachen|laugh|geräusch|noise|husten|cough|klatschen|klingel|ring|summen|hmm+|pause)\b",
+    re.I,
+)
+
+def to_int16(x: np.ndarray) -> np.ndarray:
+    x = np.clip(x, -1.0, 1.0)
+    return (x * 32767.0).astype(np.int16, copy=False)
+
+def resample_to_16k(samples: np.ndarray, sr: int) -> np.ndarray:
+    """Naive linear interpolation to 16kHz for whisper models."""
+    if sr == 16000:
+        return samples.astype(np.float32, copy=False)
+    target_len = int(samples.shape[0] * (16000.0 / float(sr)))
+    if target_len <= 0:
+        return np.array([], dtype=np.float32)
+    return np.interp(
+        np.linspace(0.0, 1.0, num=target_len, endpoint=False, dtype=np.float64),
+        np.linspace(0.0, 1.0, num=samples.shape[0], endpoint=False, dtype=np.float64),
+        samples.astype(np.float64, copy=False),
+    ).astype(np.float32, copy=False)
+
+def rms_vad(frame: np.ndarray, rms_threshold: float = 0.01) -> bool:
+    """Simple RMS-based VAD; for production prefer WebRTC-VAD."""
+    if frame.size == 0:
+        return False
+    rms = float(np.sqrt(np.mean(np.square(frame, dtype=np.float32), dtype=np.float64)))
+    return rms >= rms_threshold
+
+def _parse_whisper_out(raw: object) -> str:
+    """Normalize whisper output dicts/segments/strings into final text."""
+    if raw is None:
+        return ""
+    if isinstance(raw, dict):
+        if isinstance(raw.get("text"), str):
+            return raw["text"]
+        segs = raw.get("segments")
+        if isinstance(segs, list):
+            return " ".join(str(s.get("text", "")).strip() for s in segs if isinstance(s, dict)).strip()
+        return ""
+    s = str(raw).strip()
+    if not s or s == "[]":
+        return ""
+    if s.startswith("[") and "text=" in s:
+        parts = TEXT_FIELD_RE.findall(s)
+        if parts:
+            cleaned = []
+            for t in parts:
+                t = t.strip()
+                if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
+                    t = t[1:-1]
+                cleaned.append(t.strip())
+            return " ".join(cleaned).strip()
+    return s
+
+def clean_transcript(raw: str) -> str:
+    """Filter filler words and meta noise markers."""
+    if not raw:
+        return ""
+    txt = " ".join(raw.split()).strip()
+    if not txt:
+        return ""
+    if META_RE.search(txt) and len(txt.split()) <= 3:
+        return ""
+    if len(txt.split()) == 1 and txt.lower() in {"ja", "und", "also", "äh", "oh"}:
+        return ""
+    return txt
+
+def transcribe_chunk_with_whisper(samples: np.ndarray, sr: int) -> str:
+    """Run whisper.cpp on a mono float32 chunk; includes peak/min-sec guards."""
+    if not WHISPER_AVAILABLE or _WHISPER_MODEL is None:
+        return ""
+    if samples.size == 0:
+        return ""
+    peak = float(np.max(np.abs(samples)))
+    if peak < WHISPER_MIN_PEAK:
+        print(f"[WHISPER] below_min_peak peak={peak:.4f} th={WHISPER_MIN_PEAK:.4f}")
+        return ""
+    min_sec = max(0.0, float(WHISPER_MIN_SEC))
+    if samples.size < int(sr * min_sec):
+        pad = int(sr * min_sec) - samples.size
+        samples = np.concatenate([samples, np.zeros(pad, dtype=np.float32)], axis=0)
+    if sr != 16000:
+        samples = resample_to_16k(samples, sr)
+        if samples.size == 0:
+            return ""
+    try:
+        if hasattr(_WHISPER_MODEL, "transcribe_float32"):
+            raw = _WHISPER_MODEL.transcribe_float32(samples)
+        elif hasattr(_WHISPER_MODEL, "transcribe"):
+            raw = _WHISPER_MODEL.transcribe(samples)
+        else:
+            raw = _WHISPER_MODEL.transcribe_pcm16(to_int16(samples))
+        txt = clean_transcript(_parse_whisper_out(raw))
+        if txt:
+            print(f"[WHISPER] text: {txt}")
+        else:
+            print("[WHISPER] raw→empty")
+        return txt
+    except KeyboardInterrupt:
+        return ""
+    except Exception as e:
+        print(f"[WHISPER] transcription failed: {e}")
+        return ""
+
+# ---------- Ollama URL-aware localhost enforcement ----------
+# Read raw env
+OLLAMA_HOST_RAW = _env_str("APP_OLLAMA_HOST", "127.0.0.1")
+OLLAMA_PORT_RAW = _env_int("APP_OLLAMA_PORT", 11434)
+OLLAMA_MODEL = _env_str("APP_OLLAMA_MODEL", "gemma3:1b")
+OLLAMA_TEMPERATURE = _env_float("APP_OLLAMA_TEMPERATURE", 0.2)
+OLLAMA_NUM_CTX = _env_int("APP_OLLAMA_NUM_CTX", 3072)
+OLLAMA_NUM_PREDICT = _env_int("APP_OLLAMA_NUM_PREDICT", 640)
+OLLAMA_TOP_K = _env_int("APP_OLLAMA_TOP_K", 40)
+OLLAMA_TOP_P = _env_float("APP_OLLAMA_TOP_P", 0.9)
+OLLAMA_REPEAT_PENALTY = _env_float("APP_OLLAMA_REPEAT_PENALTY", 1.1)
+OLLAMA_TIMEOUT_SEC = _env_float("APP_OLLAMA_TIMEOUT_SEC", 90.0)
+OLLAMA_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 4)
+OLLAMA_RETRY_BASE_DELAY = _env_float("APP_OLLAMA_RETRY_BASE_DELAY", 0.8)
+LLM_INTERVAL_SEC = _env_float("APP_LLM_INTERVAL_SEC", 10.0)
+OLLAMA_DISABLED = _env_bool01("APP_OLLAMA_DISABLE", 0)
+OLLAMA_SYS_PROMPT = _env_str(
+    "APP_OLLAMA_SYS_PROMPT",
+    "Du bist ein präziser Prompt-Designer für Bildgeneratoren. Erzeuge kurze, klare, fotografische oder illustrative Bild-Prompts, ohne Meta-Kommentare, in Deutsch.",
+)
+
+def _parse_hostlike(value: str) -> tuple[str, Optional[int], bool, Optional[str]]:
+    """Parse plain host[:port] or URL; return (host, port, is_url, scheme)."""
+    v = (value or "").strip()
+    if not v:
+        return ("", None, False, None)
+    try:
+        p = urlparse(v)
+        if p.scheme and p.hostname:
+            return (p.hostname, p.port, True, p.scheme)
+    except Exception:
+        pass
+    if ":" in v and "://" not in v:
+        host_part, port_part = v.rsplit(":", 1)
+        try:
+            return (host_part, int(port_part), False, None)
+        except Exception:
+            return (host_part, None, False, None)
+    return (v, None, False, None)
+
+def _is_localhost_host(host: str) -> bool:
+    """Allow only loopback IPv4/IPv6 and 'localhost'."""
+    h = (host or "").strip().lower()
+    if h in {"localhost", "::1", "[::1]"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(h.strip("[]"))
+        return ip.is_loopback
+    except Exception:
+        return False
+
+def _assert_local_ollama(host_like: str) -> None:
+    """Assert that the provided value resolves to a localhost-only endpoint."""
+    host, _port, _is_url, _scheme = _parse_hostlike(host_like)
+    if not _is_localhost_host(host):
+        raise AssertionError(f"Only localhost allowed for Ollama, got {host_like}")
+
+# Enforce locality with URL support
+_assert_local_ollama(OLLAMA_HOST_RAW)
+
+# Normalize Ollama base URL
+_host_only, _port_from_host, _is_url, _scheme = _parse_hostlike(OLLAMA_HOST_RAW)
+OLLAMA_HOST = _host_only or "127.0.0.1"
+OLLAMA_PORT = int(_port_from_host or OLLAMA_PORT_RAW)
+_scheme_final = "http"
+if _is_url and _scheme in {"http", "https"}:
+    _scheme_final = _scheme
+OLLAMA_BASE_URL = f"{_scheme_final}://{OLLAMA_HOST}:{OLLAMA_PORT}"
+
+def _ollama_url(path: str) -> str:
+    """Build Ollama endpoint URL using normalized base URL."""
+    return f"{OLLAMA_BASE_URL}{path}"
+
+def _ollama_options_for_prompt() -> dict:
+    return {
+        "temperature": OLLAMA_TEMPERATURE,
+        "num_ctx": OLLAMA_NUM_CTX,
+        "num_predict": OLLAMA_NUM_PREDICT,
+        "top_k": OLLAMA_TOP_K,
+        "top_p": OLLAMA_TOP_P,
+        "repeat_penalty": OLLAMA_REPEAT_PENALTY,
+    }
+
+# ---------- Network guard and httpx clients ----------
+def _httpx_limits_app() -> httpx.Limits:
+    return httpx.Limits(max_keepalive_connections=6, max_connections=12, keepalive_expiry=20.0)
+
+def _timeout_short_http() -> httpx.Timeout:
+    return httpx.Timeout(connect=2.5, read=4.0, write=3.0, pool=3.0)
+
+def _timeout_normal() -> httpx.Timeout:
+    t = min(max(5.0, OLLAMA_TIMEOUT_SEC), 120.0)
+    return httpx.Timeout(connect=5.0, read=t, write=5.0, pool=5.0)
+
+class NetGuardConfig:
+    def __init__(self, comfy_host: str, forbid_prefixes: Optional[List[str]] = None) -> None:
+        # German: Nicht-Comfy Zugriffe auf private Netze blocken (Sicherheitsnetz).
+        self.comfy_host = (comfy_host or "").strip().lower()
+        self.forbid_prefixes = forbid_prefixes or ["10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "fd", "fe80"]
+
+def _url_host(u: str) -> str:
+    try:
+        p = urlparse(u)
+        return (p.hostname or "").lower()
+    except Exception:
+        return ""
+
+def _is_forbidden_non_comfy_host(host: str, cfg: NetGuardConfig) -> bool:
+    """Block non-Comfy requests to private ranges. Exception: the configured Comfy host itself."""
+    h = (host or "").strip().lower()
+    if not h:
+        return False
+    if cfg.comfy_host and h == cfg.comfy_host:
+        return True
+    for pref in cfg.forbid_prefixes:
+        if h.startswith(pref):
+            return True
+    return False
+
+ALLOWED_HTTPX_CLIENT_KWARGS = {
+    "headers","params","auth","timeout","verify","proxies","limits",
+    "transport","app","cookies","http2","follow_redirects","base_url",
+    "event_hooks","trust_env","mounts"
+}
+
+def _safe_httpx_kwargs(kwargs: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not kwargs:
+        return {}
+    return {k: v for k, v in kwargs.items() if k in ALLOWED_HTTPX_CLIENT_KWARGS}
+
+class GuardedAsyncClient:
+    """Thin composition-based wrapper that enforces net-guard rules without altering httpx API."""
+    def __init__(self, is_comfy_backend: bool, guard_cfg: NetGuardConfig, **kwargs: Any):
+        self._is_comfy_backend = bool(is_comfy_backend)
+        self._guard_cfg = guard_cfg
+        self._client = httpx.AsyncClient(**_safe_httpx_kwargs(kwargs))
+
+    def _guard(self, url: str) -> None:
+        if self._is_comfy_backend:
+            return
+        if not self._guard_cfg:
+            return
+        host = _url_host(url)
+        if _is_forbidden_non_comfy_host(host, self._guard_cfg):
+            raise RuntimeError(f"[NETGUARD] Non-Comfy backend attempted to reach forbidden host {host}: {url}")
+
+    async def get(self, url: str, *args, **kwargs):
+        self._guard(url)
+        return await self._client.get(url, *args, **kwargs)
+
+    async def post(self, url: str, *args, **kwargs):
+        self._guard(url)
+        return await self._client.post(url, *args, **kwargs)
+
+    async def request(self, method: str, url: str, *args, **kwargs):
+        self._guard(url)
+        return await self._client.request(method, url, *args, **kwargs)
+
+    async def aclose(self):
+        await self._client.aclose()
+
+    async def __aenter__(self):
+        await self._client.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return await self._client.__aexit__(exc_type, exc, tb)
+
+def make_async_client(is_comfy_backend: bool, *, comfy_host: str, limits: Optional[httpx.Limits] = None, timeout: Optional[httpx.Timeout] = None) -> GuardedAsyncClient:
+    kwargs: Dict[str, Any] = {}
+    if limits is not None:
+        kwargs["limits"] = limits
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    return GuardedAsyncClient(is_comfy_backend=is_comfy_backend, guard_cfg=NetGuardConfig(comfy_host), **kwargs)
+
+async def _post_with_retries(client: Any, url: str, body: dict, timeout: float) -> dict:
+    """Robust POST with exponential backoff for local Ollama under load."""
+    delay = float(_env_float("APP_OLLAMA_RETRY_BASE_DELAY", 0.8))
+    max_retries = int(_env_int("APP_OLLAMA_MAX_RETRIES", 4))
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = await client.post(url, json=body, timeout=timeout)
+            if hasattr(resp, "raise_for_status"):
+                resp.raise_for_status()
+            return resp.json()
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
+            last_exc = e
+            status = getattr(e, "response", None).status_code if getattr(e, "response", None) else None
+            retryable = status in (429, 500, 502, 503) or isinstance(
+                e, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.ConnectError)
+            )
+            print(f"[OLLAMA] attempt {attempt} failed (status={status}): {e}")
+            if attempt >= max_retries or not retryable:
+                break
+            await asyncio.sleep(delay)
+            delay *= 2.0
+    raise RuntimeError(f"Ollama request failed after {max_retries} attempts: {last_exc}")
+
+async def _ollama_available(comfy_host: str) -> bool:
+    try:
+        async with make_async_client(is_comfy_backend=False, comfy_host=comfy_host, limits=_httpx_limits_app(), timeout=_timeout_short_http()) as c:
+            r = await c.get(_ollama_url("/api/tags"))
+            r.raise_for_status()
+            return True
+    except Exception:
+        return False
+
+async def ollama_generate_prompt(comfy_host: str, user_text: str) -> str:
+    """Call Ollama /api/generate to optimize T2I prompt."""
+    sys_prompt = OLLAMA_SYS_PROMPT
+    payload = {
+        "user_text": (user_text or "").strip(),
+        "constraints": {"no_meta": True, "max_sentences": 2, "avoid_sensitive": True},
+        "output_hint": "One compact image prompt, no explanations.",
+    }
+    prompt_text = f"<<SYS>>{sys_prompt}<</SYS>>\n\nINPUT_JSON:\n{json.dumps(payload, ensure_ascii=False)}\n\nOUTPUT:\n"
+    body = {"model": OLLAMA_MODEL, "prompt": prompt_text, "stream": False, "options": _ollama_options_for_prompt()}
+    async with make_async_client(is_comfy_backend=False, comfy_host=comfy_host, limits=_httpx_limits_app(), timeout=_timeout_normal()) as client:
+        data = await _post_with_retries(client, _ollama_url("/api/generate"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
+        return (data.get("response") or "").strip()
+
+# ---------- Defaults for image sizes ----------
 def _backend_default_size(backend_name: str) -> tuple[int, int]:
     b = (backend_name or "comfyui").lower()
     if b == "pollinations":
@@ -97,146 +511,12 @@ def _backend_default_size(backend_name: str) -> tuple[int, int]:
     return w, h
 
 APP_POLLINATIONS_REF_MODE = _env_str("APP_POLLINATIONS_REF_MODE", "auto").lower()
-
-# ---------- Optional dotenv loading ----------
-ENV_PATH: Optional[str] = None
-try:
-    from dotenv import find_dotenv, load_dotenv
-    explicit = os.environ.get("ENV_FILE")
-    if explicit:
-        found = find_dotenv(explicit, usecwd=True)
-        if found:
-            load_dotenv(found, override=True)
-            ENV_PATH = found
-        elif os.path.isfile(explicit):
-            load_dotenv(explicit, override=True)
-            ENV_PATH = os.path.abspath(explicit)
-    if ENV_PATH is None:
-        found = find_dotenv(".env", usecwd=True)
-        if found:
-            load_dotenv(found, override=True)
-            ENV_PATH = found
-except Exception as e:
-    print(f"[ENV] dotenv not available or failed: {e}")
-
-# ---------- Audio config ----------
-AUDIO_DEVICE_PREF = _env_str("APP_AUDIO_DEVICE", "") or None
-SAMPLE_RATE = _env_int("APP_SAMPLE_RATE", 48000)
-FRAME_MS = _env_int("APP_FRAME_DURATION_MS", 20)
-APP_STREAM_LATENCY_SEC = _env_float("APP_STREAM_LATENCY_SEC", 0.12)
-
-DISABLE_VAD = _env_bool01("APP_DISABLE_VAD", 1)
-RMS_VAD_THRESHOLD = _env_float("APP_RMS_VAD_THRESHOLD", 0.015)
-
-SNAPSHOT_SEC = _env_float("APP_SNAPSHOT_SEC", 2.5)
-MIN_BUF_SEC = _env_float("APP_MIN_BUF_SEC", 0.35)
-MAX_SILENCE_MS = _env_int("APP_MAX_SILENCE_MS", 700)
-MAX_SEGMENT_SEC = _env_float("APP_MAX_SEGMENT_SEC", 12.0)
-FIRST_SNAPSHOT_DEADLINE_SEC = _env_float("APP_FIRST_SNAPSHOT_DEADLINE_SEC", 1.2)
-
-# ---------- SSE heartbeat ----------
-APP_SSE_TICK_SEC = _env_float("APP_SSE_TICK_SEC", 1.0)
-
-# ---------- Whisper (pywhispercpp) ----------
-WHISPER_MODEL_PATH = _env_str("APP_WHISPER_MODEL_PATH", "")
-WHISPER_LANGUAGE = _env_str("APP_WHISPER_LANGUAGE", "de")
-WHISPER_THREADS = _env_int("APP_WHISPER_THREADS", 2)
-WHISPER_TEMPERATURE = _env_float("APP_WHISPER_TEMPERATURE", 0.0)
-WHISPER_MIN_SEC = _env_float("APP_WHISPER_MIN_SEC", 0.35)
-WHISPER_MIN_PEAK = _env_float("APP_WHISPER_MIN_PEAK", 0.0009)
-
-# ---------- Text filtering ----------
-TEXT_MIN_CHARS = _env_int("APP_TEXT_MIN_CHARS", 3)
-TEXT_MIN_WORDS = _env_int("APP_TEXT_MIN_WORDS", 1)
-FORCE_MEANINGFUL_CHECK = _env_bool01("APP_FORCE_MEANINGFUL_CHECK", 0)
-
-CONTEXT_MAX_SEGMENTS = _env_int("APP_CONTEXT_MAX_SEGMENTS", 5)
-CONTEXT_MAX_CHARS = _env_int("APP_CONTEXT_MAX_CHARS", 480)
-
-# ---------- Output/static config ----------
-OUTPUT_DIR = Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")).resolve()
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-def rel_for_ui_path(p: Path) -> str:
-    return Path(p).name
-
-def rel_for_ui(p: Path) -> str:
-    return rel_for_ui_path(p)
-
-def ensure_in_output_dir(p: Path) -> Path:
-    """Ensure generated image is in OUTPUT_DIR; move/copy if needed. German: Sicher in Static-Verzeichnis bringen."""
-    try:
-        p = Path(p).resolve()
-    except Exception:
-        p = Path(p)
-    if p.parent == OUTPUT_DIR:
-        return p
-    target = OUTPUT_DIR / p.name
-    if target.exists():
-        stem, suf = p.stem, p.suffix
-        for i in range(1, 1000):
-            cand = OUTPUT_DIR / f"{stem}_{i}{suf}"
-            if not cand.exists():
-                target = cand
-                break
-    try:
-        with contextlib.suppress(Exception):
-            p.replace(target)
-            print(f"[SAVE] moved image to {target}")
-            return target
-        data = p.read_bytes()
-        target.write_bytes(data)
-        with contextlib.suppress(Exception):
-            p.unlink()
-        print(f"[SAVE] copied image to {target}")
-        return target
-    except Exception as e:
-        print(f"[SAVE] failed to move/copy image: {e}")
-        return p
-
 APP_IMAGE_WIDTH = _env_int("APP_IMAGE_WIDTH", 512)
 APP_IMAGE_HEIGHT = _env_int("APP_IMAGE_HEIGHT", 512)
 
-STYLE_CFG_DIR = Path(_env_str("APP_STYLE_CFG_DIR", "./outputs/config")).resolve()
-STYLE_CFG_DIR.mkdir(parents=True, exist_ok=True)
-STYLE_CFG_PATH = STYLE_CFG_DIR / "style.json"
-STYLE_REFS_DIR = Path(_env_str("APP_STYLE_REF_DIR", "./outputs/style_refs")).resolve()
-STYLE_REFS_DIR.mkdir(parents=True, exist_ok=True)
-
-# ---------- Workflows (ComfyUI) ----------
-WORKFLOWS_DIR = Path(os.getenv("WORKFLOWS_DIR", "workflows")).resolve()
-WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
-
-# ---------- Ollama ----------
-OLLAMA_HOST = _env_str("APP_OLLAMA_HOST", "127.0.0.1")
-OLLAMA_PORT = _env_int("APP_OLLAMA_PORT", 11434)
-OLLAMA_MODEL = _env_str("APP_OLLAMA_MODEL", "gemma3:1b")
-OLLAMA_TEMPERATURE = _env_float("APP_OLLAMA_TEMPERATURE", 0.2)
-OLLAMA_NUM_CTX = _env_int("APP_OLLAMA_NUM_CTX", 3072)
-OLLAMA_NUM_PREDICT = _env_int("APP_OLLAMA_NUM_PREDICT", 640)
-OLLAMA_TOP_K = _env_int("APP_OLLAMA_TOP_K", 40)
-OLLAMA_TOP_P = _env_float("APP_OLLAMA_TOP_P", 0.9)
-OLLAMA_REPEAT_PENALTY = _env_float("APP_OLLAMA_REPEAT_PENALTY", 1.1)
-OLLAMA_TIMEOUT_SEC = _env_float("APP_OLLAMA_TIMEOUT_SEC", 90.0)
-OLLAMA_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 4)
-OLLAMA_RETRY_BASE_DELAY = _env_float("APP_OLLAMA_RETRY_BASE_DELAY", 0.8)
-LLM_INTERVAL_SEC = _env_float("APP_LLM_INTERVAL_SEC", 10.0)
-OLLAMA_DISABLED = _env_bool01("APP_OLLAMA_DISABLE", 0)
-
-OLLAMA_SYS_PROMPT = _env_str(
-    "APP_OLLAMA_SYS_PROMPT",
-    "Du bist ein präziser Prompt-Designer für Bildgeneratoren. Erzeuge kurze, klare, fotografische oder illustrative Bild-Prompts, ohne Meta-Kommentare, in Deutsch.",
-)
-
-def assert_local(host: str) -> None:
-    """Enforce Ollama host to be localhost only."""
-    if host != "127.0.0.1":
-        raise AssertionError(f"Only localhost allowed for Ollama, got {host}")
-
-assert_local(OLLAMA_HOST)
-
+# ---------- Remote backend policy ----------
 def _assert_image_backend_host() -> None:
-    """German: Remote Backends nur wenn explizit erlaubt; sonst comfy_host muss localhost sein."""
+    """Remote backends only when explicitly allowed; otherwise Comfy host must be localhost."""
     allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
     comfy_host = _env_str("APP_COMFY_HOST", "127.0.0.1")
     if not allow_remote:
@@ -247,15 +527,7 @@ def _assert_image_backend_host() -> None:
             )
 
 _assert_image_backend_host()
-
 COMFY_REMOTE_WHITELIST = [s.strip() for s in os.getenv("APP_COMFY_REMOTE_WHITELIST", "").split(",") if s.strip()]
-
-WARMUP_ENABLE = _env_bool01("APP_OLLAMA_WARMUP_ENABLE", 1)
-WARMUP_PROMPT = _env_str("APP_OLLAMA_WARMUP_PROMPT", "Sag Hallo auf Deutsch.")
-WARMUP_TIMEOUT_SEC = _env_float("APP_OLLAMA_TIMEOUT_SEC", 45.0)
-WARMUP_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 3)
-WARMUP_RETRY_DELAY = _env_float("APP_OLLAMA_RETRY_DELAY", 1.2)
-WARMUP_GRACE_SEC = _env_float("APP_OLLAMA_GRACE_SEC", 10.0)
 
 # ---------- Reference URL signing ----------
 APP_REF_HOST = _env_str("APP_REF_HOST", "")
@@ -478,344 +750,6 @@ class ComfyTargetReq(BaseModel):
     host: Optional[str] = None
     port: Optional[int] = None
 
-# ---------- Audio utils ----------
-def pick_input_device(prefer: Optional[str] = None) -> int:
-    """Pick an audio input device with max_input_channels>0. German: einfache Heuristik."""
-    devs = sd.query_devices()
-    if not devs:
-        raise RuntimeError("No audio devices found")
-    if prefer:
-        for i, d in enumerate(devs):
-            if d.get("name") == prefer and d.get("max_input_channels", 0) > 0:
-                return i
-        for i, d in enumerate(devs):
-            if prefer.lower() in (d.get("name", "").lower()) and d.get("max_input_channels", 0) > 0:
-                return i
-    for i, d in enumerate(devs):
-        if "pulse" in (d.get("name", "").lower()) and d.get("max_input_channels", 0) > 0:
-            return i
-    for i, d in enumerate(devs):
-        if d.get("max_input_channels", 0) > 0:
-            return i
-    raise RuntimeError("No input device with max_input_channels>0 found.")
-
-def to_int16(x: np.ndarray) -> np.ndarray:
-    x = np.clip(x, -1.0, 1.0)
-    return (x * 32767.0).astype(np.int16, copy=False)
-
-def rms_vad(frame: np.ndarray, rms_threshold: float = 0.01) -> bool:
-    """Simple RMS-based VAD; German: für echte Robustheit WebRTC-VAD nutzen."""
-    if frame.size == 0:
-        return False
-    rms = float(np.sqrt(np.mean(np.square(frame, dtype=np.float32), dtype=np.float64)))
-    return rms >= rms_threshold
-
-def resample_to_16k(samples: np.ndarray, sr: int) -> np.ndarray:
-    """Linear interpolation resampling to 16kHz."""
-    if sr == 16000:
-        return samples.astype(np.float32, copy=False)
-    target_len = int(samples.shape[0] * (16000.0 / float(sr)))
-    if target_len <= 0:
-        return np.array([], dtype=np.float32)
-    return np.interp(
-        np.linspace(0.0, 1.0, num=target_len, endpoint=False, dtype=np.float64),
-        np.linspace(0.0, 1.0, num=samples.shape[0], endpoint=False, dtype=np.float64),
-        samples.astype(np.float64, copy=False),
-    ).astype(np.float32, copy=False)
-
-# ---------- Whisper init ----------
-WHISPER_AVAILABLE = True
-try:
-    from pywhispercpp.model import Model as WhisperModel  # type: ignore
-except Exception as e:
-    print(f"[WARN] could not import pywhispercpp: {e}")
-    WhisperModel = None  # type: ignore
-    WHISPER_AVAILABLE = False
-
-_WHISPER_MODEL: Optional[WhisperModel] = None
-
-def init_whisper_model() -> None:
-    """Initialize whisper.cpp model if path present."""
-    global _WHISPER_MODEL
-    if not WHISPER_AVAILABLE or _WHISPER_MODEL is not None:
-        return
-    if not WHISPER_MODEL_PATH or not Path(WHISPER_MODEL_PATH).is_file():
-        print(f"[WHISPER] model not found/disabled: {WHISPER_MODEL_PATH}")
-        return
-    try:
-        _WHISPER_MODEL = WhisperModel(
-            WHISPER_MODEL_PATH,
-            n_threads=WHISPER_THREADS,
-            print_progress=False,
-            print_realtime=False,
-            language=WHISPER_LANGUAGE or None,
-            translate=False,
-            temperature=WHISPER_TEMPERATURE,
-        )
-        print(
-            f"[WHISPER] model loaded: {Path(WHISPER_MODEL_PATH).name}, "
-            f"threads={WHISPER_THREADS}, lang={WHISPER_LANGUAGE}"
-        )
-    except Exception as e:
-        print(f"[WHISPER] initialization failed: {e}")
-        _WHISPER_MODEL = None
-
-TEXT_FIELD_RE = re.compile(r"text\s*=\s*(.+?)(?:,|$)")
-META_RE = re.compile(
-    r"\b(musik|music|applaus|applause|lachen|laugh|geräusch|noise|husten|cough|klatschen|klingel|ring|summen|hmm+|pause)\b",
-    re.I,
-)
-
-def _parse_whisper_out(raw: object) -> str:
-    """Normalize whisper output dicts/segments/strings into final text."""
-    if raw is None:
-        return ""
-    if isinstance(raw, dict):
-        if isinstance(raw.get("text"), str):
-            return raw["text"]
-        segs = raw.get("segments")
-        if isinstance(segs, list):
-            return " ".join(str(s.get("text", "")).strip() for s in segs if isinstance(s, dict)).strip()
-        return ""
-    s = str(raw).strip()
-    if not s or s == "[]":
-        return ""
-    if s.startswith("[") and "text=" in s:
-        parts = TEXT_FIELD_RE.findall(s)
-        if parts:
-            cleaned = []
-            for t in parts:
-                t = t.strip()
-                if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
-                    t = t[1:-1]
-                cleaned.append(t.strip())
-            return " ".join(cleaned).strip()
-    return s
-
-def clean_transcript(raw: str) -> str:
-    """Filter filler words and meta noise markers."""
-    if not raw:
-        return ""
-    txt = " ".join(raw.split()).strip()
-    if not txt:
-        return ""
-    if META_RE.search(txt) and len(txt.split()) <= 3:
-        return ""
-    if len(txt.split()) == 1 and txt.lower() in {"ja", "und", "also", "äh", "oh"}:
-        return ""
-    return txt
-
-def is_meaningful_text(t: str, min_chars: int, min_words: int) -> bool:
-    t = (t or "").strip()
-    return bool(t) and len(t) >= min_chars and len(t.split()) >= min_words and re.search(r"[A-Za-zÄÖÜäöüß]", t)
-
-def transcribe_chunk_with_whisper(samples: np.ndarray, sr: int) -> str:
-    """Run whisper.cpp on a mono float32 chunk; includes peak/min-sec guards."""
-    if not WHISPER_AVAILABLE or _WHISPER_MODEL is None:
-        return ""
-    if samples.size == 0:
-        return ""
-    peak = float(np.max(np.abs(samples)))
-    if peak < WHISPER_MIN_PEAK:
-        print(f"[WHISPER] below_min_peak peak={peak:.4f} th={WHISPER_MIN_PEAK:.4f}")
-        return ""
-    min_sec = max(0.0, float(WHISPER_MIN_SEC))
-    if samples.size < int(sr * min_sec):
-        pad = int(sr * min_sec) - samples.size
-        samples = np.concatenate([samples, np.zeros(pad, dtype=np.float32)], axis=0)
-    if sr != 16000:
-        samples = resample_to_16k(samples, sr)
-        if samples.size == 0:
-            return ""
-    try:
-        if hasattr(_WHISPER_MODEL, "transcribe_float32"):
-            raw = _WHISPER_MODEL.transcribe_float32(samples)
-        elif hasattr(_WHISPER_MODEL, "transcribe"):
-            raw = _WHISPER_MODEL.transcribe(samples)
-        else:
-            raw = _WHISPER_MODEL.transcribe_pcm16(to_int16(samples))
-        txt = clean_transcript(_parse_whisper_out(raw))
-        if txt:
-            print(f"[WHISPER] text: {txt}")
-        else:
-            print("[WHISPER] raw→empty")
-        return txt
-    except KeyboardInterrupt:
-        return ""
-    except Exception as e:
-        print(f"[WHISPER] transcription failed: {e}")
-        return ""
-
-# ---------- HTTP utils ----------
-def _httpx_limits_app() -> httpx.Limits:
-    return httpx.Limits(max_keepalive_connections=6, max_connections=12, keepalive_expiry=20.0)
-
-def _timeout_short_http() -> httpx.Timeout:
-    return httpx.Timeout(connect=2.5, read=4.0, write=3.0, pool=3.0)
-
-def _timeout_normal() -> httpx.Timeout:
-    t = min(max(5.0, OLLAMA_TIMEOUT_SEC), 120.0)
-    return httpx.Timeout(connect=5.0, read=t, write=5.0, pool=5.0)
-
-def _debug_enabled() -> bool:
-    v = (os.getenv("APP_DEBUG", "0") or "").strip().lower()
-    return v in {"1", "true", "yes", "on"}
-
-# ---------- NetGuard (composition-based guarded client) ----------
-class NetGuardConfig:
-    def __init__(self, comfy_host: str, forbid_prefixes: Optional[List[str]] = None) -> None:
-        self.comfy_host = (comfy_host or "").strip().lower()
-        self.forbid_prefixes = forbid_prefixes or ["10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "fd", "fe80"]
-
-def _url_host(u: str) -> str:
-    try:
-        from urllib.parse import urlparse
-        p = urlparse(u)
-        return (p.hostname or "").lower()
-    except Exception:
-        return ""
-
-def _is_forbidden_non_comfy_host(host: str, cfg: NetGuardConfig) -> bool:
-    """Block non-Comfy requests to private ranges. German: Ausnahmen nur für Comfy-Host."""
-    h = (host or "").strip().lower()
-    if not h:
-        return False
-    if cfg.comfy_host and h == cfg.comfy_host:
-        return True
-    for pref in cfg.forbid_prefixes:
-        if h.startswith(pref):
-            return True
-    return False
-
-ALLOWED_HTTPX_CLIENT_KWARGS = {
-    "headers","params","auth","timeout","verify","proxies","limits",
-    "transport","app","cookies","http2","follow_redirects","base_url",
-    "event_hooks","trust_env","mounts"
-}
-
-def _safe_httpx_kwargs(kwargs: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Filter unknown kwargs to avoid TypeError on httpx.AsyncClient construction."""
-    if not kwargs:
-        return {}
-    return {k: v for k, v in kwargs.items() if k in ALLOWED_HTTPX_CLIENT_KWARGS}
-
-class GuardedAsyncClient:
-    """
-    A thin composition-based wrapper that enforces net-guard rules without altering httpx API.
-    """
-    def __init__(self, is_comfy_backend: bool, guard_cfg: NetGuardConfig, **kwargs: Any):
-        self._is_comfy_backend = bool(is_comfy_backend)
-        self._guard_cfg = guard_cfg
-        self._client = httpx.AsyncClient(**_safe_httpx_kwargs(kwargs))
-
-    def _guard(self, url: str) -> None:
-        if self._is_comfy_backend:
-            return
-        if not self._guard_cfg:
-            return
-        host = _url_host(url)
-        if _is_forbidden_non_comfy_host(host, self._guard_cfg):
-            raise RuntimeError(f"[NETGUARD] Non-Comfy backend attempted to reach forbidden host {host}: {url}")
-
-    async def get(self, url: str, *args, **kwargs):
-        self._guard(url)
-        return await self._client.get(url, *args, **kwargs)
-
-    async def post(self, url: str, *args, **kwargs):
-        self._guard(url)
-        return await self._client.post(url, *args, **kwargs)
-
-    async def request(self, method: str, url: str, *args, **kwargs):
-        self._guard(url)
-        return await self._client.request(method, url, *args, **kwargs)
-
-    async def aclose(self):
-        await self._client.aclose()
-
-    # Async context manager support
-    async def __aenter__(self):
-        await self._client.__aenter__()
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return await self._client.__aexit__(exc_type, exc, tb)
-
-def make_async_client(is_comfy_backend: bool, *, limits: Optional[httpx.Limits] = None, timeout: Optional[httpx.Timeout] = None) -> GuardedAsyncClient | httpx.AsyncClient:
-    """
-    Factory: return a guarded client for non-Comfy contexts, plain client otherwise.
-    We still use the guard even for Comfy=False (non-Comfy), but allow Comfy host only to Comfy.
-    """
-    kwargs: Dict[str, Any] = {}
-    if limits is not None:
-        kwargs["limits"] = limits
-    if timeout is not None:
-        kwargs["timeout"] = timeout
-    # Always return the GuardedAsyncClient; for is_comfy_backend=True guard is a no-op
-    return GuardedAsyncClient(is_comfy_backend=is_comfy_backend, guard_cfg=NetGuardConfig(STATE.comfy_host), **kwargs)
-
-# ---------- Ollama helpers ----------
-def _ollama_url(path: str) -> str:
-    return f"http://{OLLAMA_HOST}:{OLLAMA_PORT}{path}"
-
-def _ollama_options_for_prompt() -> dict:
-    return {
-        "temperature": OLLAMA_TEMPERATURE,
-        "num_ctx": OLLAMA_NUM_CTX,
-        "num_predict": OLLAMA_NUM_PREDICT,
-        "top_k": OLLAMA_TOP_K,
-        "top_p": OLLAMA_TOP_P,
-        "repeat_penalty": OLLAMA_REPEAT_PENALTY,
-    }
-
-async def _post_with_retries(client: Any, url: str, body: dict, timeout: float) -> dict:
-    """
-    Robust POST with exponential backoff for local Ollama under load.
-    Note: client can be GuardedAsyncClient or httpx.AsyncClient.
-    """
-    delay = float(_env_float("APP_OLLAMA_RETRY_BASE_DELAY", 0.8))
-    max_retries = int(_env_int("APP_OLLAMA_MAX_RETRIES", 4))
-    last_exc: Optional[Exception] = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            resp = await client.post(url, json=body, timeout=timeout)
-            if hasattr(resp, "raise_for_status"):
-                resp.raise_for_status()
-            return resp.json()
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
-            last_exc = e
-            status = getattr(e, "response", None).status_code if getattr(e, "response", None) else None
-            retryable = status in (429, 500, 502, 503) or isinstance(
-                e, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.ConnectError)
-            )
-            print(f"[OLLAMA] attempt {attempt} failed (status={status}): {e}")
-            if attempt >= max_retries or not retryable:
-                break
-            await asyncio.sleep(delay)
-            delay *= 2.0
-    raise RuntimeError(f"Ollama request failed after {max_retries} attempts: {last_exc}")
-
-async def _ollama_available() -> bool:
-    try:
-        async with make_async_client(is_comfy_backend=False, limits=_httpx_limits_app(), timeout=_timeout_short_http()) as c:
-            r = await c.get(_ollama_url("/api/tags"))
-            r.raise_for_status()
-            return True
-    except Exception:
-        return False
-
-async def ollama_generate_prompt(client: Any, user_text: str) -> str:
-    """Call Ollama /api/generate to optimize T2I prompt."""
-    sys = OLLAMA_SYS_PROMPT
-    payload = {
-        "user_text": (user_text or "").strip(),
-        "constraints": {"no_meta": True, "max_sentences": 2, "avoid_sensitive": True},
-        "output_hint": "One compact image prompt, no explanations.",
-    }
-    prompt_text = f"<<SYS>>{sys}<</SYS>>\n\nINPUT_JSON:\n{json.dumps(payload, ensure_ascii=False)}\n\nOUTPUT:\n"
-    body = {"model": OLLAMA_MODEL, "prompt": prompt_text, "stream": False, "options": _ollama_options_for_prompt()}
-    data = await _post_with_retries(client, _ollama_url("/api/generate"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
-    return (data.get("response") or "").strip()
-
 # ---------- Global state ----------
 @dataclass
 class PipelineState:
@@ -850,7 +784,42 @@ class PipelineState:
 STATE = PipelineState()
 STOP_DEBOUNCE_SEC = float(os.getenv("APP_STOP_DEBOUNCE_SEC", "2.0") or "2.0")
 
-# ---------- Style persistence helpers ----------
+# ---------- Utility / UI helpers ----------
+def rel_for_ui_path(p: Path) -> str:
+    return Path(p).name
+
+def ensure_in_output_dir(p: Path) -> Path:
+    """Ensure generated image is in OUTPUT_DIR; move/copy if needed. German: Sicher in Static-Verzeichnis bringen."""
+    try:
+        p = Path(p).resolve()
+    except Exception:
+        p = Path(p)
+    if p.parent == OUTPUT_DIR:
+        return p
+    target = OUTPUT_DIR / p.name
+    if target.exists():
+        stem, suf = p.stem, p.suffix
+        for i in range(1, 1000):
+            cand = OUTPUT_DIR / f"{stem}_{i}{suf}"
+            if not cand.exists():
+                target = cand
+                break
+    try:
+        with contextlib.suppress(Exception):
+            p.replace(target)
+            print(f"[SAVE] moved image to {target}")
+            return target
+        data = p.read_bytes()
+        target.write_bytes(data)
+        with contextlib.suppress(Exception):
+            p.unlink()
+        print(f"[SAVE] copied image to {target}")
+        return target
+    except Exception as e:
+        print(f"[SAVE] failed to move/copy image: {e}")
+        return p
+
+# ---------- Style persistence ----------
 def _load_style_cfg() -> StyleConfig:
     if STYLE_CFG_PATH.exists():
         try:
@@ -872,21 +841,7 @@ def _save_style_cfg(cfg: StyleConfig) -> None:
     except Exception as e:
         print(f"[STYLE] failed to persist style config: {e}")
 
-async def safe_stop_audio_stream() -> None:
-    """Stop and close audio stream safely and notify listeners once."""
-    if getattr(STATE, "audio_stream", None) is not None:
-        with contextlib.suppress(Exception):
-            STATE.audio_stream.stop()
-        with contextlib.suppress(Exception):
-            STATE.audio_stream.close()
-        STATE.audio_stream = None
-
-    if not STATE.audio_stopped_broadcasted:
-        await broadcast("status", "audio_stream_stopped")
-        STATE.audio_stopped_broadcasted = True
-
-BACKEND: Optional[ImageBackend] = None
-
+# ---------- SSE ----------
 def sse_format(event: str, data: str) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
@@ -897,8 +852,6 @@ async def broadcast(event: str, data: str) -> None:
     for q in list(STATE.listeners):
         with contextlib.suppress(Exception):
             await q.put(sse_format(event, data))
-
-_context_buffer: deque[str] = deque(maxlen=CONTEXT_MAX_SEGMENTS)
 
 async def _close_sse_listeners(timeout: float = 0.25) -> None:
     """Signal-close all SSE listeners quickly."""
@@ -922,6 +875,11 @@ async def _close_sse_listeners(timeout: float = 0.25) -> None:
     except Exception:
         setattr(STATE, "listeners", [])
 
+# ---------- Context buffer ----------
+CONTEXT_MAX_SEGMENTS = _env_int("APP_CONTEXT_MAX_SEGMENTS", 5)
+CONTEXT_MAX_CHARS = _env_int("APP_CONTEXT_MAX_CHARS", 480)
+_context_buffer: deque[str] = deque(maxlen=CONTEXT_MAX_SEGMENTS)
+
 def update_context_buffer(text: str) -> str:
     """Maintain a rolling context buffer for LLM prompt building."""
     _context_buffer.append(text)
@@ -930,8 +888,8 @@ def update_context_buffer(text: str) -> str:
         ctx = ctx[-CONTEXT_MAX_CHARS:]
     return ctx
 
+# ---------- Logs ----------
 def _log_effective_config() -> None:
-    """Print effective configuration snapshot once on startup."""
     print(
         "[CONFIG]",
         f"env_file= {ENV_PATH or '(none)'}",
@@ -944,7 +902,7 @@ def _log_effective_config() -> None:
         "| whisper:",
         f"min_sec={WHISPER_MIN_SEC} min_peak={WHISPER_MIN_PEAK} lang={WHISPER_LANGUAGE}",
         "| text:",
-        f"min_chars={TEXT_MIN_CHARS} min_words={TEXT_MIN_WORDS} force_meaningful={FORCE_MEANINGFUL_CHECK}",
+        f"max_ctx={CONTEXT_MAX_SEGMENTS}/{CONTEXT_MAX_CHARS}",
         "| llm:",
         f"interval={LLM_INTERVAL_SEC}s model={OLLAMA_MODEL}",
         "| image:",
@@ -957,34 +915,7 @@ def _log_effective_config() -> None:
         f"tick={APP_SSE_TICK_SEC}s",
     )
 
-def _apply_view_mode_for_target(host: str) -> None:
-    """
-    German: Bei Remote erzwingen wir 'query'-Modus, lokal lassen wir 'auto' (Pfad).
-    """
-    # Keep as env var for backends/bridge that read it
-    if host in {"127.0.0.1", "localhost"}:
-        os.environ["APP_COMFY_FORCE_VIEW_MODE"] = os.getenv("APP_COMFY_FORCE_VIEW_MODE", "auto") or "auto"
-        print("[COMFY VIEW MODE] auto/path (host=127.0.0.1)")
-    else:
-        os.environ["APP_COMFY_FORCE_VIEW_MODE"] = "query"
-        print("[COMFY VIEW MODE] query (remote host)")
-
-def _apply_comfy_target(host: str, port: int) -> None:
-    """
-    Apply comfy host/port into STATE and environment, then rebuild backend.
-    """
-    STATE.comfy_host = host.strip()
-    STATE.comfy_port = int(port)
-    STATE.comfy_target = "local" if STATE.comfy_host in {"127.0.0.1", "localhost"} else "remote"
-    _apply_view_mode_for_target(STATE.comfy_host)
-    try:
-        _rebuild_backend()
-        _apply_active_workflow_if_local()
-    except Exception as e:
-        print(f"[BACKEND] rebuild after target apply failed: {e}")
-    print(f"[BACKEND] switched -> {STATE.image_backend_name} | comfy_target={STATE.comfy_host}:{STATE.comfy_port} | view_mode={os.getenv('APP_COMFY_FORCE_VIEW_MODE','auto')}")
-
-# ---------- Runtime-aware backend wrapper ----------
+# ---------- Backend runtime builder ----------
 def _apply_env_for_backend() -> None:
     os.environ["IMAGE_BACKEND"] = STATE.image_backend_name
     os.environ["ALLOW_CLOUD_IMAGE_BACKEND"] = "1" if STATE.allow_cloud else "0"
@@ -1016,7 +947,61 @@ def build_image_backend_rt(backend_name: Optional[str] = None, allow_cloud: Opti
             else:
                 os.environ[k] = v
 
-# ---------- Workflow helpers ----------
+def _rebuild_backend(force_name: Optional[str] = None) -> ImageBackend:
+    """Rebuild global BACKEND using current STATE and optional backend name override."""
+    global BACKEND
+    if force_name:
+        STATE.image_backend_name = force_name.lower()
+    BACKEND = build_image_backend_rt(backend_name=STATE.image_backend_name, allow_cloud=STATE.allow_cloud)
+    return BACKEND
+
+BACKEND: Optional[ImageBackend] = None
+
+# ---------- Comfy target / modes ----------
+def _apply_view_mode_for_target(host: str) -> None:
+    """German: Bei Remote erzwingen wir 'query'-Modus, lokal lassen wir 'auto' (Pfad)."""
+    if host in {"127.0.0.1", "localhost"}:
+        os.environ["APP_COMFY_FORCE_VIEW_MODE"] = os.getenv("APP_COMFY_FORCE_VIEW_MODE", "auto") or "auto"
+        print("[COMFY VIEW MODE] auto/path (host=127.0.0.1)")
+    else:
+        os.environ["APP_COMFY_FORCE_VIEW_MODE"] = "query"
+        print("[COMFY VIEW MODE] query (remote host)")
+
+def _host_in_whitelist(host: str, rules: List[str]) -> bool:
+    """Check if host allowed against CIDR/IP/host rules."""
+    h = (host or "").strip()
+    if not h:
+        return False
+    try:
+        ip = ipaddress.ip_address(h)
+        for r in rules:
+            r = r.strip()
+            if not r:
+                continue
+            try:
+                net = ipaddress.ip_network(r, strict=False)
+                if ip in net:
+                    return True
+            except ValueError:
+                pass
+        return h in rules
+    except ValueError:
+        return h in rules
+
+def _apply_comfy_target(host: str, port: int) -> None:
+    """Apply comfy host/port into STATE and environment, then rebuild backend."""
+    STATE.comfy_host = host.strip()
+    STATE.comfy_port = int(port)
+    STATE.comfy_target = "local" if STATE.comfy_host in {"127.0.0.1", "localhost"} else "remote"
+    _apply_view_mode_for_target(STATE.comfy_host)
+    try:
+        _rebuild_backend()
+        _apply_active_workflow_if_local()
+    except Exception as e:
+        print(f"[BACKEND] rebuild after target apply failed: {e}")
+    print(f"[BACKEND] switched -> {STATE.image_backend_name} | comfy_target={STATE.comfy_host}:{STATE.comfy_port} | view_mode={os.getenv('APP_COMFY_FORCE_VIEW_MODE','auto')}")
+
+# ---------- Workflows ----------
 def _list_workflow_files() -> List[WorkflowItem]:
     items: List[WorkflowItem] = []
     if not WORKFLOWS_DIR.exists():
@@ -1057,7 +1042,7 @@ def _apply_active_workflow_if_local() -> None:
     except Exception as e:
         print(f"[WF] failed to apply active workflow: {e}")
 
-# ---------- Reference→Denoise Mapping ----------
+# ---------- Reference→Denoise ----------
 def _map_reference_strength_to_denoise(strength: float) -> float:
     """Map reference strength to denoise param for KSampler."""
     s = float(max(0.0, min(1.0, strength)))
@@ -1253,7 +1238,11 @@ async def audio_transcription_loop() -> None:
                 text = (text or "").strip()
                 if text and STATE.running:
                     await broadcast("transcript", text)
-                    if FORCE_MEANINGFUL_CHECK and not is_meaningful_text(text, TEXT_MIN_CHARS, TEXT_MIN_WORDS):
+                    # German: Kontext prüfen und ggf. LLM+Bild starten
+                    TEXT_MIN_CHARS = _env_int("APP_TEXT_MIN_CHARS", 3)
+                    TEXT_MIN_WORDS = _env_int("APP_TEXT_MIN_WORDS", 1)
+                    FORCE_MEANINGFUL_CHECK = _env_bool01("APP_FORCE_MEANINGFUL_CHECK", 0)
+                    if FORCE_MEANINGFUL_CHECK and not (len(text) >= TEXT_MIN_CHARS and len(text.split()) >= TEXT_MIN_WORDS):
                         pass
                     else:
                         ctx = update_context_buffer(text)
@@ -1279,60 +1268,19 @@ async def audio_transcription_loop() -> None:
     finally:
         await safe_stop_audio_stream()
 
-# ---------- LLM + Image (style-aware) ----------
-async def run_llm_and_image(text: str) -> None:
-    """LLM tuning via Ollama, style build, then image generation."""
-    if await _ollama_available() is False:
-        await broadcast("status", "ollama_unavailable")
-        STATE.last_llm_error = "ollama_unavailable"
-        return
-    if BACKEND is None:
-        await broadcast("status", "image_backend_not_initialized")
-        STATE.last_llm_error = "image_backend_not_initialized"
-        return
-    # Use guarded client for Ollama (non-Comfy)
-    async with make_async_client(is_comfy_backend=False, limits=_httpx_limits_app(), timeout=_timeout_normal()) as client:
-        try:
-            base_prompt = await ollama_generate_prompt(client, text)
-            if not base_prompt:
-                STATE.last_llm_error = "llm_empty_response"
-                await broadcast("status", "llm_empty_response")
-                return
-            built = build_style_prompt(base_prompt, STATE.style_cfg)
-            STATE.last_prompt = built.positive
-            await broadcast("llm_prompt", built.positive)
-            await broadcast("status", "llm_ok")
-            try:
-                neg_global = (STATE.negative_prompt or "").strip()
-                if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
-                    if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
-                        setattr(BACKEND.cfg, "negative", neg_global or built.negative)
-                eff_negative = (built.negative or neg_global or "").strip()
-                is_comfy = (LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend))
-                # Prepare style for Comfy locally (does not use httpx here unless backend does internally)
-                if is_comfy:
-                    try:
-                        prepare_backend_style(BACKEND, STATE.style_cfg, STYLE_REFS_DIR)
-                    except Exception as e:
-                        print(f"[STYLE] prepare_backend_style (comfy) failed: {e}")
-                denoise_override = _calc_effective_denoise_from_style(STATE.style_cfg)
-                path = await _generate_with_negative_support(
-                    prompt=built.positive,
-                    width=STATE.image_width,
-                    height=STATE.image_height,
-                    negative=eff_negative,
-                    denoise=denoise_override,
-                )
-                path = ensure_in_output_dir(path)
-                rel = rel_for_ui_path(path)
-                await broadcast("image", rel)
-            except Exception as e:
-                await broadcast("status", f"image_error:{e}")
-        except Exception as e:
-            STATE.last_llm_error = f"pipeline_error:{e}"
-            await broadcast("status", f"pipeline_error:{e}")
+async def safe_stop_audio_stream() -> None:
+    """Stop and close audio stream safely and notify listeners once."""
+    if getattr(STATE, "audio_stream", None) is not None:
+        with contextlib.suppress(Exception):
+            STATE.audio_stream.stop()
+        with contextlib.suppress(Exception):
+            STATE.audio_stream.close()
+        STATE.audio_stream = None
+    if not STATE.audio_stopped_broadcasted:
+        await broadcast("status", "audio_stream_stopped")
+        STATE.audio_stopped_broadcasted = True
 
-# ---------- Helpers: negative prompt passing ----------
+# ---------- LLM + Image (style-aware) ----------
 def _merge_negative_into_prompt(prompt: str, negative: str) -> str:
     p = (prompt or "").strip()
     n = (negative or "").strip()
@@ -1396,7 +1344,51 @@ async def _generate_with_negative_support(prompt: str, width: int, height: int, 
         except TypeError:
             return await BACKEND.generate(merged, width=width, height=height)
 
-# ---------- FastAPI app & lifespan ----------
+async def run_llm_and_image(text: str) -> None:
+    """LLM tuning via Ollama (optional), style build, then image generation."""
+    if await _ollama_available(STATE.comfy_host) is False:
+        await broadcast("status", "ollama_unavailable")
+        STATE.last_llm_error = "ollama_unavailable"
+        return
+    if BACKEND is None:
+        await broadcast("status", "image_backend_not_initialized")
+        STATE.last_llm_error = "image_backend_not_initialized"
+        return
+    try:
+        base_prompt = await ollama_generate_prompt(STATE.comfy_host, text)
+        if not base_prompt:
+            STATE.last_llm_error = "llm_empty_response"
+            await broadcast("status", "llm_empty_response")
+            return
+        built = build_style_prompt(base_prompt, STATE.style_cfg)
+        STATE.last_prompt = built.positive
+        await broadcast("llm_prompt", built.positive)
+        await broadcast("status", "llm_ok")
+        neg_global = (STATE.negative_prompt or "").strip()
+        if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
+            if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
+                setattr(BACKEND.cfg, "negative", neg_global or built.negative)
+        eff_negative = (built.negative or neg_global or "").strip()
+        is_comfy = (LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend))
+        if is_comfy:
+            with contextlib.suppress(Exception):
+                prepare_backend_style(BACKEND, STATE.style_cfg, STYLE_REFS_DIR)
+        denoise_override = _calc_effective_denoise_from_style(STATE.style_cfg)
+        path = await _generate_with_negative_support(
+            prompt=built.positive,
+            width=STATE.image_width,
+            height=STATE.image_height,
+            negative=eff_negative,
+            denoise=denoise_override,
+        )
+        path = ensure_in_output_dir(path)
+        rel = rel_for_ui_path(path)
+        await broadcast("image", rel)
+    except Exception as e:
+        STATE.last_llm_error = f"pipeline_error:{e}"
+        await broadcast("status", f"pipeline_error:{e}")
+
+# ---------- Lifespan ----------
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
@@ -1429,33 +1421,26 @@ async def lifespan(app: FastAPI):
     except Exception:
         STATE.image_width = APP_IMAGE_WIDTH
         STATE.image_height = APP_IMAGE_HEIGHT
-    STATE.ollama_ready_at = time.time() + (WARMUP_GRACE_SEC if WARMUP_ENABLE else 0.0)
+    # Optional: Ollama warmup
+    WARMUP_ENABLE = _env_bool01("APP_OLLAMA_WARMUP_ENABLE", 1)
+    WARMUP_PROMPT = _env_str("APP_OLLAMA_WARMUP_PROMPT", "Sag Hallo auf Deutsch.")
+    WARMUP_TIMEOUT_SEC = _env_float("APP_OLLAMA_TIMEOUT_SEC", 45.0)
+    STATE.ollama_ready_at = time.time() + (float(_env_float("APP_OLLAMA_GRACE_SEC", 10.0)) if WARMUP_ENABLE else 0.0)
     print(f"[STATIC] /static -> {OUTPUT_DIR}")
     try:
         example = next(iter([p.name for p in OUTPUT_DIR.glob('*')]), "(none)")
         print(f"[STATIC] example file: {example}")
     except Exception:
         pass
-    try:
-        if LocalComfyBackend is not None and BACKEND is not None and isinstance(BACKEND, LocalComfyBackend):
-            if not hasattr(BACKEND, "_copy_latest_from_comfy"):
-                async def _copy_latest_from_comfy_shim() -> List[Path]:
-                    items = [p for p in OUTPUT_DIR.glob("*") if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]
-                    items.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                    return items[:4]
-                setattr(BACKEND, "_copy_latest_from_comfy", _copy_latest_from_comfy_shim)
-                print("[BACKEND] installed _copy_latest_from_comfy shim on LocalComfyBackend")
-    except Exception as e:
-        print(f"[BACKEND] shim install failed: {e}")
     warmup_task: Optional[asyncio.Task] = None
     if WARMUP_ENABLE:
         async def _silent_ollama_warmup():
             try:
                 payload = {"model": OLLAMA_MODEL, "prompt": WARMUP_PROMPT, "stream": False, "options": {"temperature": 0.1, "num_predict": 32}}
-                async with make_async_client(is_comfy_backend=False, limits=_httpx_limits_app(), timeout=_timeout_short_http()) as c:
+                async with make_async_client(is_comfy_backend=False, comfy_host=STATE.comfy_host, limits=_httpx_limits_app(), timeout=_timeout_short_http()) as c:
                     with contextlib.suppress(Exception):
                         await c.get(_ollama_url("/api/tags"))
-                async with make_async_client(is_comfy_backend=False, limits=_httpx_limits_app(), timeout=httpx.Timeout(WARMUP_TIMEOUT_SEC)) as client:
+                async with make_async_client(is_comfy_backend=False, comfy_host=STATE.comfy_host, limits=_httpx_limits_app(), timeout=httpx.Timeout(WARMUP_TIMEOUT_SEC)) as client:
                     await client.post(_ollama_url("/api/generate"), json=payload)
                 print("[WARMUP] Ollama warmup ok.")
             except Exception as e:
@@ -1483,6 +1468,7 @@ async def lifespan(app: FastAPI):
                 await warmup_task
         print("[LIFESPAN] cleanup done")
 
+# ---------- FastAPI app ----------
 app = FastAPI(lifespan=lifespan)
 
 # Static mounts
@@ -1495,64 +1481,41 @@ web_dir = Path("web").resolve()
 if web_dir.exists():
     app.mount("/web", StaticFiles(directory=str(web_dir), html=True), name="web")
 
+# ---------- Routes ----------
 @app.get("/", include_in_schema=False)
 async def root_redirect():
     if web_dir.exists():
         return RedirectResponse(url="/web/index.html", status_code=307)
     return JSONResponse({"ok": True, "msg": "Web UI not found, use /static for images or API endpoints."})
 
-
-@app.post("/api/settings/image_backend")
-async def api_switch_image_backend(req: ImageBackendSwitch):
-    """German: Backend zwischen lokal, remote (WireGuard) und Pollinations umschalten."""
-    target = req.backend.lower()
-    if target not in {"comfyui", "comfyui_remote", "pollinations"}:
-        return JSONResponse({"ok": False, "error": "invalid_backend"}, status_code=400)
-    if target == "pollinations" and not STATE.allow_cloud:
-        return JSONResponse({"ok": False, "error": "not_allowed", "reason": "cloud_blocked"}, status_code=403)
-    if target == "pollinations":
-        secret = _env_str("POLLINATIONS_SECRET", "")
-        if not secret:
-            return JSONResponse({"ok": False, "error": "missing_secret", "reason": "missing_secret"}, status_code=400)
-
-    # Preserve current size unless reset requested
-    cur_w, cur_h = STATE.image_width, STATE.image_height
-
-    # Apply target-specific comfy host/port and view mode
-    if target == "comfyui":
-        _apply_comfy_target("127.0.0.1", _env_int("COMFY_LOCAL_PORT", _env_int("APP_COMFY_PORT", 8188)))
-    elif target == "comfyui_remote":
-        allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
-        if not allow_remote:
-            return JSONResponse({"ok": False, "error": "remote_not_allowed"}, status_code=403)
-        rhost = _env_str("COMFY_REMOTE_HOST", STATE.comfy_host)
-        rport = _env_int("COMFY_REMOTE_PORT", STATE.comfy_port or 8188)
-        if not _host_in_whitelist(rhost, STATE.comfy_whitelist):
-            return JSONResponse({"ok": False, "error": "host_not_whitelisted"}, status_code=403)
-        _apply_comfy_target(rhost, rport)
-    else:
-        # pollinations: keep current comfy_host but block direct path; no target apply needed
-        os.environ["APP_COMFY_FORCE_VIEW_MODE"] = os.getenv("APP_COMFY_FORCE_VIEW_MODE", "auto") or "auto"
-        print("[BACKEND] pollinations selected; Comfy direct disabled")
-
-    # Rebuild backend with new name
-    try:
-        _rebuild_backend(force_name=target)
-        if req.reset:
-            def_w, def_h = _backend_default_size(target)
-            STATE.image_width, STATE.image_height = def_w, def_h
-        else:
-            STATE.image_width, STATE.image_height = cur_w, cur_h
+@app.get("/events")
+async def events(request: Request):
+    """SSE endpoint for UI updates (status, transcript, llm_prompt, image)."""
+    async def gen():
+        q: asyncio.Queue[str] = asyncio.Queue()
+        STATE.listeners.append(q)
         try:
-            _apply_active_workflow_if_local()
-        except Exception as e:
-            print(f"[WF] apply after backend switch failed: {e}")
-        await broadcast("status", f"image_backend:{target}")
-        return {"ok": True, "backend": target, "width": STATE.image_width, "height": STATE.image_height, "reset": bool(req.reset)}
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
+            await q.put(sse_format("status", "connected"))
+            hb = max(0.25, float(APP_SSE_TICK_SEC))
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=hb)
+                except asyncio.TimeoutError:
+                    yield sse_format("status", "hb").encode("utf-8")
+                    continue
+                if msg == "":
+                    break
+                yield msg.encode("utf-8")
+        except asyncio.CancelledError:
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                if q in STATE.listeners:
+                    STATE.listeners.remove(q)
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
-# ---------- Status/Health ----------
 @app.get("/ping")
 async def ping():
     return {"ok": True}
@@ -1563,7 +1526,7 @@ async def status():
 
 @app.get("/health", response_model=HealthReport)
 async def health() -> HealthReport:
-    ollama_ok = await _ollama_available()
+    ollama_ok = await _ollama_available(STATE.comfy_host)
     return HealthReport(
         ollama_ok=ollama_ok,
         image_backend=STATE.image_backend_name,
@@ -1577,15 +1540,12 @@ async def health() -> HealthReport:
 
 @app.get("/config")
 async def get_config():
-    """German: Liefert UI-Config & Diagnosewerte."""
+    """Return UI config and diagnostics."""
     wpath = WHISPER_MODEL_PATH
     masked = (wpath[:3] + "..." + wpath[-10:]) if wpath and len(wpath) > 16 else wpath
-    try:
-        def_w, def_h = _backend_default_size(STATE.image_backend_name)
-    except Exception:
-        def_w, def_h = APP_IMAGE_WIDTH, APP_IMAGE_HEIGHT
+    def_w, def_h = _backend_default_size(STATE.image_backend_name)
     backend_lower = (STATE.image_backend_name or "").strip().lower()
-    is_comfy = backend_lower == "comfyui"
+    is_comfy = backend_lower in {"comfyui", "comfyui_remote"} or backend_lower == "comfyui"
     app_disable_comfy_env = os.getenv("APP_DISABLE_COMFYUI", "1").strip().lower()
     comfy_disabled = app_disable_comfy_env in {"1", "true", "yes", "on"}
     show_workflow_selector = bool(is_comfy and not comfy_disabled)
@@ -1619,7 +1579,6 @@ async def get_config():
         "vad": {"disable_vad": DISABLE_VAD, "rms_threshold": RMS_VAD_THRESHOLD},
         "snapshot": {"snapshot_sec": SNAPSHOT_SEC, "min_buf_sec": MIN_BUF_SEC, "max_silence_ms": MAX_SILENCE_MS, "max_segment_sec": MAX_SEGMENT_SEC, "first_snapshot_deadline_sec": FIRST_SNAPSHOT_DEADLINE_SEC},
         "whisper": {"model_path": masked, "language": WHISPER_LANGUAGE, "threads": WHISPER_THREADS, "temperature": WHISPER_TEMPERATURE, "min_sec": WHISPER_MIN_SEC, "min_peak": WHISPER_MIN_PEAK},
-        "text": {"min_chars": TEXT_MIN_CHARS, "min_words": TEXT_MIN_WORDS, "force_meaningful": FORCE_MEANINGFUL_CHECK},
         "context": {"max_segments": CONTEXT_MAX_SEGMENTS, "max_chars": CONTEXT_MAX_CHARS},
         "ollama": {"host": OLLAMA_HOST, "port": OLLAMA_PORT, "model": OLLAMA_MODEL, "temperature": OLLAMA_TEMPERATURE, "timeout_sec": OLLAMA_TIMEOUT_SEC, "interval_sec": LLM_INTERVAL_SEC, "disabled": OLLAMA_DISABLED},
         "image": {
@@ -1640,10 +1599,10 @@ async def get_config():
         "sse": {"tick_sec": APP_SSE_TICK_SEC},
     }
 
-# ---------- Backend switch ----------
+# ---------- Backend switching ----------
 @app.post("/api/settings/image_backend")
 async def api_switch_image_backend(req: ImageBackendSwitch):
-    """German: Backend zwischen lokal, remote (WireGuard) und Pollinations umschalten."""
+    """Switch image backend between local comfyui, remote comfyui, and pollinations."""
     target = req.backend.lower()
     if target not in {"comfyui", "comfyui_remote", "pollinations"}:
         return JSONResponse({"ok": False, "error": "invalid_backend"}, status_code=400)
@@ -1654,10 +1613,8 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
         if not secret:
             return JSONResponse({"ok": False, "error": "missing_secret", "reason": "missing_secret"}, status_code=400)
 
-    # Preserve current size unless reset requested
     cur_w, cur_h = STATE.image_width, STATE.image_height
 
-    # Apply target-specific comfy host/port and view mode
     if target == "comfyui":
         _apply_comfy_target("127.0.0.1", _env_int("COMFY_LOCAL_PORT", _env_int("APP_COMFY_PORT", 8188)))
     elif target == "comfyui_remote":
@@ -1670,11 +1627,10 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
             return JSONResponse({"ok": False, "error": "host_not_whitelisted"}, status_code=403)
         _apply_comfy_target(rhost, rport)
     else:
-        # pollinations: keep current comfy_host but block direct path; no target apply needed
+        # Pollinations: no change to comfy target, just backend switch and view mode default
         os.environ["APP_COMFY_FORCE_VIEW_MODE"] = os.getenv("APP_COMFY_FORCE_VIEW_MODE", "auto") or "auto"
         print("[BACKEND] pollinations selected; Comfy direct disabled")
 
-    # Rebuild backend with new name
     try:
         _rebuild_backend(force_name=target)
         if req.reset:
@@ -1691,6 +1647,49 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
     except Exception as e:
         return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
 
+@app.post("/api/settings/comfy_target")
+async def api_comfy_target(req: ComfyTargetReq):
+    """Hard switch to local or remote Comfy host (WireGuard)."""
+    allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
+    if req.target == "local":
+        host = "127.0.0.1"
+        port = _env_int("APP_COMFY_PORT", STATE.comfy_port)
+    else:
+        if not allow_remote:
+            return JSONResponse({"ok": False, "error": "remote_not_allowed"}, status_code=403)
+        host = (req.host or STATE.comfy_host or "").strip()
+        port = int(req.port or STATE.comfy_port or 8188)
+        if not host:
+            return JSONResponse({"ok": False, "error": "missing_host"}, status_code=400)
+        if not _host_in_whitelist(host, STATE.comfy_whitelist):
+            return JSONResponse({"ok": False, "error": "host_not_whitelisted"}, status_code=403)
+    _apply_comfy_target(host, port)
+    await broadcast("status", f"comfy_target:{STATE.comfy_target}")
+    return {"ok": True, "target": STATE.comfy_target, "host": STATE.comfy_host, "port": STATE.comfy_port}
+
+class ComfyPresetRequest(BaseModel):
+    preset: Literal["local", "remote"]
+    host: Optional[str] = None
+    port: Optional[int] = None
+
+@app.post("/api/settings/comfy_preset")
+async def api_comfy_preset(req: ComfyPresetRequest):
+    """Preset switch for Comfy. 'local' sets 127.0.0.1, 'remote' uses COMFY_REMOTE_* or UI overrides."""
+    allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
+    if req.preset == "local":
+        host = "127.0.0.1"
+        port = _env_int("COMFY_LOCAL_PORT", _env_int("APP_COMFY_PORT", 8188))
+    else:
+        if not allow_remote:
+            return JSONResponse({"ok": False, "error": "remote_not_allowed"}, status_code=403)
+        host = (req.host or os.getenv("COMFY_REMOTE_HOST") or STATE.comfy_host or "").strip()
+        port = int(req.port or os.getenv("COMFY_REMOTE_PORT") or STATE.comfy_port or 8188)
+        if not _host_in_whitelist(host, STATE.comfy_whitelist):
+            return JSONResponse({"ok": False, "error": "host_not_whitelisted"}, status_code=403)
+    _apply_comfy_target(host, port)
+    await broadcast("status", f"comfy_preset:{req.preset}")
+    return {"ok": True, "preset": req.preset, "host": STATE.comfy_host, "port": STATE.comfy_port, "target": STATE.comfy_target}
+
 # ---------- Workflows API ----------
 @app.get("/api/workflows", response_model=WorkflowList)
 async def api_list_workflows() -> WorkflowList:
@@ -1699,7 +1698,7 @@ async def api_list_workflows() -> WorkflowList:
 
 @app.post("/api/settings/workflow")
 async def api_select_workflow(payload: WorkflowSelect):
-    """German: Setzt aktiven Workflow (lokal Comfy)."""
+    """Set active workflow (applies to LocalComfyBackend)."""
     try:
         _ensure_workflow_exists(payload.filename)
     except FileNotFoundError as e:
@@ -1714,228 +1713,14 @@ async def api_select_workflow(payload: WorkflowSelect):
     await broadcast("status", f"workflow:{STATE.active_workflow}")
     return {"ok": True, "active_workflow": STATE.active_workflow}
 
-# ---------- NEW: Comfy target switch ----------
-def _host_in_whitelist(host: str, rules: List[str]) -> bool:
-    """Check if host allowed against CIDR/IP/host rules."""
-    h = (host or "").strip()
-    if not h:
-        return False
-    try:
-        ip = ipaddress.ip_address(h)
-        for r in rules:
-            r = r.strip()
-            if not r:
-                continue
-            try:
-                net = ipaddress.ip_network(r, strict=False)
-                if ip in net:
-                    return True
-            except ValueError:
-                pass
-        return h in rules
-    except ValueError:
-        return h in rules
-
-@app.post("/api/settings/comfy_target")
-async def api_comfy_target(req: ComfyTargetReq):
-    """German: Hart umschalten auf lokalen oder entfernten Comfy-Host (WireGuard)."""
-    allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
-    if req.target == "local":
-        STATE.comfy_target = "local"
-        STATE.comfy_host = "127.0.0.1"
-        STATE.comfy_port = _env_int("APP_COMFY_PORT", STATE.comfy_port)
-    else:
-        if not allow_remote:
-            return JSONResponse({"ok": False, "error": "remote_not_allowed"}, status_code=403)
-        host = (req.host or STATE.comfy_host or "").strip()
-        port = int(req.port or STATE.comfy_port or 8188)
-        if not host:
-            return JSONResponse({"ok": False, "error": "missing_host"}, status_code=400)
-        if not _host_in_whitelist(host, STATE.comfy_whitelist):
-            return JSONResponse({"ok": False, "error": "host_not_whitelisted"}, status_code=403)
-        STATE.comfy_target = "remote"
-        STATE.comfy_host = host
-        STATE.comfy_port = port
-    try:
-        _rebuild_backend()
-        try:
-            _apply_active_workflow_if_local()
-        except Exception as e:
-            print(f"[WF] apply after comfy_target switch failed: {e}")
-        await broadcast("status", f"comfy_target:{STATE.comfy_target}")
-        return {"ok": True, "target": STATE.comfy_target, "host": STATE.comfy_host, "port": STATE.comfy_port}
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
-
-class ComfyPresetRequest(BaseModel):
-    preset: Literal["local", "remote"]
-    host: Optional[str] = None
-    port: Optional[int] = None
-
-@app.post("/api/settings/comfy_preset")
-async def api_comfy_preset(req: ComfyPresetRequest):
-    """
-    German: Preset switch for Comfy. 'local' sets 127.0.0.1, 'remote' uses COMFY_REMOTE_* or UI overrides.
-    """
-    allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
-    if req.preset == "local":
-        host = "127.0.0.1"
-        port = _env_int("COMFY_LOCAL_PORT", _env_int("APP_COMFY_PORT", 8188))
-    else:
-        if not allow_remote:
-            return JSONResponse({"ok": False, "error": "remote_not_allowed"}, status_code=403)
-        host = (req.host or os.getenv("COMFY_REMOTE_HOST") or STATE.comfy_host or "").strip()
-        port = int(req.port or os.getenv("COMFY_REMOTE_PORT") or STATE.comfy_port or 8188)
-        # German: Whitelist-Prüfung gegen bekannte sicheren Ziele
-        if not _host_in_whitelist(host, STATE.comfy_whitelist):
-            return JSONResponse({"ok": False, "error": "host_not_whitelisted"}, status_code=403)
-
-    # German: Wendet Host/Port an, setzt view-mode und triggert Backend-Rebuild
-    _apply_comfy_target(host, port)
-
-    # German: UI-Benachrichtigung
-    await broadcast("status", f"comfy_preset:{req.preset}")
-
-    return {
-        "ok": True,
-        "preset": req.preset,
-        "host": STATE.comfy_host,
-        "port": STATE.comfy_port,
-        "target": STATE.comfy_target,
-    }
-
-# ---------- SSE ----------
-@app.get("/events")
-async def events(request: Request):
-    """SSE endpoint for UI updates (status, transcript, llm_prompt, image)."""
-    async def gen():
-        q: asyncio.Queue[str] = asyncio.Queue()
-        STATE.listeners.append(q)
-        try:
-            await q.put(sse_format("status", "connected"))
-            hb = max(0.25, float(APP_SSE_TICK_SEC))
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    msg = await asyncio.wait_for(q.get(), timeout=hb)
-                except asyncio.TimeoutError:
-                    yield sse_format("status", "hb").encode("utf-8")
-                    continue
-                if msg == "":
-                    break
-                yield msg.encode("utf-8")
-        except asyncio.CancelledError:
-            pass
-        finally:
-            with contextlib.suppress(Exception):
-                if q in STATE.listeners:
-                    STATE.listeners.remove(q)
-    return StreamingResponse(gen(), media_type="text/event-stream")
-
-# ---------- Audio/info routes ----------
-@app.get("/audio/devices")
-def audio_devices():
-    """List available input devices."""
-    try:
-        devs = sd.query_devices()
-        ins = [
-            {"index": i, "name": d.get("name"), "max_input": d.get("max_input_channels", 0)}
-            for i, d in enumerate(devs)
-            if d.get("max_input_channels", 0) > 0
-        ]
-        return {"input_devices": ins}
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-@app.get("/audio/probe")
-def audio_probe():
-    """Record a short snippet to probe device peak and RMS."""
-    sr = SAMPLE_RATE
-    dur = 0.5
-    frames = int(sr * dur)
-    try:
-        idx = pick_input_device(AUDIO_DEVICE_PREF)
-        sd.default.device = (idx, None)
-        sd.default.samplerate = sr
-        sd.default.channels = 1
-        data = sd.rec(frames, samplerate=sr, channels=1, dtype="float32")
-        sd.wait()
-        mono = np.asarray(data[:, 0], dtype=np.float32)
-        peak = float(np.max(np.abs(mono))) if mono.size else 0.0
-        rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
-        return {"device_index": idx, "sample_rate": sr, "frames": int(mono.size), "peak": round(peak, 4), "rms": round(rms, 4)}
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-# ---------- Control routes ----------
-@app.post("/start", response_class=PlainTextResponse)
-async def start_pipeline():
-    """Start audio capture and processing loop."""
-    print("[HTTP] /start called")
-    if STATE.running:
-        print("[HTTP] /start ignored (already running)")
-        return PlainTextResponse("already running", status_code=200)
-    if STATE.shutting_down:
-        return PlainTextResponse("shutting_down", status_code=409)
-    STATE.running = True
-    STATE.start_ts = time.time()
-    STATE.task = asyncio.create_task(audio_transcription_loop())
-    await broadcast("status", "server_start_recording")
-    return PlainTextResponse("started")
-
-@app.post("/stop", response_class=PlainTextResponse)
-async def stop_pipeline():
-    """Stop audio processing loop gracefully."""
-    print("[HTTP] /stop called")
-    STATE.running = False
-    await safe_stop_audio_stream()
-    if STATE.task:
-        STATE.task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            try:
-                await asyncio.wait_for(STATE.task, timeout=1.5)
-            except asyncio.TimeoutError:
-                pass
-        STATE.task = None
-    await broadcast("status", "audio_stopped")
-    print("[HTTP] /stop completed")
-    return PlainTextResponse("stopped")
-
-@app.post("/shutdown", response_class=PlainTextResponse)
-async def shutdown_server():
-    """Shutdown entire server; exits process after brief delay."""
-    print("[HTTP] /shutdown called")
-    STATE.shutting_down = True
-    try:
-        await stop_pipeline()
-    except Exception:
-        pass
-    for t in list(STATE.bg_tasks):
-        t.cancel()
-    with contextlib.suppress(Exception):
-        await asyncio.gather(*list(STATE.bg_tasks), return_exceptions=True)
-    STATE.bg_tasks.clear()
-    await broadcast("status", "server_stopped")
-    await _close_sse_listeners()
-    asyncio.create_task(_exit_after_delay())
-    return PlainTextResponse("shutting down")
-
-async def _exit_after_delay():
-    await asyncio.sleep(0.2)
-    os._exit(0)
-
-# ---------- Ollama APIs ----------
-class _OllamaErr(JSONResponse):
-    pass
-
+# ---------- Ollama proxy APIs ----------
 @app.post("/api/ollama/generate")
 async def api_ollama_generate(req: OllamaGenerateRequest):
     """Direct Ollama generate endpoint proxy with retries."""
-    if await _ollama_available() is False:
+    if await _ollama_available(STATE.comfy_host) is False:
         return JSONResponse({"error": "ollama_unavailable"}, status_code=503)
     body = {"model": req.model or OLLAMA_MODEL, "prompt": req.prompt, "stream": bool(req.stream), "options": req.options or {}}
-    async with make_async_client(is_comfy_backend=False, limits=_httpx_limits_app(), timeout=_timeout_normal()) as client:
+    async with make_async_client(is_comfy_backend=False, comfy_host=STATE.comfy_host, limits=_httpx_limits_app(), timeout=_timeout_normal()) as client:
         try:
             data = await _post_with_retries(client, _ollama_url("/api/generate"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
             return {"response": data.get("response", "")}
@@ -1945,10 +1730,10 @@ async def api_ollama_generate(req: OllamaGenerateRequest):
 @app.post("/api/ollama/chat")
 async def api_ollama_chat(req: OllamaChatRequest):
     """Direct Ollama chat endpoint proxy with retries."""
-    if await _ollama_available() is False:
+    if await _ollama_available(STATE.comfy_host) is False:
         return JSONResponse({"error": "ollama_unavailable"}, status_code=503)
     body = {"model": req.model or OLLAMA_MODEL, "messages": [m.model_dump() for m in req.messages], "stream": bool(req.stream), "options": req.options or {}}
-    async with make_async_client(is_comfy_backend=False, limits=_httpx_limits_app(), timeout=_timeout_normal()) as client:
+    async with make_async_client(is_comfy_backend=False, comfy_host=STATE.comfy_host, limits=_httpx_limits_app(), timeout=_timeout_normal()) as client:
         try:
             data = await _post_with_retries(client, _ollama_url("/api/chat"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
             msg = (data.get("message") or {}).get("content", "") if isinstance(data, dict) else ""
@@ -1959,7 +1744,6 @@ async def api_ollama_chat(req: OllamaChatRequest):
 # ---------- Style settings & reference upload ----------
 @app.get("/api/settings/style")
 async def get_style_settings():
-    """Return current style settings for UI."""
     sc = STATE.style_cfg
     return {
         "style_preset": sc.style_preset,
@@ -1974,7 +1758,6 @@ async def get_style_settings():
 
 @app.post("/api/settings/style")
 async def set_style_settings(payload: StyleSettingsPayload):
-    """Update style settings and persist."""
     try:
         sc = STATE.style_cfg
         sc.style_preset = (payload.style_preset or sc.style_preset).strip()
@@ -1997,7 +1780,6 @@ async def set_style_settings(payload: StyleSettingsPayload):
 
 @app.post("/api/reference/upload", response_model=ReferenceUploadResponse)
 async def upload_reference_image(file: UploadFile = File(...)):
-    """Upload a reference image to STYLE_REFS_DIR and enable it."""
     try:
         raw = await file.read()
     except Exception as e:
@@ -2019,7 +1801,6 @@ async def upload_reference_image(file: UploadFile = File(...)):
 
 @app.get("/api/reference/thumbnail")
 async def reference_thumbnail(id: str = Query(..., min_length=1), size: int = Query(256, ge=32, le=2048)):
-    """Return a PNG thumbnail of a stored reference."""
     src = (STYLE_REFS_DIR / id).resolve()
     if src.parent != STYLE_REFS_DIR or not src.exists() or not src.is_file():
         return JSONResponse({"error": "not_found"}, status_code=404)
@@ -2040,7 +1821,6 @@ async def reference_thumbnail(id: str = Query(..., min_length=1), size: int = Qu
 
 @app.post("/api/style/reference/on", response_model=StyleRefOnResponse)
 async def api_style_reference_on(p: StyleRefOnPayload):
-    """Enable an existing reference by id and strength."""
     try:
         rid = (p.reference_id or "").strip()
         if not rid:
@@ -2069,7 +1849,6 @@ async def api_style_reference_on(p: StyleRefOnPayload):
 
 @app.post("/api/style/reference/off", response_model=StyleRefOffResponse)
 async def api_style_reference_off():
-    """Disable any active reference."""
     try:
         sc = STATE.style_cfg
         sc.use_reference = False
@@ -2085,7 +1864,6 @@ async def api_style_reference_off():
 
 @app.get("/api/style/reference/thumbnail")
 async def api_style_reference_thumbnail():
-    """Return the direct static path for current reference, for UI preview."""
     sc = STATE.style_cfg
     if not sc or not getattr(sc, "use_reference", False) or not getattr(sc, "reference_id", None):
         return {"thumbnail": None}
@@ -2099,10 +1877,8 @@ async def api_style_reference_thumbnail():
     except Exception:
         return {"thumbnail": None}
 
-# ---------- Reference file delivery ----------
 @app.get("/ref/{filename}")
 async def get_reference_file(filename: str, ts: int = Query(...), sig: str = Query(...)):
-    """Deliver a reference file when signature and TTL are valid."""
     try:
         data, mime = _verify_and_open_ref(filename, int(ts), sig or "")
         headers = {
@@ -2118,11 +1894,10 @@ async def get_reference_file(filename: str, ts: int = Query(...), sig: str = Que
     except Exception as e:
         return JSONResponse({"error": f"server_error:{e}"}, status_code=500)
 
-# ---------- Plan → Prompt ----------
+# ---------- Plan -> Prompt (via Ollama) ----------
 @app.post("/api/plan")
 async def api_plan(req: PlanRequest):
-    """One-shot plan: text -> tuned prompt; triggers image gen in background."""
-    if await _ollama_available() is False:
+    if await _ollama_available(STATE.comfy_host) is False:
         return JSONResponse({"error": "ollama_unavailable"}, status_code=503)
     sys = OLLAMA_SYS_PROMPT
     payload = {
@@ -2132,7 +1907,7 @@ async def api_plan(req: PlanRequest):
     }
     prompt_text = f"<<SYS>>{sys}<</SYS>>\n\nINPUT_JSON:\n{json.dumps(payload, ensure_ascii=False)}\n\nOUTPUT:\n"
     body = {"model": OLLAMA_MODEL, "prompt": prompt_text, "stream": False, "options": _ollama_options_for_prompt()}
-    async with make_async_client(is_comfy_backend=False, limits=_httpx_limits_app(), timeout=_timeout_normal()) as client:
+    async with make_async_client(is_comfy_backend=False, comfy_host=STATE.comfy_host, limits=_httpx_limits_app(), timeout=_timeout_normal()) as client:
         try:
             data = await _post_with_retries(client, _ollama_url("/api/generate"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
             base_out = (data.get("response") or "").strip()
@@ -2170,14 +1945,11 @@ async def api_plan(req: PlanRequest):
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
-# ---------- Image: Direct ----------
+# ---------- Image: Direct and Test ----------
 @app.post("/api/image/direct", response_model=ImageResponse)
 async def api_image_direct(req: DirectImageRequest):
-    """Generate an image directly from prompt; disabled for pollinations backend."""
-    # German: Bei Cloud-Backend blockieren, damit kein 502 durch Comfy entsteht
     if (STATE.image_backend_name or "").lower() == "pollinations":
         return JSONResponse({"error": "direct_disabled_for_pollinations"}, status_code=400)
-
     if BACKEND is None:
         return JSONResponse({"error": "image_backend_not_initialized"}, status_code=500)
     try:
@@ -2211,10 +1983,8 @@ async def api_image_direct(req: DirectImageRequest):
     except Exception as e:
         return JSONResponse({"error": f"{e}"}, status_code=502)
 
-# ---------- Image test ----------
 @app.post("/api/image/test", response_model=ImageResponse)
 async def api_image_test(req: ImageRequest):
-    """Generate a test image using either provided prompt or a default one."""
     if BACKEND is None:
         return JSONResponse({"error": "image_backend_not_initialized"}, status_code=500)
     topic = (req.prompt or "A colorful low-poly fox head").strip()
@@ -2241,39 +2011,7 @@ async def api_image_test(req: ImageRequest):
     except Exception as e:
         return JSONResponse({"error": f"{e}"}, status_code=502)
 
-# ---------- Image backend switching & cloud toggle ----------
-def _rebuild_backend(force_name: Optional[str] = None) -> ImageBackend:
-    """Rebuild global BACKEND using current STATE and optional backend name override."""
-    global BACKEND
-    if force_name:
-        STATE.image_backend_name = force_name.lower()
-    BACKEND = build_image_backend_rt(backend_name=STATE.image_backend_name, allow_cloud=STATE.allow_cloud)
-    return BACKEND
-
-class ImageAllowCloudReq(BaseModel):
-    allow: Optional[bool] = None
-    allow_cloud: Optional[bool] = None
-
-@app.post("/api/settings/image_allow_cloud")
-async def api_image_allow_cloud(req: ImageAllowCloudReq):
-    """Enable/disable cloud backend usage at runtime."""
-    val = req.allow if req.allow is not None else req.allow_cloud
-    if val is None:
-        return JSONResponse({"ok": False, "error": "missing_field_allow"}, status_code=400)
-    STATE.allow_cloud = bool(val)
-    if STATE.image_backend_name == "pollinations" and not STATE.allow_cloud:
-        STATE.image_backend_name = "comfyui"
-    try:
-        _rebuild_backend()
-        try:
-            _apply_active_workflow_if_local()
-        except Exception as e:
-            print(f"[WF] apply after allow_cloud switch failed: {e}")
-        return {"ok": True, "allow_cloud": STATE.allow_cloud, "backend": STATE.image_backend_name}
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
-
-# ---------- Image size & negative prompt settings ----------
+# ---------- Size & negative prompt settings ----------
 @app.get("/api/settings/image_size")
 async def get_image_size():
     return {"width": STATE.image_width, "height": STATE.image_height}
@@ -2300,23 +2038,54 @@ async def set_negative_prompt(s: NegativePromptSettings):
     await broadcast("status", "negative_prompt:updated")
     return {"ok": True, "negative_prompt": STATE.negative_prompt}
 
-# ---------- Utility ----------
-@app.get("/open_dir_hint")
-async def open_dir_hint():
-    return {"static_url": "/static/", "path": str(OUTPUT_DIR)}
+# ---------- Audio control ----------
+@app.post("/start", response_class=PlainTextResponse)
+async def start_pipeline():
+    if STATE.running:
+        return PlainTextResponse("already running", status_code=200)
+    if STATE.shutting_down:
+        return PlainTextResponse("shutting_down", status_code=409)
+    STATE.running = True
+    STATE.start_ts = time.time()
+    STATE.task = asyncio.create_task(audio_transcription_loop())
+    await broadcast("status", "server_start_recording")
+    return PlainTextResponse("started")
 
-@app.get("/api/image/latest")
-async def api_image_latest():
-    """Return the latest generated image file from OUTPUT_DIR."""
+@app.post("/stop", response_class=PlainTextResponse)
+async def stop_pipeline():
+    STATE.running = False
+    await safe_stop_audio_stream()
+    if STATE.task:
+        STATE.task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            try:
+                await asyncio.wait_for(STATE.task, timeout=1.5)
+            except asyncio.TimeoutError:
+                pass
+        STATE.task = None
+    await broadcast("status", "audio_stopped")
+    return PlainTextResponse("stopped")
+
+@app.post("/shutdown", response_class=PlainTextResponse)
+async def shutdown_server():
+    STATE.shutting_down = True
     try:
-        items = [p for p in OUTPUT_DIR.glob("*") if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]
-        items.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        if not items:
-            return JSONResponse({"error": "no_images"}, status_code=404)
-        rel = rel_for_ui_path(items[0])
-        return {"rel": rel, "filename": items[0].name}
-    except Exception as e:
-        return JSONResponse({"error": f"{e}"}, status_code=500)
+        await stop_pipeline()
+    except Exception:
+        pass
+    for t in list(STATE.bg_tasks):
+        t.cancel()
+    with contextlib.suppress(Exception):
+        await asyncio.gather(*list(STATE.bg_tasks), return_exceptions=True)
+    STATE.bg_tasks.clear()
+    await broadcast("status", "server_stopped")
+    await _close_sse_listeners()
+    asyncio.create_task(_exit_after_delay())
+    return PlainTextResponse("shutting down")
+
+async def _exit_after_delay():
+    await asyncio.sleep(0.2)
+    os._exit(0)
 
 # ---------- App entry ----------
 if __name__ == "__main__":
