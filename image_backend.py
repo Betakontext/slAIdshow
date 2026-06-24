@@ -109,40 +109,6 @@ def _clamp8(v: int) -> int:
 def _now() -> float:
     return time.time()
 
-def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
-    try:
-        ip_addr = ipaddress.ip_address(ip)
-    except Exception:
-        return False
-    parts = [p.strip() for p in (subnets_str or "").replace(",", " ").split() if p.strip()]
-    for cidr in parts:
-        try:
-            net = ipaddress.ip_network(cidr, strict=False)
-            if ip_addr in net:
-                return True
-        except Exception:
-            continue
-    return False
-
-def _assert_image_backend_host_policy(host: str) -> None:
-    """Enforce privacy policy for ComfyUI host usage."""
-    if host in {"127.0.0.1", "localhost"}:
-        return
-    allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
-    if not allow_remote:
-        raise AssertionError(f"Only localhost allowed, got {host}")
-    # Unified whitelist var (alias maintained in .env for parity with comfy_bridge)
-    subnets = _env_str("APP_COMFY_REMOTE_WHITELIST", "")
-    if not subnets:
-        return
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        # If host is a DNS name, subnet check cannot be reliably applied here
-        return
-    if not _is_in_allowed_subnets(host, subnets):
-        raise AssertionError(f"Remote host {host} not in allowed subnets ({subnets})")
-
 def _env_opt_int(name: str) -> Optional[int]:
     raw = (os.getenv(name) or "").strip()
     if not raw:
@@ -609,19 +575,19 @@ class ComfyConfigBase(BaseModel):
     prefer_cloud_descriptors_default: bool = False  # local prefers local descriptors
 
     def assert_host_policy(self) -> None:
-        _assert_image_backend_host_policy(self.host)
+        # No guard/whitelist enforcement per user request; keep method for compatibility
+        return
 
 class ComfyLocalConfig(ComfyConfigBase):
-    host: str = Field(default_factory=lambda: _env_str("APP_COMFY_HOST", "127.0.0.1"))
-    port: int = Field(default_factory=lambda: _env_int("APP_COMFY_PORT", 8188))
+    host: str = Field(default_factory=lambda: _env_str("APP_COMFY_HOST", _env_str("COMFY_LOCAL_HOST", "127.0.0.1")))
+    port: int = Field(default_factory=lambda: _env_int("APP_COMFY_PORT", _env_int("COMFY_LOCAL_PORT", 8188)))
     workflow_path: Path = Field(default_factory=lambda: Path(_env_str("APP_COMFY_WORKFLOW", "./workflows/text2img_SD15-FP16.json")).resolve())
     width: int = Field(default_factory=lambda: _env_int("APP_COMFY_WIDTH", int(_env_str("APP_IMAGE_WIDTH", "512") or "512")))
     height: int = Field(default_factory=lambda: _env_int("APP_COMFY_HEIGHT", int(_env_str("APP_IMAGE_HEIGHT", "512") or "512")))
 
 class ComfyRemoteConfig(ComfyConfigBase):
-    # Use the same ENV keys as local; app.py toggles target and sets APP_COMFY_HOST/PORT accordingly
-    host: str = Field(default_factory=lambda: _env_str("APP_COMFY_HOST", "127.0.0.1"))
-    port: int = Field(default_factory=lambda: _env_int("APP_COMFY_PORT", 8188))
+    host: str = Field(default_factory=lambda: _env_str("APP_COMFY_HOST", _env_str("COMFY_REMOTE_HOST", "127.0.0.1")))
+    port: int = Field(default_factory=lambda: _env_int("APP_COMFY_PORT", _env_int("COMFY_REMOTE_PORT", 8188)))
     workflow_path: Path = Field(default_factory=lambda: Path(_env_str("APP_COMFY_WORKFLOW", "./workflows/text2img_SD15-FP16.json")).resolve())
     width: int = Field(default_factory=lambda: _env_int("APP_COMFY_WIDTH", int(_env_str("APP_IMAGE_WIDTH", "512") or "512")))
     height: int = Field(default_factory=lambda: _env_int("APP_COMFY_HEIGHT", int(_env_str("APP_IMAGE_HEIGHT", "512") or "512")))

@@ -612,25 +612,34 @@
 
     // Direct image generate
     document.getElementById('btn-direct').addEventListener('click', async ()=>{
+      // Decide endpoint by current UI backend selection
+      const uiBackend = document.getElementById('backend-select').value; // comfyui_local | comfyui_remote | pollinations
+
       const prompt = document.getElementById('plan-input').value.trim();
       const negative = document.getElementById('neg-input').value.trim();
       if(!prompt) return;
+
       const btn = document.getElementById('btn-direct');
       btn.disabled=true;
+
       const size = currentSizePayload();
 
       let styleCfg = null;
       try {
+        // Reuse server-side style settings to preserve consistent behavior
         const rs = await fetch('/api/settings/style', { cache: 'no-store' });
         if (rs.ok) styleCfg = await rs.json();
       } catch (e) { log(statusLog, `style fetch error: ${e}`); }
 
+      // Build common payload
       const payload = {
         prompt,
         negative_prompt: negative || null,
         width: size.width,
         height: size.height
       };
+
+      // Optional fields to keep parity with server-side style builder
       if (styleCfg && typeof styleCfg.style_details === 'string' && styleCfg.style_details.trim()) {
         payload.style_details = styleCfg.style_details.trim();
       }
@@ -641,29 +650,105 @@
         payload.use_reference = false;
       }
 
-      try{
-        const r = await fetch('/api/image/direct', {
+      // Decide endpoint based on UI
+      let endpoint = (uiBackend === 'pollinations')
+        ? '/api/image/pollinations_generate'
+        : '/api/image/direct';
+
+      // Helper: execute one generate call
+      async function runOnce(ep){
+        // If targeting pollinations, ensure cloud + backend server-side (idempotent)
+        if (ep === '/api/image/pollinations_generate') {
+          try {
+            await fetch('/api/settings/image_allow_cloud', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ allow: true })
+            });
+          } catch (_) {}
+          try {
+            await fetch('/api/settings/image_backend', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ backend: 'pollinations' })
+            });
+            // Small grace period for server-side state switch
+            await new Promise(r=> setTimeout(r, 120));
+          } catch (_) {}
+        }
+
+        const r = await fetch(ep, {
           method:'POST',
           headers:{'Content-Type':'application/json'},
           body: JSON.stringify(payload)
         });
-        const j = await r.json().catch(()=> ({}));
-        if(r.ok && j.rel){
-          setImage(j.rel, prompt);
-          log(statusLog, `direct image: ${j.rel}`);
+        let j = {};
+        try { j = await r.json(); } catch {}
+        return { r, j };
+      }
+
+      try{
+        let { r, j } = await runOnce(endpoint);
+
+        // Auto-fallback: if direct endpoint rejected due to wrong backend, retry once with pollinations endpoint
+        const isWrongBackend =
+          (!r.ok && (
+            j?.error === 'wrong_backend_for_direct' ||
+            j?.reason === 'wrong_backend' ||
+            (typeof j?.detail === 'string' && j.detail.toLowerCase().includes('wrong_backend')) ||
+            (r.status === 409 && (j?.error || '').includes('wrong_backend')) ||
+            (r.status === 400 && (j?.error || '').includes('direct_disabled_for_pollinations'))
+          ));
+
+        if (isWrongBackend && endpoint === '/api/image/direct') {
+          log(statusLog, 'direct endpoint rejected by server (wrong backend). Retrying with pollinations…');
+          endpoint = '/api/image/pollinations_generate';
+
+          // Ensure server truly switched
+          try {
+            await fetch('/api/settings/image_allow_cloud', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ allow: true })
+            });
+          } catch {}
+          try {
+            await fetch('/api/settings/image_backend', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ backend: 'pollinations' })
+            });
+            await new Promise(r=> setTimeout(r, 150));
+          } catch {}
+          // Retry once
+          ({ r, j } = await runOnce(endpoint));
+        }
+
+        if(r.ok && (j.rel || j.relpath)){
+          const rel = j.rel || j.relpath;
+          setImage(rel, prompt);
+          log(statusLog, `direct image: ${rel}`);
           log(promptLog, prompt);
           const styleMsg = payload.style_details ? ` | style: ${payload.style_details.slice(0,60)}…` : '';
           const refMsg = payload.use_reference && payload.reference_id ? ` | ref: ${String(payload.reference_id).slice(0,8)}…` : '';
           log(statusLog, `direct included${styleMsg}${refMsg}`);
         }else{
-          log(statusLog, `direct failed: ${j.detail || j.error || r.status}`);
+          const reason = j?.reason ? ` (${j.reason})` : '';
+          log(statusLog, `direct failed: ${j.detail || j.error || r.status}${reason}`);
+          if (j?.reason === 'cloud_not_allowed' || j?.reason === 'cloud_blocked') {
+            backendWarn.textContent = t('backend_warn_cloud_blocked');
+            backendWarn.style.display = '';
+          } else if (j?.reason === 'missing_secret') {
+            backendWarn.textContent = t('backend_warn_missing_secret');
+            backendWarn.style.display = '';
+          }
         }
       }catch(e){
         log(statusLog, `direct exception: ${e}`);
       }finally{
         btn.disabled=false;
       }
-    });
+    }); // <-- FIX: close direct-generate handler properly
 
     // Negative prompt save
     document.getElementById('btn-apply-neg').addEventListener('click', async ()=>{
@@ -817,18 +902,28 @@
       backendWarn.style.display = 'none';
       btn.disabled = true;
 
-      // Activate short lock to prevent jump-back from config/SSE while requests complete
+      // Short lock to avoid UI jump-back
       BACKEND_LOCK.until = nowSec() + 3;
 
       try{
-        const engine = (uiBackend === 'pollinations') ? 'pollinations' : 'comfyui';
-
-        if(engine==='pollinations'){
-          const okAllowed = await ensureCloudAllowed();
-          if(!okAllowed) log(statusLog, 'Could not enable cloud allow flag.');
+        // If user selected cloud backend, proactively allow cloud before switching backend
+        if (uiBackend === 'pollinations') {
+          try {
+            const rAllow = await fetch('/api/settings/image_allow_cloud', {
+              method:'POST', headers:{'Content-Type':'application/json'},
+              body: JSON.stringify({ allow: true })
+            });
+            if (!rAllow.ok) {
+              log(statusLog, 'Could not enable cloud allow flag (UI).');
+            }
+          } catch (e) {
+            log(statusLog, `enable cloud allow error: ${e}`);
+          }
         }
 
-        // Step 1: set image backend to comfyui or pollinations
+        const engine = (uiBackend === 'pollinations') ? 'pollinations' : 'comfyui';
+
+        // Step 1: set image backend (server also enforces allow when pollinations)
         const r = await fetch('/api/settings/image_backend', {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ backend: engine })
@@ -842,32 +937,34 @@
           return;
         }
 
-        // Step 2: if comfyui, apply local/remote preset based on UI value, keep workflow selector visible
+        // Step 2: Comfy preset if comfy backend
         if(engine === 'comfyui'){
           const preset = (uiBackend === 'comfyui_remote') ? 'remote' : 'local';
           const ok = await applyComfyPresetIfAvailable(preset);
           if(!ok){ log(statusLog, `comfy preset apply skipped or unsupported (requested: ${preset})`); }
-          // Keep UI selection; do not override select from config immediately
           backendSelect.value = uiBackend;
           applyWorkflowVisibilityByUi();
           await refreshWorkflowList();
         }else{
-          // Pollinations: hide workflow block
           backendSelect.value = 'pollinations';
           applyWorkflowVisibilityByUi();
           workflowSelect.innerHTML=''; workflowPreview.textContent=''; wfWarn.style.display='none';
         }
 
         log(statusLog, I18N[LANG]['backend_switched_ok'] || 'Backend switched.');
-        // Refresh config after applying backend/preset, but respect lock handling in refreshConfig
+        // Poll config once or twice to ensure server state is consistent
         await refreshConfig(true);
-        // Re-apply UI choice in case config provided different comfy_preset quickly
-        backendSelect.value = getStoredUiBackend() || uiBackend;
+        try {
+          // If pollinations chosen, give a short grace period then refresh again
+          const uiBackendSel = document.getElementById('backend-select').value;
+          if (uiBackendSel === 'pollinations') {
+            await new Promise(r=> setTimeout(r, 150));
+            await refreshConfig(true);
+          }
+        } catch {}
+        backendSelect.value = getStoredUiBackend() || document.getElementById('backend-select').value;
         applyWorkflowVisibilityByUi();
-      }catch(e){
-        log(statusLog, `${I18N[LANG]['backend_switch_failed'] || 'Switch failed.'}: ${e}`);
       }finally{
-        // Extend lock slightly to cover late SSE/config messages
         BACKEND_LOCK.until = nowSec() + 2;
         setTimeout(()=>{ if(nowSec() >= BACKEND_LOCK.until) BACKEND_LOCK.until = 0; }, 2200);
         btn.disabled = false;

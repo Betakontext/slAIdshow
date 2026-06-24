@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 import httpx
 import numpy as np
 import sounddevice as sd
-from fastapi import FastAPI, Request, UploadFile, File, Query
+from fastapi import FastAPI, Request, UploadFile, File, Query, Body
 from fastapi.responses import (
     JSONResponse,
     PlainTextResponse,
@@ -58,7 +58,7 @@ try:
 except Exception:
     resolve_reference_urls_for_pollinations = None  # type: ignore
 
-# ---------- Optional dotenv ----------
+# ---------- dotenv ----------
 ENV_PATH: Optional[str] = None
 try:
     from dotenv import find_dotenv, load_dotenv
@@ -78,6 +78,9 @@ try:
             ENV_PATH = found
 except Exception as e:
     print(f"[ENV] dotenv not available or failed: {e}")
+
+# Early print for critical Pollinations flags; avoids leaking secrets
+print(f"[ENV] dotenv file: {ENV_PATH or '(none)'} | ALLOW_CLOUD_IMAGE_BACKEND={(os.getenv('ALLOW_CLOUD_IMAGE_BACKEND') or '').strip()!r} | POLLINATIONS_SECRET_set={bool(os.getenv('POLLINATIONS_SECRET'))}")
 
 # ---------- ENV helpers ----------
 def _env_str(k: str, d: str) -> str:
@@ -1599,6 +1602,20 @@ async def get_config():
         "sse": {"tick_sec": APP_SSE_TICK_SEC},
     }
 
+# ---------- Allow cloud ----------
+@app.post("/api/settings/image_allow_cloud")
+async def api_image_allow_cloud(allow: bool = Body(..., embed=True)):
+    """Enable/disable cloud image backends at runtime and rebuild backend."""
+    try:
+        STATE.allow_cloud = bool(allow)
+        os.environ["ALLOW_CLOUD_IMAGE_BACKEND"] = "1" if STATE.allow_cloud else "0"
+        # Rebuild backend with current state so Pollinations sees allow_cloud
+        _rebuild_backend(force_name=STATE.image_backend_name)
+        await broadcast("status", f"image_allow_cloud:{int(STATE.allow_cloud)}")
+        return {"ok": True, "allow_cloud": STATE.allow_cloud}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
+
 # ---------- Backend switching ----------
 @app.post("/api/settings/image_backend")
 async def api_switch_image_backend(req: ImageBackendSwitch):
@@ -1607,10 +1624,13 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
     if target not in {"comfyui", "comfyui_remote", "pollinations"}:
         return JSONResponse({"ok": False, "error": "invalid_backend"}, status_code=400)
     if target == "pollinations" and not STATE.allow_cloud:
+        # Log helpful hint for operator
+        print("[BACKEND] pollinations denied: allow_cloud flag is False. Use POST /api/settings/image_allow_cloud {\"allow\": true}")
         return JSONResponse({"ok": False, "error": "not_allowed", "reason": "cloud_blocked"}, status_code=403)
     if target == "pollinations":
         secret = _env_str("POLLINATIONS_SECRET", "")
         if not secret:
+            print("[BACKEND] pollinations denied: POLLINATIONS_SECRET is missing in current process env")
             return JSONResponse({"ok": False, "error": "missing_secret", "reason": "missing_secret"}, status_code=400)
 
     cur_w, cur_h = STATE.image_width, STATE.image_height
@@ -1627,9 +1647,8 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
             return JSONResponse({"ok": False, "error": "host_not_whitelisted"}, status_code=403)
         _apply_comfy_target(rhost, rport)
     else:
-        # Pollinations: no change to comfy target, just backend switch and view mode default
         os.environ["APP_COMFY_FORCE_VIEW_MODE"] = os.getenv("APP_COMFY_FORCE_VIEW_MODE", "auto") or "auto"
-        print("[BACKEND] pollinations selected; Comfy direct disabled")
+        print(f"[BACKEND] pollinations selected; Comfy direct disabled | allow_cloud={STATE.allow_cloud} | secret_set={bool(_env_str('POLLINATIONS_SECRET',''))}")
 
     try:
         _rebuild_backend(force_name=target)
@@ -1948,25 +1967,48 @@ async def api_plan(req: PlanRequest):
 # ---------- Image: Direct and Test ----------
 @app.post("/api/image/direct", response_model=ImageResponse)
 async def api_image_direct(req: DirectImageRequest):
+    # German: Wenn Pollinations aktiv ist, darf dieser Endpoint nicht verwendet werden.
+    # Sende 409 mit klarem Hinweis, damit das Frontend automatisch auf /api/image/pollinations_generate umschalten kann.
     if (STATE.image_backend_name or "").lower() == "pollinations":
-        return JSONResponse({"error": "direct_disabled_for_pollinations"}, status_code=400)
+        return JSONResponse(
+            {
+                "error": "wrong_backend_for_direct",
+                "hint": "use /api/image/pollinations_generate when backend=pollinations",
+                "reason": "wrong_backend",
+            },
+            status_code=409,
+            headers={"x-reason": "wrong_backend"},
+        )
+
     if BACKEND is None:
         return JSONResponse({"error": "image_backend_not_initialized"}, status_code=500)
+
     try:
+        # Build effective prompts (positive + negative)
         built = build_style_prompt(req.prompt.strip(), STATE.style_cfg)
         neg_req = (req.negative_prompt or "").strip()
         neg_global = (STATE.negative_prompt or "").strip()
         eff_negative = (built.negative or neg_req or neg_global or "").strip()
+
+        # Pass negative prompt into LocalComfyBackend config if available
         if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
             if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
                 setattr(BACKEND.cfg, "negative", eff_negative)
+
+        # Resolve size with server defaults as fallback
         w = req.width if (req.width and req.width > 0) else STATE.image_width
         h = req.height if (req.height and req.height > 0) else STATE.image_height
+
+        # Prepare backend style if Comfy
         is_comfy = (LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend))
         if is_comfy:
             with contextlib.suppress(Exception):
                 prepare_backend_style(BACKEND, STATE.style_cfg, STYLE_REFS_DIR)
+
+        # Map reference_strength→denoise if style is active
         denoise_override = _calc_effective_denoise_from_style(STATE.style_cfg)
+
+        # Generate with negative prompt support
         path = await _generate_with_negative_support(
             prompt=built.positive,
             width=w,
@@ -1974,13 +2016,18 @@ async def api_image_direct(req: DirectImageRequest):
             negative=eff_negative,
             denoise=denoise_override,
         )
+
+        # Normalize path and broadcast event
         path = ensure_in_output_dir(path)
         rel = rel_for_ui_path(path)
         await broadcast("image", rel)
+
         return ImageResponse(filename=path.name, relpath=rel, rel=rel, width=w, height=h)
+
     except PermissionError as e:
         return JSONResponse({"error": f"{e}"}, status_code=403)
     except Exception as e:
+        # German: 502 für Upstream-Fehler (Comfy temporär nicht erreichbar, etc.)
         return JSONResponse({"error": f"{e}"}, status_code=502)
 
 @app.post("/api/image/test", response_model=ImageResponse)
@@ -2010,6 +2057,143 @@ async def api_image_test(req: ImageRequest):
         return ImageResponse(filename=path.name, relpath=rel, rel=rel, width=w, height=h)
     except Exception as e:
         return JSONResponse({"error": f"{e}"}, status_code=502)
+
+# ----------- Pollinations route-------------
+from fastapi import HTTPException, Form
+from pydantic import BaseModel, Field
+
+class PollinationsGenerateJSON(BaseModel):
+    prompt: str = Field(..., min_length=3, max_length=2000)
+    negative_prompt: Optional[str] = Field(default=None, max_length=4000)
+    width: Optional[int] = Field(default=None, ge=64, le=2048)
+    height: Optional[int] = Field(default=None, ge=64, le=2048)
+    seed: Optional[int] = Field(default=None, ge=0)
+    style_reference_url: Optional[str] = Field(default=None, min_length=8)
+
+def _pollinations_active() -> None:
+    """Ensure that the selected backend is pollinations."""
+    if (STATE.image_backend_name or "").lower() != "pollinations":
+        raise HTTPException(status_code=400, detail="backend_not_pollinations")
+
+def _pollinations_guard() -> None:
+    """Ensure cloud is allowed and secret is present; do not leak the secret."""
+    if not bool(STATE.allow_cloud):
+        raise HTTPException(status_code=403, detail="cloud_not_allowed")
+    if not bool(os.getenv("POLLINATIONS_SECRET", "").strip()):
+        raise HTTPException(status_code=400, detail="missing_secret")
+
+@app.post("/api/image/pollinations_generate")
+async def api_pollinations_generate_json(body: PollinationsGenerateJSON):
+    """JSON-based generation endpoint for Pollinations backend."""
+    _pollinations_active()
+    _pollinations_guard()
+    if BACKEND is None:
+        raise HTTPException(status_code=500, detail="image_backend_not_initialized")
+    try:
+        # Build style-aware prompt (reuses your existing style builder)
+        built = build_style_prompt((body.prompt or "").strip(), STATE.style_cfg)
+        neg_req = (body.negative_prompt or "").strip()
+        neg_global = (STATE.negative_prompt or "").strip()
+        eff_negative = (built.negative or neg_req or neg_global or "").strip()
+
+        # Resolve effective size
+        w = int(body.width or STATE.image_width)
+        h = int(body.height or STATE.image_height)
+
+        # Prepare Pollinations kwargs (support optional style URL if provided)
+        gen_kwargs: Dict[str, Any] = {"width": w, "height": h}
+        if eff_negative:
+            gen_kwargs["negative_prompt"] = eff_negative
+        if body.style_reference_url and body.style_reference_url.strip():
+            gen_kwargs["style_reference_url"] = body.style_reference_url.strip()
+        if body.seed is not None:
+            gen_kwargs["seed"] = int(body.seed)
+
+        # Dispatch to backend (will do internal retries)
+        out_path = await BACKEND.generate(built.positive, **gen_kwargs)  # type: ignore[arg-type]
+        out_path = ensure_in_output_dir(out_path)
+        rel = rel_for_ui_path(out_path)
+        await broadcast("image", rel)
+        return {"ok": True, "filename": out_path.name, "relpath": rel, "rel": rel, "width": w, "height": h}
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Map to a stable 502 to signal upstream error
+        raise HTTPException(status_code=502, detail=f"pollinations_generate_failed:{e}")
+
+@app.post("/api/image/pollinations_generate_multipart")
+async def api_pollinations_generate_multipart(
+    prompt: str = Form(...),
+    negative_prompt: Optional[str] = Form(default=None),
+    width: Optional[int] = Form(default=None),
+    height: Optional[int] = Form(default=None),
+    seed: Optional[int] = Form(default=None),
+    style_reference_url: Optional[str] = Form(default=None),
+    style_reference_file: Optional[UploadFile] = File(default=None),
+):
+    """Multipart-based generation endpoint for Pollinations backend with optional style reference file."""
+    _pollinations_active()
+    _pollinations_guard()
+    if BACKEND is None:
+        raise HTTPException(status_code=500, detail="image_backend_not_initialized")
+
+    # Validate and coerce ints from form fields
+    def _to_int(val: Optional[str]) -> Optional[int]:
+        try:
+            return int(val) if val is not None and str(val).strip() != "" else None
+        except Exception:
+            return None
+
+    w = _to_int(width) or STATE.image_width
+    h = _to_int(height) or STATE.image_height
+    if w < 64 or w > 2048:
+        raise HTTPException(status_code=400, detail="invalid_width")
+    if h < 64 or h > 2048:
+        raise HTTPException(status_code=400, detail="invalid_height")
+    sd_opt = _to_int(seed)
+
+    # Handle style file save (kept for reuse; no auto-cleanup)
+    tmp_style_path: Optional[Path] = None
+    try:
+        gen_kwargs: Dict[str, Any] = {"width": int(w), "height": int(h)}
+        neg_req = (negative_prompt or "").strip()
+        neg_global = (STATE.negative_prompt or "").strip()
+        # Build style-aware prompt first to merge style descriptors
+        built = build_style_prompt((prompt or "").strip(), STATE.style_cfg)
+        eff_negative = (built.negative or neg_req or neg_global or "").strip()
+        if eff_negative:
+            gen_kwargs["negative_prompt"] = eff_negative
+
+        # Attach style via file or URL
+        if style_reference_file and style_reference_file.filename:
+            suffix = Path(style_reference_file.filename).suffix.lower()
+            if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+                raise HTTPException(status_code=400, detail="unsupported_style_file_type")
+            raw = await style_reference_file.read()
+            if not raw or len(raw) < 256:
+                raise HTTPException(status_code=400, detail="style_file_too_small")
+            style_dir = (OUTPUT_DIR.parent / "style_refs")
+            style_dir.mkdir(parents=True, exist_ok=True)
+            tmp_style_path = style_dir / f"style_{hashlib.sha256(raw).hexdigest()[:16]}{suffix}"
+            if not tmp_style_path.exists():
+                tmp_style_path.write_bytes(raw)
+            gen_kwargs["style_reference_path"] = tmp_style_path
+        elif style_reference_url and style_reference_url.strip():
+            gen_kwargs["style_reference_url"] = style_reference_url.strip()
+
+        if sd_opt is not None:
+            gen_kwargs["seed"] = int(sd_opt)
+
+        out_path = await BACKEND.generate(built.positive, **gen_kwargs)  # type: ignore[arg-type]
+        out_path = ensure_in_output_dir(out_path)
+        rel = rel_for_ui_path(out_path)
+        await broadcast("image", rel)
+        return {"ok": True, "filename": out_path.name, "relpath": rel, "rel": rel, "width": int(w), "height": int(h)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"pollinations_generate_multipart_failed:{e}")
+# ----- END: Pollinations dedicated endpoints -----
 
 # ---------- Size & negative prompt settings ----------
 @app.get("/api/settings/image_size")

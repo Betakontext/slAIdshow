@@ -4,16 +4,14 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import ipaddress
 import json
 import os
 import re
 import time
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
@@ -102,7 +100,7 @@ def _assert_image_backend_host_policy(host: str) -> None:
         raise AssertionError(f"Remote host {host} not in allowed subnets ({subnets})")
 
 
-# ========= Pydantic models for Comfy responses =========
+# ========= Pydantic models for selected responses =========
 
 class _PromptSubmitResponse(BaseModel):
     prompt_id: str = Field(alias="prompt_id")
@@ -114,12 +112,12 @@ class _ImageInfo(BaseModel):
     type: str
 
 
+# Keep RootModel for potential future validation reuse, but we do not rely on it for history parsing anymore
 class _HistoryNodeOutput(BaseModel):
     images: List[_ImageInfo] = Field(default_factory=list)
 
 
 class _HistoryPrompt(BaseModel):
-    # keys are node_ids; values carry outputs with images
     outputs: Dict[str, _HistoryNodeOutput] = Field(default_factory=dict)
 
 
@@ -128,9 +126,7 @@ class _HistoryEntry(BaseModel):
 
 
 class _PromptHistoryResponse(RootModel[Dict[str, _HistoryEntry]]):
-    # Response is a dict keyed by prompt_id
     def entry(self, pid: str) -> Optional[_HistoryEntry]:
-        # Prefer .root (public API) rather than __root__
         return self.root.get(pid)
 
 
@@ -160,7 +156,8 @@ def _choose_view_mode(host: str) -> str:
 
 
 def _image_min_bytes() -> int:
-    return max(512, _env_int("APP_COMFY_MIN_IMAGE_BYTES", 1024))
+    # Accept very small artifacts by default unless overridden; avoids false negatives on small PNGs/WebPs.
+    return max(128, _env_int("APP_COMFY_MIN_IMAGE_BYTES", 512))
 
 
 def _max_images_to_collect() -> int:
@@ -230,11 +227,16 @@ async def _post_prompt(host: str, port: int, payload: Dict[str, Any]) -> str:
 
 
 async def _poll_history_for_images(host: str, port: int, prompt_id: str, *, max_wait_sec: float) -> List[_ImageInfo]:
-    """Poll /history/{id} until images are available or timeout exceeded."""
+    """
+    Poll /history/{id} until images are available or timeout exceeded.
+
+    Compatibility strategy:
+    - Prefer 'outputs' at top-level under the prompt_id entry (most ComfyUI builds).
+    - Fallback to 'prompt.outputs' for builds that nest outputs inside the 'prompt' field.
+    """
     t0 = _now()
     url = f"http://{host}:{port}/history/{prompt_id}"
     delay = 0.5
-    images: List[_ImageInfo] = []
     async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_default(), follow_redirects=False) as client:
         while True:
             if _now() - t0 > max_wait_sec:
@@ -242,25 +244,53 @@ async def _poll_history_for_images(host: str, port: int, prompt_id: str, *, max_
             try:
                 r = await _retrying_get(client, url)
                 data = r.json()
-                # Directly validate the response dict using RootModel in Pydantic v2
-                parsed = _PromptHistoryResponse.model_validate(data)
-                entry = parsed.entry(prompt_id)
-                if entry and entry.prompt and isinstance(entry.prompt.outputs, dict):
-                    # Walk node outputs; collect image tuples
-                    for out in entry.prompt.outputs.values():
-                        if not isinstance(out, _HistoryNodeOutput):
+                entry = data.get(prompt_id, {})
+                # Try preferred shape: outputs at top-level
+                outputs = entry.get("outputs")
+                # Fallback: outputs nested under entry['prompt']['outputs']
+                if outputs is None and isinstance(entry.get("prompt"), dict):
+                    prm = entry["prompt"]
+                    if isinstance(prm, dict):
+                        # Some builds use prompt as a tuple/list; we only care about 'outputs' dict if present
+                        if isinstance(prm.get("outputs"), dict):
+                            outputs = prm.get("outputs")
+
+                images: List[_ImageInfo] = []
+                if isinstance(outputs, dict):
+                    for node_id, node_out in outputs.items():
+                        # Each node_out should have {"images": [ {filename, subfolder, type}, ... ]}
+                        imgs = None
+                        if isinstance(node_out, dict):
+                            imgs = node_out.get("images")
+                        if not isinstance(imgs, list):
                             continue
-                        for im in out.images:
-                            if isinstance(im, _ImageInfo) and im.filename:
-                                images.append(im)
-                    if images:
-                        return images[:_max_images_to_collect()]
-            except (httpx.HTTPError, ValidationError, KeyError, ValueError) as e:
-                # Continue polling on transient/json errors
+                        for im in imgs:
+                            if not isinstance(im, dict):
+                                continue
+                            # Validate and normalize via Pydantic to enforce required keys
+                            try:
+                                info = _ImageInfo.model_validate(im)
+                                images.append(info)
+                            except ValidationError:
+                                continue
+
+                if images:
+                    if _debug():
+                        names = [f"{x.subfolder}/{x.filename}".strip("/") for x in images]
+                        print(f"[COMFY][history] images_ready count={len(images)} nodes={list(outputs.keys()) if isinstance(outputs, dict) else 'n/a'} files={names}")
+                    # Enforce max collect cap
+                    return images[:_max_images_to_collect()]
+
+                if _debug():
+                    # Show lightweight hints for debugging schema
+                    keys = list(entry.keys()) if isinstance(entry, dict) else type(entry).__name__
+                    print(f"[COMFY][history] no_images_yet keys={keys} retry_in={delay:.2f}s")
+
+            except (httpx.HTTPError, KeyError, ValueError, json.JSONDecodeError) as e:
                 if _debug():
                     print(f"[COMFY][history] transient: {type(e).__name__}: {e}")
+
             await asyncio.sleep(delay)
-            # Slow down polling slightly over time to reduce load
             delay = min(2.0, delay * 1.2)
 
 
@@ -272,20 +302,23 @@ async def _download_image_path_mode(host: str, port: int, info: _ImageInfo, out_
     This commonly works for localhost setups where Comfy serves static files.
     """
     base = f"http://{host}:{port}"
-    # Ensure safe segments
     fname = _sanitize_filename(info.filename)
-    subf = "/".join([_sanitize_filename(p) for p in info.subfolder.strip("/").split("/") if p])
-    t = _sanitize_filename(info.type)
+    subf = "/".join([_sanitize_filename(p) for p in (info.subfolder or "").strip("/").split("/") if p])
+    t = _sanitize_filename(info.type or "output")
     url = f"{base}/view/{t}/{subf}/{fname}" if subf else f"{base}/view/{t}/{fname}"
     async with httpx.AsyncClient(limits=_httpx_limits(), timeout=httpx.Timeout(30.0), follow_redirects=False) as client:
         try:
             r = await _retrying_get(client, url)
             content = r.content
             if not content or len(content) < _image_min_bytes():
+                if _debug():
+                    print(f"[COMFY][dl:path] content_too_small len={len(content) if content else 0} url={url}")
                 return None
             suffix = Path(fname).suffix.lower() or ".png"
             target = out_dir / f"img_{uuid.uuid4().hex}{suffix}"
             target.write_bytes(content)
+            if _debug():
+                print(f"[COMFY][dl:path] saved -> {target}")
             return target
         except Exception as e:
             if _debug():
@@ -299,7 +332,6 @@ async def _download_image_query_mode(host: str, port: int, info: _ImageInfo, out
     This is recommended for remote deployments where static path serving may be disabled.
     """
     base = f"http://{host}:{port}"
-    # Note: Parameters should be exactly as Comfy expects
     params = {
         "filename": info.filename,
         "subfolder": info.subfolder,
@@ -311,18 +343,23 @@ async def _download_image_query_mode(host: str, port: int, info: _ImageInfo, out
             r = await client.get(url, params=params)
             if r.status_code in (429, 500, 502, 503, 504):
                 # Light retry for transient server busy
-                r = await _retrying_get(client, url=f"{url}?filename={params['filename']}&subfolder={params['subfolder']}&type={params['type']}")
+                qp = f"filename={params['filename']}&subfolder={params['subfolder']}&type={params['type']}"
+                r = await _retrying_get(client, url=f"{url}?{qp}")
             r.raise_for_status()
             content = r.content
             if not content or len(content) < _image_min_bytes():
+                if _debug():
+                    print(f"[COMFY][dl:query] content_too_small len={len(content) if content else 0} url={url} params={params}")
                 return None
             suffix = Path(params["filename"]).suffix.lower() or ".png"
             target = out_dir / f"img_{uuid.uuid4().hex}{suffix}"
             target.write_bytes(content)
+            if _debug():
+                print(f"[COMFY][dl:query] saved -> {target}")
             return target
         except Exception as e:
             if _debug():
-                print(f"[COMFY][dl:query] {e}")
+                print(f"[COMFY][dl:query] {e} params={params}")
             return None
 
 
@@ -332,8 +369,8 @@ async def _download_images(host: str, port: int, images: List[_ImageInfo], out_d
     mode = _choose_view_mode(host)
     results: List[Path] = []
 
-    # Helper to pick the right function based on mode string
     async def _try_one(info: _ImageInfo) -> Optional[Path]:
+        # Prefer selected mode; if it fails, fallback to the other
         if mode == "path":
             p = await _download_image_path_mode(host, port, info, out_dir)
             if p is not None:
@@ -453,7 +490,6 @@ def stage_reference_url_and_patch_prompt_sync(
             inputs = node.get("inputs")
             if isinstance(inputs, dict):
                 if "url" in inputs and isinstance(inputs.get("url"), (str, type(None), dict)):
-                    # Override dict or string
                     if isinstance(inputs.get("url"), dict):
                         ov = dict(inputs["url"])
                         ov["url"] = signed
