@@ -1308,7 +1308,170 @@
       heightInputEl.addEventListener('input', onSizeInputChange);
       if(document.getElementById('workflow-block').style.display!=='none'){ await refreshWorkflowList(); }
     })();
+    // 1) Utility: Apply backend headers immediately to UI state
+    function applyBackendHeadersToUI(resp) {
+      // Read response headers to immediately reflect the active backend in the UI
+      const backend = resp.headers.get('X-Image-Backend');
+      const allowed = resp.headers.get('X-Direct-Endpoint-Allowed');
+      if (backend) {
+        const sel = document.querySelector('#backend-select');
+        if (sel) sel.value = backend; // Switch dropdown to the currently active backend
+        const pill = document.querySelector('#image-backend-pill');
+        if (pill) {
+          pill.textContent = `Images: ${backend}`;
+          pill.className = `pill pill--${backend}`;
+        }
+        // Show/hide workflow block depending on comfy vs pollinations
+        const wf = document.querySelector('#workflow-block');
+        if (wf) wf.style.display = (backend === 'pollinations') ? 'none' : '';
+      }
+      return { backend, allowed };
+    }
 
+    // 2) Switch backend handler (call POST /api/settings/image_backend)
+    async function switchBackend(target) {
+      const res = await fetch('/api/settings/image_backend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target }),
+      });
+      // Apply headers immediately for instant UX
+      applyBackendHeadersToUI(res);
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.detail || 'Failed to switch backend');
+      }
+      const j = await res.json();
+      console.log('[UI] switched backend ok:', j);
+      return j;
+    }
+
+    // 3) Direct generate handler with robust 409 fallback
+    async function directGenerate(payload) {
+      // If server returns 409 (Pollinations active), automatically switch to Pollinations endpoint.
+      const res = await fetch('/api/image/direct', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      // Reflect backend state from headers even on errors
+      applyBackendHeadersToUI(res);
+
+      if (res.status === 409) {
+        const useEndpoint = res.headers.get('X-Use-Endpoint') || '/api/image/pollinations_generate';
+        console.warn('[UI] /api/image/direct not allowed, switching to', useEndpoint);
+        // Persist UI choice to pollinations
+        const sel = document.querySelector('#backend-select');
+        if (sel) sel.value = 'pollinations';
+        const pill = document.querySelector('#image-backend-pill');
+        if (pill) {
+          pill.textContent = `Images: pollinations`;
+          pill.className = `pill pill--pollinations`;
+        }
+        const wf = document.querySelector('#workflow-block');
+        if (wf) wf.style.display = 'none';
+
+        // Now call pollinations endpoint
+        const res2 = await fetch(useEndpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        applyBackendHeadersToUI(res2);
+        if (!res2.ok) {
+          const j = await res2.json().catch(() => ({}));
+          throw new Error(j.detail || 'Pollinations generate failed');
+        }
+        const j2 = await res2.json();
+        if (j2.image) setImage(j2.image);
+        return j2;
+      }
+
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.detail || 'Direct generate failed');
+      }
+
+      const j = await res.json();
+      if (j.image) setImage(j.image);
+      return j;
+    }
+
+    // 4) Pollinations generate (explicit button or fallback)
+    async function pollinationsGenerate(payload) {
+      const res = await fetch('/api/image/pollinations_generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      applyBackendHeadersToUI(res);
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.detail || 'Pollinations generate failed');
+      }
+      const j = await res.json();
+      if (j.image) setImage(j.image);
+      return j;
+    }
+
+    // 5) Example: hookup UI elements (adjust selectors to your markup)
+    function wireUI() {
+      const backendSelect = document.querySelector('#backend-select');
+      if (backendSelect) {
+        backendSelect.addEventListener('change', async (e) => {
+          const val = e.target.value;
+          try {
+            await switchBackend(val);
+          } catch (err) {
+            console.error(err);
+            alert(err.message);
+          }
+        });
+      }
+
+      const btnDirect = document.querySelector('#btn-generate-direct');
+      if (btnDirect) {
+        btnDirect.addEventListener('click', async () => {
+          const prompt = (document.querySelector('#prompt-input')?.value || '').trim();
+          const neg = (document.querySelector('#neg-input')?.value || '').trim();
+          const width = parseInt(document.querySelector('#width-input')?.value || '832', 10);
+          const height = parseInt(document.querySelector('#height-input')?.value || '1216', 10);
+          if (!prompt) return alert('Please enter a prompt');
+          const payload = { prompt, negative_prompt: neg, width, height };
+          try {
+            // Prefer direct; it will 409-fallback to pollinations if needed
+            await directGenerate(payload);
+          } catch (err) {
+            console.error(err);
+            alert(err.message);
+          }
+        });
+      }
+    }
+
+    // 6) Minimal setImage hook
+    function setImage(url) {
+      const img = document.querySelector('#result-image');
+      if (img) img.src = url;
+      const logEl = document.querySelector('#status-log');
+      if (logEl) logEl.textContent = `New image: ${url}`;
+    }
+
+    // 7) Init on DOM ready
+    document.addEventListener('DOMContentLoaded', () => {
+      wireUI();
+      // Optionally fetch initial settings and reflect backend
+      fetch('/api/settings').then(async (res) => {
+        const j = await res.json();
+        // Simulate headers application for consistency
+        const fake = new Response(null, { headers: new Headers({
+          'X-Image-Backend': j.image_backend,
+          'X-Direct-Endpoint-Allowed': (j.image_backend === 'pollinations') ? '0' : '1'
+        })});
+        applyBackendHeadersToUI(fake);
+      });
+    });
   </script>
 
   <div class="footer-hud" aria-label="Support & Kontakt">

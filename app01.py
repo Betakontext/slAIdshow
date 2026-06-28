@@ -1,6 +1,6 @@
-# app.py
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# English comments with short German hints. This is your feature-rich, relaxed app.py preserved.
+"""slAIdshow main application entrypoint (relaxed for Pollinations)."""
 
 from __future__ import annotations
 
@@ -36,8 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # Local modules
-from image_backend import build_image_backend_from_name, StyleRuntime
-
+from image_backend import build_image_backend, ImageBackend
 try:
     from image_backend import LocalComfyBackend  # type: ignore
 except Exception:
@@ -848,14 +847,30 @@ def _apply_env_for_backend() -> None:
     os.environ["APP_COMFY_PORT"] = str(STATE.comfy_port)
 
 def build_image_backend_rt(backend_name: Optional[str] = None, allow_cloud: Optional[bool] = None) -> ImageBackend:
-    """Build backend honoring current runtime STATE using deterministic name-based factory."""
-    wanted_backend = (backend_name or STATE.image_backend_name or os.getenv("IMAGE_BACKEND", "comfyui")).lower()
-    # Do not rely on ENV selector anymore; only pass output dir to keep paths consistent
-    be = build_image_backend_from_name(wanted_backend, style=None, output_dir=OUTPUT_DIR)
-    # Optionally update STATE fields
-    STATE.image_backend_name = wanted_backend
-    STATE.allow_cloud = True  # relaxed policy
-    return be
+    """Build backend honoring current runtime STATE (cloud allowed)."""
+    wanted_backend = (backend_name or STATE.image_backend_name or _env_str("IMAGE_BACKEND", "comfyui")).lower()
+    # Force cloud allowed to avoid internal guard paths
+    allowed = True
+
+    snap = {
+        "IMAGE_BACKEND": os.environ.get("IMAGE_BACKEND"),
+        "ALLOW_CLOUD_IMAGE_BACKEND": os.environ.get("ALLOW_CLOUD_IMAGE_BACKEND"),
+        "APP_COMFY_HOST": os.environ.get("APP_COMFY_HOST"),
+        "APP_COMFY_PORT": os.environ.get("APP_COMFY_PORT"),
+    }
+    try:
+        STATE.image_backend_name = wanted_backend
+        STATE.allow_cloud = allowed
+        _apply_env_for_backend()
+        be = build_image_backend()
+        return be
+    finally:
+        for k, v in snap.items():
+            if v is None:
+                with contextlib.suppress(Exception):
+                    del os.environ[k]
+            else:
+                os.environ[k] = v
 
 def _rebuild_backend(force_name: Optional[str] = None) -> ImageBackend:
     """Rebuild global BACKEND using current STATE and optional backend name override."""

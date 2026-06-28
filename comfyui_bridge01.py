@@ -1,10 +1,10 @@
 # comfyui_bridge.py
-# Robust ComfyUI Bridge: submit workflows, poll history, and download images with retries.
-# Comments strictly in English.
+# Comments strictly in English
 
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -60,6 +60,44 @@ def _httpx_limits() -> httpx.Limits:
 def _timeout_default() -> httpx.Timeout:
     # Conservative per-request timeout; overall generation timeout handled by polling budget
     return httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
+
+
+# ========= Security: host policy =========
+
+def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
+    try:
+        ip_addr = ipaddress.ip_address(ip)
+    except Exception:
+        return False
+    parts = [p.strip() for p in (subnets_str or "").replace(",", " ").split() if p.strip()]
+    for cidr in parts:
+        try:
+            net = ipaddress.ip_network(cidr, strict=False)
+            if ip_addr in net:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _assert_image_backend_host_policy(host: str) -> None:
+    """Enforce privacy policy for ComfyUI host usage."""
+    if host in {"127.0.0.1", "localhost"}:
+        return
+    allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
+    if not allow_remote:
+        raise AssertionError(f"Only localhost allowed, got {host}")
+    subnets = _env_str("APP_COMFY_REMOTE_WHITELIST", "")
+    if not subnets:
+        # If no whitelist provided, allow but still restrict to the explicit host given
+        return
+    try:
+        # If host is an IP we can check against subnets; hostnames are allowed but not validated here
+        ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if not _is_in_allowed_subnets(host, subnets):
+        raise AssertionError(f"Remote host {host} not in allowed subnets ({subnets})")
 
 
 # ========= Pydantic models for selected responses =========
@@ -213,12 +251,14 @@ async def _poll_history_for_images(host: str, port: int, prompt_id: str, *, max_
                 if outputs is None and isinstance(entry.get("prompt"), dict):
                     prm = entry["prompt"]
                     if isinstance(prm, dict):
+                        # Some builds use prompt as a tuple/list; we only care about 'outputs' dict if present
                         if isinstance(prm.get("outputs"), dict):
                             outputs = prm.get("outputs")
 
                 images: List[_ImageInfo] = []
                 if isinstance(outputs, dict):
-                    for _node_id, node_out in outputs.items():
+                    for node_id, node_out in outputs.items():
+                        # Each node_out should have {"images": [ {filename, subfolder, type}, ... ]}
                         imgs = None
                         if isinstance(node_out, dict):
                             imgs = node_out.get("images")
@@ -227,6 +267,7 @@ async def _poll_history_for_images(host: str, port: int, prompt_id: str, *, max_
                         for im in imgs:
                             if not isinstance(im, dict):
                                 continue
+                            # Validate and normalize via Pydantic to enforce required keys
                             try:
                                 info = _ImageInfo.model_validate(im)
                                 images.append(info)
@@ -236,10 +277,12 @@ async def _poll_history_for_images(host: str, port: int, prompt_id: str, *, max_
                 if images:
                     if _debug():
                         names = [f"{x.subfolder}/{x.filename}".strip("/") for x in images]
-                        print(f"[COMFY][history] images_ready count={len(images)} files={names}")
+                        print(f"[COMFY][history] images_ready count={len(images)} nodes={list(outputs.keys()) if isinstance(outputs, dict) else 'n/a'} files={names}")
+                    # Enforce max collect cap
                     return images[:_max_images_to_collect()]
 
                 if _debug():
+                    # Show lightweight hints for debugging schema
                     keys = list(entry.keys()) if isinstance(entry, dict) else type(entry).__name__
                     print(f"[COMFY][history] no_images_yet keys={keys} retry_in={delay:.2f}s")
 
@@ -252,11 +295,6 @@ async def _poll_history_for_images(host: str, port: int, prompt_id: str, *, max_
 
 
 # ========= Image download =========
-
-def _pick_suffix_from_name(name: str) -> str:
-    s = Path(name).suffix.lower()
-    return s if s else ".png"
-
 
 async def _download_image_path_mode(host: str, port: int, info: _ImageInfo, out_dir: Path) -> Optional[Path]:
     """
@@ -276,9 +314,8 @@ async def _download_image_path_mode(host: str, port: int, info: _ImageInfo, out_
                 if _debug():
                     print(f"[COMFY][dl:path] content_too_small len={len(content) if content else 0} url={url}")
                 return None
-            suffix = _pick_suffix_from_name(fname)
+            suffix = Path(fname).suffix.lower() or ".png"
             target = out_dir / f"img_{uuid.uuid4().hex}{suffix}"
-            out_dir.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
             if _debug():
                 print(f"[COMFY][dl:path] saved -> {target}")
@@ -305,6 +342,7 @@ async def _download_image_query_mode(host: str, port: int, info: _ImageInfo, out
         try:
             r = await client.get(url, params=params)
             if r.status_code in (429, 500, 502, 503, 504):
+                # Light retry for transient server busy
                 qp = f"filename={params['filename']}&subfolder={params['subfolder']}&type={params['type']}"
                 r = await _retrying_get(client, url=f"{url}?{qp}")
             r.raise_for_status()
@@ -313,9 +351,8 @@ async def _download_image_query_mode(host: str, port: int, info: _ImageInfo, out
                 if _debug():
                     print(f"[COMFY][dl:query] content_too_small len={len(content) if content else 0} url={url} params={params}")
                 return None
-            suffix = _pick_suffix_from_name(params["filename"])
+            suffix = Path(params["filename"]).suffix.lower() or ".png"
             target = out_dir / f"img_{uuid.uuid4().hex}{suffix}"
-            out_dir.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
             if _debug():
                 print(f"[COMFY][dl:query] saved -> {target}")
@@ -371,7 +408,8 @@ async def generate_from_prompt_dict(
     - Polls /history/{id}
     - Downloads resulting images and returns their paths
     """
-    # No host policy enforcement by design (requested).
+    # Security: enforce host policy
+    _assert_image_backend_host_policy(host)
 
     # Resolve timeout budget
     budget = float(max_wait_sec if (max_wait_sec is not None) else _env_float("APP_COMFY_TIMEOUT_SEC", 180.0))
