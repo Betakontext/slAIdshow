@@ -1,31 +1,33 @@
-# image_backend.py
-# Production-ready image backend implementations for slAIdshow.
-# Comments in English; concise German notes only where logic is subtle.
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Image backends for slAIdshow (relaxed, no guards) – Pollinations + ComfyUI local/remote.
+English instructions and comments; short German notes on complex logic.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-import re
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
-# External comfy bridge (preferred):
-# This module is provided in the project and known-good.
-import comfyui_bridge  # type: ignore
+# ---------- Minimal logging helper ----------
+def _dbg_enabled() -> bool:
+    v = (os.getenv("APP_IMAGE_BACKEND_DEBUG", "0") or "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
 
+def _log(msg: str) -> None:
+    if _dbg_enabled():
+        print(f"[IMG] {msg}")
 
-# ========= Generic ENV helpers =========
-
-def _env_str(k: str, d: str = "") -> str:
+# ---------- ENV helpers ----------
+def _env_str(k: str, d: str) -> str:
     return (os.getenv(k, d) or "").strip()
-
 
 def _env_int(k: str, d: int) -> int:
     try:
@@ -33,527 +35,530 @@ def _env_int(k: str, d: int) -> int:
     except Exception:
         return d
 
-
 def _env_float(k: str, d: float) -> float:
     try:
         return float(os.getenv(k, str(d)))
     except Exception:
         return d
 
-
-def _env_bool(k: str, default: bool = False) -> bool:
-    v = (os.getenv(k, "1" if default else "0") or "").strip().lower()
+def _env_bool01(k: str, d: int = 0) -> bool:
+    v = (os.getenv(k, str(d)) or "").strip().lower()
     return v in {"1", "true", "yes", "on"}
 
-
-def _debug() -> bool:
-    v = (os.getenv("APP_IMAGE_BACKEND_DEBUG", "0") or "").strip().lower()
-    return v in {"1", "true", "yes", "on"}
-
-
-def _now_ms() -> int:
-    import time
-    return int(time.time() * 1000)
-
-
+# ---------- httpx tuning ----------
 def _httpx_limits() -> httpx.Limits:
-    # Keep connections warm but bounded
-    return httpx.Limits(max_keepalive_connections=10, max_connections=40, keepalive_expiry=30.0)
+    return httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=30.0)
 
+# ---------- Style engine shims (soft dep) ----------
+try:
+    from style_engine import resolve_style_descriptors_for_reference  # type: ignore
+except Exception:
+    def resolve_style_descriptors_for_reference(*args, **kwargs) -> List[str]:
+        return []
 
-def _timeout_default() -> httpx.Timeout:
-    # Balanced timeouts; overall budget controlled elsewhere
-    return httpx.Timeout(connect=5.0, read=20.0, write=10.0, pool=5.0)
+# ---------- Comfy bridge imports (Signature: prompt_dict, out_dir, host, port, max_wait_sec) ----------
+try:
+    from comfyui_bridge import generate_from_prompt_dict  # type: ignore
+except Exception as e:
+    generate_from_prompt_dict = None  # type: ignore
 
+# ---------- Utilities ----------
+def _clamp8(v: int) -> int:
+    v = max(64, min(4096, int(v)))
+    return v - (v % 8)
 
-# ========= Shared models =========
+def _resolve_size_for_backend(backend_name: str, req_w: Optional[int], req_h: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
+    if isinstance(req_w, int) and req_w > 0 and isinstance(req_h, int) and req_h > 0:
+        return _clamp8(req_w), _clamp8(req_h)
+    b = (backend_name or "").strip().lower()
+    if b in {"comfyui", "comfyui_local", "comfyui_remote"}:
+        cw = _env_int("APP_COMFY_WIDTH", _env_int("APP_IMAGE_WIDTH", 512))
+        ch = _env_int("APP_COMFY_HEIGHT", _env_int("APP_IMAGE_HEIGHT", 512))
+        return _clamp8(cw), _clamp8(ch)
+    elif b == "pollinations":
+        pw = _env_int("POLLINATIONS_WIDTH", _env_int("APP_IMAGE_WIDTH", 1024))
+        ph = _env_int("POLLINATIONS_HEIGHT", _env_int("APP_IMAGE_HEIGHT", 1024))
+        return _clamp8(pw), _clamp8(ph)
+    gw = _env_int("APP_IMAGE_WIDTH", 512)
+    gh = _env_int("APP_IMAGE_HEIGHT", 512)
+    return _clamp8(gw), _clamp8(gh)
 
-class ImageRequest(BaseModel):
-    prompt: str
-    negative_prompt: Optional[str] = Field(default=None)
-    width: int = Field(default=768, ge=64, le=2048)
-    height: int = Field(default=512, ge=64, le=2048)
-    seed: Optional[int] = None
-    steps: Optional[int] = Field(default=None, ge=1, le=200)
-    cfg: Optional[float] = Field(default=None, ge=0.1, le=30.0)
-    style: Optional[Dict[str, Any]] = None
-    reference_path: Optional[str] = None  # local file path to a style/reference image (if used)
-    reference_strength: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+def _mime_for(name: str) -> str:
+    n = name.lower()
+    if n.endswith(".jpg") or n.endswith(".jpeg"):
+        return "image/jpeg"
+    if n.endswith(".png"):
+        return "image/png"
+    if n.endswith(".webp"):
+        return "image/webp"
+    if n.endswith(".bmp"):
+        return "image/bmp"
+    return "application/octet-stream"
 
+def _size_from_wh(width: int, height: int) -> str:
+    if width > 0 and height > 0:
+        return f"{width}x{height}"
+    return "1024x1024"
 
-class ImageResult(BaseModel):
-    images: List[str]  # absolute file paths on disk
-    backend: str
-    meta: Dict[str, Any] = Field(default_factory=dict)
-
-
-# ========= Pollinations backend (cloud) =========
-
-class PollinationsBackend:
-    """
-    Cloud backend using Pollinations API.
-    Robust retries, negative prompt suffix merging, optional multipart for reference.
-    """
-    def __init__(self, *, out_dir: Path) -> None:
-        self.out_dir = out_dir
-        self.base_url = _env_str("POLLINATIONS_BASE_URL", "https://image.pollinations.ai")
-        self.timeout_sec = _env_float("POLLINATIONS_TIMEOUT_SEC", 60.0)
-        self.max_attempts = _env_int("POLLINATIONS_RETRIES", 4)
-
-    async def generate(self, req: ImageRequest) -> ImageResult:
-        # NOTE: This simplified version uses a single endpoint; your project likely has dedicated routes.
-        # Here we keep a robust fallback strategy and produce a local saved image if possible.
-        payload = {
-            "prompt": self._compose_prompt(req),
-            "width": req.width,
-            "height": req.height,
-        }
-        if _debug():
-            print(f"[POLLINATIONS] POST {self.base_url} payload_keys={list(payload.keys())}")
-
-        url = f"{self.base_url}/images/generate"  # v1 JSON endpoint (example)
-        out_paths: List[str] = []
-
-        async with httpx.AsyncClient(limits=_httpx_limits(), timeout=httpx.Timeout(self.timeout_sec)) as client:
-            last_exc: Optional[Exception] = None
-            delay = 0.6
-            for attempt in range(1, self.max_attempts + 1):
-                try:
-                    r = await client.post(url, json=payload)
-                    if r.status_code in (429, 500, 502, 503, 504):
-                        raise httpx.HTTPStatusError(f"transient {r.status_code}", request=r.request, response=r)
-                    r.raise_for_status()
-                    # Expect image bytes or a JSON with URL; support both
-                    ctype = r.headers.get("content-type", "").lower()
-                    if "application/json" in ctype:
-                        data = r.json()
-                        img_url = data.get("image_url") or data.get("url")
-                        if not img_url:
-                            raise RuntimeError("pollinations_no_image_url")
-                        # Download the image
-                        p = await self._download_image(client, img_url)
-                        out_paths.append(str(p))
-                    else:
-                        # Direct image bytes
-                        p = self._write_bytes(r.content)
-                        out_paths.append(str(p))
-                    break
-                except Exception as e:
-                    last_exc = e
-                    if _debug():
-                        print(f"[POLLINATIONS] attempt={attempt} err={type(e).__name__}: {e}")
-                    if attempt >= self.max_attempts:
-                        raise RuntimeError(f"pollinations_failed after {attempt} attempts: {last_exc}")
-                    await asyncio.sleep(delay)
-                    delay *= 1.8
-
-        if not out_paths:
-            raise RuntimeError("pollinations_empty_result")
-        return ImageResult(images=out_paths, backend="pollinations", meta={"endpoint": url})
-
-    async def _download_image(self, client: httpx.AsyncClient, url: str) -> Path:
-        r = await client.get(url)
-        r.raise_for_status()
-        return self._write_bytes(r.content)
-
-    def _write_bytes(self, content: bytes) -> Path:
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-        name = f"img_{uuid.uuid4().hex}.png"
-        p = self.out_dir / name
-        p.write_bytes(content)
-        if _debug():
-            print(f"[POLLINATIONS] saved -> {p}")
-        return p
-
-    def _compose_prompt(self, req: ImageRequest) -> str:
-        # Merge negative prompt as suffix; Pollinations typically parses a single string
-        prompt = req.prompt.strip()
-        if req.negative_prompt:
-            prompt = f"{prompt} --no {req.negative_prompt.strip()}"
-        return prompt
-
-
-# ========= Local/Remote ComfyUI backend =========
-
-@dataclass
-class ComfyLocalConfig:
-    host: str = "127.0.0.1"
-    port: int = 8188
-    timeout_sec: float = 180.0
-    out_dir: Path = Path("outputs/images").resolve()
-    workflow_path: Optional[Path] = None  # if you load from a workflow JSON
-
-
-class LocalComfyBackend:
-    """
-    Local or remote ComfyUI backend.
-    - Preferred path: delegate to comfyui_bridge.generate_from_prompt_dict()
-    - Optional internal-bridge fallback: enabled via APP_COMFY_USE_INTERNAL_BRIDGE=1
-    - Optional preflight POST to /prompt: APP_COMFY_PREFLIGHT=1
-    """
-    def __init__(self, cfg: ComfyLocalConfig) -> None:
-        self.cfg = cfg
-
-    async def generate(self, prompt_map: Dict[str, Any], req: ImageRequest) -> ImageResult:
-        host, port = self.cfg.host, self.cfg.port
-        budget = self.cfg.timeout_sec
-        out_dir = self.cfg.out_dir
-
-        # Debug info: show host/port and notable ENVs to spot drift
-        if _debug():
-            print(f"[COMFY][backend] target={host}:{port} budget={budget:.1f}s out_dir={out_dir}")
-            print(f"[COMFY][env] APP_COMFY_HOST={_env_str('APP_COMFY_HOST','')} APP_COMFY_PORT={_env_str('APP_COMFY_PORT','')}")
-            if self.cfg.workflow_path:
-                print(f"[COMFY][workflow] {self.cfg.workflow_path}")
-
-        # Optional preflight to detect pure connectivity issues early
-        if _env_bool("APP_COMFY_PREFLIGHT", False):
-            await self._preflight_prompt(host, port)
-
-        # Compose prompt payload: assume prompt_map is a Comfy prompt dict (nodes keyed by id)
-        payload = {"prompt": prompt_map}
-
-        # Dispatch mode: external comfy bridge or internal fallback
-        use_internal = _env_bool("APP_COMFY_USE_INTERNAL_BRIDGE", False)
-
-        try:
-            if not use_internal:
-                # Preferred: call the robust comfy bridge
-                paths = await comfyui_bridge.generate_from_prompt_dict(
-                    prompt_dict=payload,
-                    out_dir=out_dir,
-                    host=host,
-                    port=port,
-                    max_wait_sec=budget,
-                )
-            else:
-                # Internal fallback: mirrors comfyui_bridge steps for isolation testing
-                if _debug():
-                    print("[COMFY][backend] using internal bridge fallback")
-                paths = await self._internal_bridge_generate(payload, out_dir, host, port, budget)
-
-        except Exception as e:
-            # Provide a precise message with URL target and exception fingerprint
-            msg = (
-                f"comfy_generation_failed: host={host} port={port} "
-                f"type={type(e).__name__} msg={str(e)}"
-            )
-            # Kurzer Hinweis auf History-Aufruf zur manuellen Prüfung (Deutsch für Bedienerfreundlichkeit)
-            if _debug():
-                print(f"[COMFY][error] {msg}")
-                print(f"[COMFY][hint-DE] Teste: curl -s http://{host}:{port}/history | head -c 200")
-                print(f"[COMFY][hint-DE] Oder: curl -s -X POST http://{host}:{port}/prompt -H 'Content-Type: application/json' -d '{{\"prompt\":{{}}}}'")
-
-            raise RuntimeError(msg) from e
-
-        if not paths:
-            raise RuntimeError("comfy_no_images")
-        return ImageResult(images=[str(p) for p in paths], backend="comfyui", meta={"host": host, "port": port})
-
-    # ----- Helpers -----
-
-    async def _preflight_prompt(self, host: str, port: int) -> None:
-        """
-        Minimal POST to /prompt to separate connectivity from schema issues.
-        Uses the same timeouts/limits profile; does not consume budget significantly.
-        """
-        url = f"http://{host}:{port}/prompt"
-        payload = {"prompt": {}}  # minimal empty map; server may 4xx but must connect
-        if _debug():
-            print(f"[COMFY][preflight] POST {url}")
-
-        async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_default(), follow_redirects=False) as client:
-            try:
-                r = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
-                # 400/405 are acceptable here; we only care that the socket/connect works
-                if r.status_code >= 500:
-                    r.raise_for_status()
-                if _debug():
-                    print(f"[COMFY][preflight] status={r.status_code} ok_connectivity")
-            except Exception as e:
-                # Connectivity or server failure
-                raise RuntimeError(f"preflight_failed url={url} type={type(e).__name__} msg={e}")
-
-    async def _internal_bridge_generate(
-        self,
-        payload: Dict[str, Any],
-        out_dir: Path,
-        host: str,
-        port: int,
-        budget: float,
-    ) -> List[str]:
-        """
-        Internal bridge: mirrors comfyui_bridge behavior to help isolate issues.
-        - POST /prompt
-        - Poll /history/{id}
-        - Download images via /view or /api/view
-        """
-        prompt_id = await self._ib_post_prompt(host, port, payload)
-        infos = await self._ib_poll_history(host, port, prompt_id, max_wait_sec=budget)
-        paths = await self._ib_download_images(host, port, infos, out_dir)
-        return [str(p) for p in paths]
-
-    # ----- Internal Bridge (IB) -----
-
-    class _IBPromptSubmit(BaseModel):
-        prompt_id: str = Field(alias="prompt_id")
-
-    class _IBImageInfo(BaseModel):
-        filename: str
-        subfolder: str
-        type: str
-
-    async def _ib_post_prompt(self, host: str, port: int, payload: Dict[str, Any]) -> str:
-        url = f"http://{host}:{port}/prompt"
-        if _debug():
-            print(f"[COMFY][ib:submit] {url}")
-        async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_default(), follow_redirects=False) as client:
-            r = await self._ib_retry_post(client, url, payload)
-            try:
-                parsed = LocalComfyBackend._IBPromptSubmit.model_validate(r.json())
-                return parsed.prompt_id
-            except ValidationError as e:
-                raise RuntimeError(f"ib_invalid_prompt_submit_response: {e}")
-
-    async def _ib_retry_post(self, client: httpx.AsyncClient, url: str, payload: Dict[str, Any]) -> httpx.Response:
-        last_exc: Optional[Exception] = None
-        delay = 0.6
-        max_attempts = _env_int("APP_COMFY_POST_RETRIES", 4)
-        for attempt in range(1, max_attempts + 1):
-            try:
-                r = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
-                if r.status_code in (400, 401, 403, 404, 405):
-                    r.raise_for_status()
-                if r.status_code in (429, 500, 502, 503, 504):
-                    raise httpx.HTTPStatusError(f"transient {r.status_code}", request=r.request, response=r)
-                r.raise_for_status()
-                return r
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
-                last_exc = e
-                status = getattr(e, "response", None).status_code if getattr(e, "response", None) else None
-                retryable = (status in (429, 500, 502, 503, 504)) or isinstance(e, (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError))
-                if attempt >= max_attempts or not retryable:
-                    break
-                await asyncio.sleep(delay)
-                delay *= 1.8
-        raise RuntimeError(f"ib_post_failed after {max_attempts} attempts: {last_exc}")
-
-    async def _ib_poll_history(self, host: str, port: int, prompt_id: str, *, max_wait_sec: float) -> List[_IBImageInfo]:
-        url = f"http://{host}:{port}/history/{prompt_id}"
-        if _debug():
-            print(f"[COMFY][ib:history] {url} budget={max_wait_sec:.1f}s")
-        t0 = _now_ms()
-        delay = 0.5
-        async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_default(), follow_redirects=False) as client:
-            while True:
-                if (_now_ms() - t0) / 1000.0 > max_wait_sec:
-                    raise TimeoutError(f"ib_history_poll_timeout after {max_wait_sec:.1f}s")
-                try:
-                    r = await client.get(url)
-                    if r.status_code in (429, 500, 502, 503, 504):
-                        # Retry on transient
-                        await asyncio.sleep(delay)
-                        delay = min(2.0, delay * 1.2)
-                        continue
-                    r.raise_for_status()
-                    data = r.json()
-                    entry = data.get(prompt_id, {})
-                    outputs = entry.get("outputs")
-                    if outputs is None and isinstance(entry.get("prompt"), dict):
-                        prm = entry["prompt"]
-                        if isinstance(prm.get("outputs"), dict):
-                            outputs = prm.get("outputs")
-                    images: List[LocalComfyBackend._IBImageInfo] = []
-                    if isinstance(outputs, dict):
-                        for node_out in outputs.values():
-                            imgs = node_out.get("images") if isinstance(node_out, dict) else None
-                            if isinstance(imgs, list):
-                                for im in imgs:
-                                    try:
-                                        ii = LocalComfyBackend._IBImageInfo.model_validate(im)
-                                        images.append(ii)
-                                    except ValidationError:
-                                        continue
-                    if images:
-                        if _debug():
-                            print(f"[COMFY][ib:history] images={len(images)}")
-                        return images
-                except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError):
-                    # transient parse/network; continue
-                    pass
-                await asyncio.sleep(delay)
-                delay = min(2.0, delay * 1.2)
-
-    async def _ib_download_images(self, host: str, port: int, images: List[_IBImageInfo], out_dir: Path) -> List[Path]:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        mode = self._ib_choose_view_mode(host)
-        results: List[Path] = []
-
-        async def _try_one(info: LocalComfyBackend._IBImageInfo) -> Optional[Path]:
-            if mode == "path":
-                p = await self._ib_download_path_mode(host, port, info, out_dir)
-                if p is not None:
-                    return p
-                return await self._ib_download_query_mode(host, port, info, out_dir)
-            else:
-                p = await self._ib_download_query_mode(host, port, info, out_dir)
-                if p is not None:
-                    return p
-                return await self._ib_download_path_mode(host, port, info, out_dir)
-
-        for info in images:
-            p = await _try_one(info)
-            if p is not None:
-                results.append(p)
-            if len(results) >= max(1, _env_int("APP_COMFY_MAX_IMAGES", 4)):
-                break
-        return results
-
-    def _ib_choose_view_mode(self, host: str) -> str:
-        override = _env_str("APP_COMFY_FORCE_VIEW_MODE", "")
-        if override in {"path", "query"}:
-            return override
-        return "path" if host in {"127.0.0.1", "localhost"} else "query"
-
-    async def _ib_download_path_mode(self, host: str, port: int, info: _IBImageInfo, out_dir: Path) -> Optional[Path]:
-        base = f"http://{host}:{port}"
-        fname = self._ib_sanitize_filename(info.filename)
-        subf = "/".join([self._ib_sanitize_filename(p) for p in (info.subfolder or "").strip("/").split("/") if p])
-        t = self._ib_sanitize_filename(info.type or "output")
-        url = f"{base}/view/{t}/{subf}/{fname}" if subf else f"{base}/view/{t}/{fname}"
-        async with httpx.AsyncClient(limits=_httpx_limits(), timeout=httpx.Timeout(30.0), follow_redirects=False) as client:
-            try:
-                r = await client.get(url)
-                if r.status_code in (429, 500, 502, 503, 504):
-                    r = await client.get(url)  # one retry; keep it simple here
-                r.raise_for_status()
-                content = r.content
-                if not content or len(content) < max(128, _env_int("APP_COMFY_MIN_IMAGE_BYTES", 512)):
-                    if _debug():
-                        print(f"[COMFY][ib:dl:path] too_small len={len(content) if content else 0} url={url}")
-                    return None
-                p = out_dir / f"img_{uuid.uuid4().hex}{self._ib_suffix_from_name(fname)}"
-                p.write_bytes(content)
-                if _debug():
-                    print(f"[COMFY][ib:dl:path] saved -> {p}")
-                return p
-            except Exception as e:
-                if _debug():
-                    print(f"[COMFY][ib:dl:path] {e}")
-                return None
-
-    async def _ib_download_query_mode(self, host: str, port: int, info: _IBImageInfo, out_dir: Path) -> Optional[Path]:
-        base = f"http://{host}:{port}"
-        params = {"filename": info.filename, "subfolder": info.subfolder, "type": info.type}
-        url = f"{base}/api/view"
-        async with httpx.AsyncClient(limits=_httpx_limits(), timeout=httpx.Timeout(30.0), follow_redirects=False) as client:
-            try:
-                r = await client.get(url, params=params)
-                if r.status_code in (429, 500, 502, 503, 504):
-                    r = await client.get(url, params=params)
-                r.raise_for_status()
-                content = r.content
-                if not content or len(content) < max(128, _env_int("APP_COMFY_MIN_IMAGE_BYTES", 512)):
-                    if _debug():
-                        print(f"[COMFY][ib:dl:query] too_small len={len(content) if content else 0} url={url} params={params}")
-                    return None
-                p = out_dir / f"img_{uuid.uuid4().hex}{self._ib_suffix_from_name(params['filename'])}"
-                p.write_bytes(content)
-                if _debug():
-                    print(f"[COMFY][ib:dl:query] saved -> {p}")
-                return p
-            except Exception as e:
-                if _debug():
-                    print(f"[COMFY][ib:dl:query] {e} params={params}")
-                return None
-
-    @staticmethod
-    def _ib_suffix_from_name(name: str) -> str:
-        s = Path(name).suffix.lower()
-        return s if s else ".png"
-
-    @staticmethod
-    def _ib_sanitize_filename(name: str) -> str:
-        name = name.replace("\\", "/").split("/")[-1]
-        return re.sub(r"[^A-Za-z0-9._-]+", "_", name)
-
-
-# ========= Backend factory =========
-
-BackendName = Literal["comfyui", "comfyui_remote", "pollinations"]
-
-
-@dataclass
-class BackendConfig:
-    backend: BackendName = "pollinations"
-    # Comfy config
-    comfy_host: str = "127.0.0.1"
-    comfy_port: int = 8188
-    comfy_timeout_sec: float = 180.0
-    workflow_path: Optional[str] = None
-    # Output dir
-    out_dir: str = str(Path("outputs/images").resolve())
-
-
+# ---------- Backend interface ----------
 class ImageBackend:
-    """
-    Facade that dispatches to configured backend (Comfy local/remote, Pollinations).
-    """
-    def __init__(self, cfg: BackendConfig) -> None:
-        self.cfg = cfg
-        self._impl = self._build_impl(cfg)
+    async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative_prompt: str | None = None, **kwargs: Any) -> Path:
+        raise NotImplementedError
 
-    def _build_impl(self, cfg: BackendConfig):
-        out_dir = Path(cfg.out_dir).resolve()
-        if cfg.backend in ("comfyui", "comfyui_remote"):
-            wf = Path(cfg.workflow_path).resolve() if cfg.workflow_path else None
-            return LocalComfyBackend(
-                ComfyLocalConfig(
-                    host=cfg.comfy_host,
-                    port=cfg.comfy_port,
-                    timeout_sec=cfg.comfy_timeout_sec,
-                    out_dir=out_dir,
-                    workflow_path=wf,
-                )
-            )
-        elif cfg.backend == "pollinations":
-            return PollinationsBackend(out_dir=out_dir)
+# ---------- Pollinations backend (kept functional; split api_base/gen_base) ----------
+class _PollinationsV1Datum(BaseModel):
+    b64_json: Optional[str] = None
+    url: Optional[str] = None
+    revised_prompt: Optional[str] = None
+
+class _PollinationsV1Response(BaseModel):
+    created: Optional[int] = None
+    data: List[_PollinationsV1Datum] = Field(default_factory=list)
+
+class PollinationsConfig(BaseModel):
+    # Note: keep api_base for GET and gen_base for v1 POST separated
+    api_base: str = Field(default_factory=lambda: _env_str("POLLINATIONS_API_BASE", "https://image.pollinations.ai").rstrip("/"))
+    gen_base: str = Field(default_factory=lambda: _env_str("POLLINATIONS_GEN_BASE", "https://gen.pollinations.ai").rstrip("/"))
+    secret: str = Field(default_factory=lambda: _env_str("POLLINATIONS_SECRET", ""))
+    model: Optional[str] = Field(default_factory=lambda: (_env_str("POLLINATIONS_MODEL", "") or None))
+    width: int = Field(default_factory=lambda: _env_int("POLLINATIONS_WIDTH", 1024))
+    height: int = Field(default_factory=lambda: _env_int("POLLINATIONS_HEIGHT", 1024))
+    nologo: bool = Field(default_factory=lambda: _env_bool01("POLLINATIONS_NOLOGO", 1))
+    seed_raw: Optional[str] = Field(default_factory=lambda: os.getenv("POLLINATIONS_SEED"))
+    use_v1: bool = Field(default_factory=lambda: _env_bool01("POLLINATIONS_USE_V1", 1))
+    size_override: str = Field(default_factory=lambda: _env_str("POLLINATIONS_SIZE", ""))
+    v1_edits_path: str = Field(default_factory=lambda: _env_str("POLLINATIONS_V1_IMAGES_EDITS_ENDPOINT", "/v1/images/edits"))
+    v1_generations_path: str = Field(default_factory=lambda: _env_str("POLLINATIONS_V1_IMAGES_GENERATIONS_ENDPOINT", "/v1/images/generations"))
+    prompt_suffix_style_only: str = Field(default_factory=lambda: _env_str("POLLINATIONS_STYLE_SUFFIX", "adopt the exact visual style, colors, and textures from the reference image; only transfer style, not content."))
+
+    @property
+    def seed(self) -> Optional[int]:
+        if self.seed_raw is None:
+            return None
+        try:
+            return int(self.seed_raw)
+        except Exception:
+            return None
+
+async def _retrying_post(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    json_payload: Dict[str, Any] | None = None,
+    files: Dict[str, Any] | None = None,
+    headers: Dict[str, str] | None = None,
+    max_attempts: int = 4,
+    base_delay: float = 0.8,
+) -> httpx.Response:
+    # Deutsch: Exponentielles Backoff für Pollinations POST-Calls
+    last_exc: Optional[Exception] = None
+    delay = float(base_delay)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if files is not None:
+                r = await client.post(url, headers=headers, files=files)
+            else:
+                r = await client.post(url, headers=headers, json=json_payload)
+            if r.status_code in (400, 401, 403, 404, 405):
+                r.raise_for_status()
+            if r.status_code in (429, 500, 502, 503):
+                raise httpx.HTTPStatusError(f"transient {r.status_code}", request=r.request, response=r)
+            r.raise_for_status()
+            return r
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
+            last_exc = e
+            status = getattr(e, "response", None).status_code if getattr(e, "response", None) else None
+            retryable = (status in (429, 500, 502, 503)) or isinstance(e, (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError))
+            if attempt >= max_attempts or not retryable:
+                break
+            await asyncio.sleep(delay)
+            delay *= 1.8
+    raise RuntimeError(f"pollinations_post_failed after {max_attempts} attempts: {last_exc}")
+
+async def _retrying_get(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: Dict[str, str] | None = None,
+    max_attempts: int = 4,
+    base_delay: float = 0.8,
+) -> httpx.Response:
+    last_exc: Optional[Exception] = None
+    delay = float(base_delay)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            r = await client.get(url, headers=headers)
+            if r.status_code in (429, 500, 502, 503):
+                raise httpx.HTTPStatusError(f"transient {r.status_code}", request=r.request, response=r)
+            r.raise_for_status()
+            return r
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
+            last_exc = e
+            status = getattr(e, "response", None).status_code if getattr(e, "response", None) else None
+            retryable = (status in (429, 500, 502, 503)) or isinstance(e, (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError))
+            if attempt >= max_attempts or not retryable:
+                break
+            await asyncio.sleep(delay)
+            delay *= 1.8
+    raise RuntimeError(f"pollinations_get_failed after {max_attempts} attempts: {last_exc}")
+
+class PollinationsBackend(ImageBackend):
+    def __init__(self, out_dir: Path) -> None:
+        self.out_dir = Path(out_dir).resolve()
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.cfg = PollinationsConfig()
+
+    def _merge_descriptors(self, base_prompt: str, descriptors: List[str]) -> str:
+        ds = [d for d in (descriptors or []) if isinstance(d, str) and d.strip()]
+        if not ds:
+            return base_prompt
+        return (base_prompt.rstrip(",") + ", " + ", ".join(ds)).strip().strip(",")
+
+    def _resolve_descriptors_if_any(self, style_reference_path: Optional[Path]) -> List[str]:
+        if not style_reference_path or not style_reference_path.exists():
+            return []
+        try:
+            return resolve_style_descriptors_for_reference(ref_path=style_reference_path, prefer_cloud=True)  # type: ignore[arg-type]
+        except Exception:
+            return []
+
+    def _build_pollinations_image_url(self, api_base: str, prompt: str,
+                                      model: Optional[str], width: Optional[int], height: Optional[int],
+                                      nologo: bool, seed: Optional[int]) -> str:
+        from urllib.parse import quote, urlencode
+        base = (api_base or "").rstrip("/")
+        encoded_prompt = quote(prompt, safe="")
+        url = f"{base}/image/{encoded_prompt}"
+        params: dict[str, str] = {}
+        if model:
+            params["model"] = model
+        if width and width > 0:
+            params["width"] = str(width)
+        if height and height > 0:
+            params["height"] = str(height)
+        if nologo:
+            params["nologo"] = "true"
+        if seed is not None:
+            params["seed"] = str(seed)
+        if params:
+            url = f"{url}?{urlencode(params)}"
+        return url
+
+    async def _fetch_v1(self, prompt: str, width: int | None, height: int | None) -> Path:
+        # v1 POST with JSON; prefer b64_json, fallback to returned URL
+        url = f"{self.cfg.gen_base}{self.cfg.v1_generations_path}"
+        headers = {"Authorization": f"Bearer {self.cfg.secret}", "Content-Type": "application/json"}
+        w = width if (width and width > 0) else self.cfg.width
+        h = height if (height and height > 0) else self.cfg.height
+        payload = {"model": self.cfg.model or "flux", "prompt": prompt, "size": (self.cfg.size_override or _size_from_wh(w, h))}
+        delay = 1.0
+        last_exc: Optional[Exception] = None
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0), limits=_httpx_limits()) as client:
+            for attempt in range(1, 6):
+                try:
+                    r = await client.post(url, headers=headers, json=payload)
+                    r.raise_for_status()
+                    parsed = _PollinationsV1Response.model_validate(r.json())
+                    if not parsed.data:
+                        raise RuntimeError("pollinations_v1_empty_data")
+                    first = parsed.data[0]
+                    if first.b64_json:
+                        from base64 import b64decode
+                        raw = b64decode(first.b64_json, validate=True)
+                        target = self.out_dir / f"img_{uuid.uuid4().hex}.jpg"
+                        target.write_bytes(raw)
+                        if target.stat().st_size < 1024:
+                            raise RuntimeError("pollinations_v1_too_small")
+                        return target
+                    if first.url and first.url.startswith("http"):
+                        ir = await _retrying_get(client, first.url)
+                        content = ir.content
+                        target = self.out_dir / f"img_{uuid.uuid4().hex}.jpg"
+                        target.write_bytes(content)
+                        if target.stat().st_size < 1024:
+                            raise RuntimeError("pollinations_v1_too_small")
+                        return target
+                    raise RuntimeError("pollinations_v1_missing_data")
+                except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError, ValidationError) as e:
+                    last_exc = e
+                    if attempt < 5:
+                        await asyncio.sleep(delay)
+                        delay *= 1.7
+                    continue
+        raise RuntimeError(f"pollinations_v1_all_attempts_failed: {last_exc}")
+
+    async def _fetch_get(self, prompt: str, width: int | None, height: int | None) -> Path:
+        # Legacy GET against api_base (separate from gen_base)
+        w = width if (width and width > 0) else self.cfg.width
+        h = height if (height and height > 0) else self.cfg.height
+        url = self._build_pollinations_image_url(self.cfg.api_base, prompt, self.cfg.model, w, h, self.cfg.nologo, self.cfg.seed)
+        params: dict[str, str] = {}
+        if self.cfg.secret:
+            params["key"] = self.cfg.secret
+        delay = 1.0
+        last_exc: Optional[Exception] = None
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0), limits=_httpx_limits(), follow_redirects=True) as client:
+            for attempt in range(1, 5):
+                try:
+                    r = await client.get(url, params=params)
+                    r.raise_for_status()
+                    content = r.content
+                    if not content or len(content) < 1024:
+                        raise RuntimeError("pollinations_get_too_small")
+                    target = self.out_dir / f"img_{uuid.uuid4().hex}.jpg"
+                    target.write_bytes(content)
+                    return target
+                except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
+                    last_exc = e
+                    if attempt < 4:
+                        await asyncio.sleep(delay)
+                        delay *= 1.7
+                    continue
+        raise RuntimeError(f"pollinations_get_all_attempts_failed: {last_exc}")
+
+    async def _post_v1_edits(self, prompt: str, image_url: str, width: int | None, height: int | None, *, negative_prompt: str | None = None, seed: Optional[int] = None) -> Path:
+        url = f"{self.cfg.gen_base}{self.cfg.v1_edits_path}"
+        headers = {"Authorization": f"Bearer {self.cfg.secret}", "Content-Type": "application/json"}
+        w = width if (width and width > 0) else self.cfg.width
+        h = height if (height and height > 0) else self.cfg.height
+        payload: dict[str, Any] = {
+            "model": self.cfg.model or "flux",
+            "prompt": prompt,
+            "image": image_url,
+            "size": (self.cfg.size_override or _size_from_wh(w, h)),
+            "response_format": "url",
+        }
+        if negative_prompt and negative_prompt.strip():
+            payload["negative_prompt"] = negative_prompt.strip()
+        if seed is not None:
+            payload["seed"] = int(seed)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0), limits=_httpx_limits(), follow_redirects=True) as client:
+            r = await _retrying_post(client, url, json_payload=payload, headers=headers)
+            try:
+                j = r.json()
+            except Exception:
+                raise RuntimeError("pollinations_v1_edits_invalid_json")
+            data = j.get("data")
+            if isinstance(data, list) and data:
+                first = data[0]
+                if isinstance(first, dict):
+                    if "url" in first and isinstance(first["url"], str) and first["url"].startswith("http"):
+                        ir = await _retrying_get(client, first["url"])
+                        content = ir.content
+                        target = self.out_dir / f"img_{uuid.uuid4().hex}.jpg"
+                        target.write_bytes(content)
+                        if target.stat().st_size < 1024:
+                            raise RuntimeError("pollinations_v1_edits_too_small")
+                        return target
+                    if "b64_json" in first and isinstance(first["b64_json"], str):
+                        from base64 import b64decode
+                        raw = b64decode(first["b64_json"], validate=True)
+                        target = self.out_dir / f"img_{uuid.uuid4().hex}.jpg"
+                        target.write_bytes(raw)
+                        if target.stat().st_size < 1024:
+                            raise RuntimeError("pollinations_v1_edits_too_small")
+                        return target
+            raise RuntimeError("pollinations_v1_edits_missing_data")
+
+    async def _post_v1_edits_multipart(self, prompt: str, image_path: Path, width: int | None, height: int | None, *, negative_prompt: str | None = None, seed: Optional[int] = None) -> Path:
+        if not image_path.exists() or not image_path.is_file():
+            raise FileNotFoundError(image_path)
+        url = f"{self.cfg.gen_base}{self.cfg.v1_edits_path}"
+        headers = {"Authorization": f"Bearer {self.cfg.secret}"}
+        w = width if (width and width > 0) else self.cfg.width
+        h = height if (height and height > 0) else self.cfg.height
+        files: Dict[str, Any] = {
+            "prompt": (None, (prompt or "").strip()),
+            "response_format": (None, "url"),
+            "n": (None, "1"),
+            "model": (None, (self.cfg.model or "flux")),
+            "size": (None, (self.cfg.size_override or _size_from_wh(w, h))),
+            "image": (image_path.name, image_path.read_bytes(), _mime_for(image_path.name)),
+        }
+        if negative_prompt and negative_prompt.strip():
+            files["negative_prompt"] = (None, negative_prompt.strip())
+        if seed is not None:
+            files["seed"] = (None, str(int(seed)))
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0), limits=_httpx_limits(), follow_redirects=True, http2=True) as client:
+            r = await _retrying_post(client, url, files=files, headers=headers)
+            try:
+                j = r.json()
+            except Exception:
+                raise RuntimeError("pollinations_v1_edits_multipart_invalid_json")
+            data = j.get("data")
+            if isinstance(data, list) and data:
+                first = data[0]
+                if isinstance(first, dict):
+                    if "url" in first and isinstance(first["url"], str) and first["url"].startswith("http"):
+                        ir = await _retrying_get(client, first["url"])
+                        content = ir.content
+                        target = self.out_dir / f"img_{uuid.uuid4().hex}.jpg"
+                        target.write_bytes(content)
+                        if target.stat().st_size < 1024:
+                            raise RuntimeError("pollinations_v1_edits_mp_too_small")
+                        return target
+                    if "b64_json" in first and isinstance(first["b64_json"], str):
+                        from base64 import b64decode
+                        raw = b64decode(first["b64_json"], validate=True)
+                        target = self.out_dir / f"img_{uuid.uuid4().hex}.jpg"
+                        target.write_bytes(raw)
+                        if target.stat().st_size < 1024:
+                            raise RuntimeError("pollinations_v1_edits_mp_too_small")
+                        return target
+            raise RuntimeError("pollinations_v1_edits_multipart_missing_data")
+
+    async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative_prompt: str | None = None, **kwargs: Any) -> Path:
+        full_prompt = (prompt or "").strip()
+        style_reference_path: Optional[Path] = kwargs.get("style_reference_path")
+        if isinstance(style_reference_path, str):
+            style_reference_path = Path(style_reference_path)
+        if isinstance(style_reference_path, Path) and style_reference_path.exists():
+            desc = self._resolve_descriptors_if_any(style_reference_path)
+            if desc:
+                full_prompt = self._merge_descriptors(full_prompt, desc)
+            suffix = (self.cfg.prompt_suffix_style_only or "").strip()
+            if suffix:
+                full_prompt = f"{full_prompt}\n{suffix}"
+        n_prompt = (negative_prompt or "").strip()
+        if n_prompt:
+            full_prompt = f"{full_prompt}\n-- negative: {n_prompt}"
+        rw, rh = _resolve_size_for_backend("pollinations", width, height)
+        eff_w = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
+        eff_h = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
+        seed_override: Optional[int] = kwargs.get("seed") if isinstance(kwargs.get("seed"), int) else self.cfg.seed
+
+        # Edits via local multipart
+        if isinstance(style_reference_path, Path) and style_reference_path.exists():
+            return await self._post_v1_edits_multipart(full_prompt, style_reference_path, eff_w, eff_h, negative_prompt=n_prompt or None, seed=seed_override)
+
+        # Edits via URL
+        style_reference_url: Optional[str] = kwargs.get("style_reference_url")
+        if isinstance(style_reference_url, str) and style_reference_url.strip():
+            suffix = (self.cfg.prompt_suffix_style_only or "").strip()
+            if suffix:
+                full_prompt = f"{full_prompt}\n{suffix}"
+            return await self._post_v1_edits(full_prompt, style_reference_url.strip(), eff_w, eff_h, negative_prompt=n_prompt or None, seed=seed_override)
+
+        # Plain generation
+        if self.cfg.use_v1 and self.cfg.secret:
+            try:
+                return await self._fetch_v1(full_prompt, eff_w, eff_h)
+            except Exception as e:
+                _log(f"v1_failed: {e}; falling back to GET flavor")
+                return await self._fetch_get(full_prompt, eff_w, eff_h)
         else:
-            raise ValueError(f"unknown backend: {cfg.backend}")
+            return await self._fetch_get(full_prompt, eff_w, eff_h)
 
-    async def generate(self, req: ImageRequest, prompt_map: Optional[Dict[str, Any]] = None) -> ImageResult:
-        # For Comfy, prompt_map is required; for Pollinations, we compose from req.prompt.
-        if isinstance(self._impl, LocalComfyBackend):
-            if not isinstance(prompt_map, dict):
-                raise ValueError("Comfy backend requires a workflow prompt_map (dict of nodes).")
-            return await self._impl.generate(prompt_map, req)
-        else:
-            return await self._impl.generate(req)
+# ---------- ComfyUI backend (local/remote via Bridge) ----------
+class ComfyConfig(BaseModel):
+    host: str = Field(default_factory=lambda: _env_str("APP_COMFY_HOST", "127.0.0.1"))
+    port: int = Field(default_factory=lambda: _env_int("APP_COMFY_PORT", 8188))
+    workflow_path: Path = Field(default_factory=lambda: Path(_env_str("APP_COMFY_WORKFLOW", "./workflows/text2img_SD15-FP16.json")).resolve())
+    width: int = Field(default_factory=lambda: _env_int("APP_COMFY_WIDTH", _env_int("APP_IMAGE_WIDTH", 512)))
+    height: int = Field(default_factory=lambda: _env_int("APP_COMFY_HEIGHT", _env_int("APP_IMAGE_HEIGHT", 512)))
+    steps: int = Field(default_factory=lambda: _env_int("APP_COMFY_STEPS", 20))
+    cfg: float = Field(default_factory=lambda: _env_float("APP_COMFY_CFG", 6.5))
+    sampler: str = Field(default_factory=lambda: _env_str("APP_COMFY_SAMPLER", "euler"))
+    timeout_sec: float = Field(default_factory=lambda: _env_float("APP_COMFY_TIMEOUT_SEC", 300.0))
+    disabled: bool = Field(default_factory=lambda: _env_bool01("APP_DISABLE_COMFYUI", 0))
+    negative: str = Field(default_factory=lambda: _env_str("APP_COMFY_NEGATIVE", "text, watermark, logo, low quality, blurry, bad anatomy"))
+    output_dir: Path = Field(default_factory=lambda: Path(_env_str("APP_OUTPUT_DIR", str(Path.cwd() / "outputs" / "images"))).resolve())
 
+class LocalComfyBackend(ImageBackend):
+    def __init__(self, out_dir: Path) -> None:
+        if generate_from_prompt_dict is None:
+            raise RuntimeError("comfyui_bridge.generate_from_prompt_dict not available")
+        self.cfg = ComfyConfig()
+        self.out_dir = Path(out_dir).resolve()
+        self.out_dir.mkdir(parents=True, exist_ok=True)
 
-# ========= Convenience builders (for app.py) =========
+    def _load_prompt_file_only_prompt_dict(self) -> dict:
+        """Read workflow JSON and return the 'prompt' dict (Comfy /prompt format) if present."""
+        data = json.loads(self.cfg.workflow_path.read_text(encoding="utf-8"))
+        if "prompt" in data and isinstance(data["prompt"], dict):
+            return data["prompt"]
+        return data
 
-def build_image_backend_from_env() -> ImageBackend:
-    backend = _env_str("APP_IMAGE_BACKEND", _env_str("IMAGE_BACKEND", "pollinations")) or "pollinations"
-    comfy_host = _env_str("APP_COMFY_HOST", "127.0.0.1")
-    comfy_port = _env_int("APP_COMFY_PORT", 8188)
-    comfy_timeout = _env_float("APP_COMFY_TIMEOUT_SEC", 180.0)
-    out_dir = _env_str("APP_OUTPUT_DIR", str(Path("outputs/images").resolve()))
-    wf = _env_str("APP_COMFY_WORKFLOW", "")
-    cfg = BackendConfig(
-        backend=backend, comfy_host=comfy_host, comfy_port=comfy_port,
-        comfy_timeout_sec=comfy_timeout, workflow_path=(wf or None), out_dir=out_dir
-    )
-    return ImageBackend(cfg)
+    def _override_text_nodes(self, prompt_dict: dict, positive: str, negative: str) -> None:
+        """Set positive/negative on first two CLIPTextEncode nodes (heuristic)."""
+        clip_nodes: List[dict] = []
+        for node in prompt_dict.values():
+            if isinstance(node, dict) and str(node.get("class_type", "")).strip() == "CLIPTextEncode":
+                clip_nodes.append(node)
+        if clip_nodes:
+            inputs = clip_nodes[0].get("inputs", {})
+            if isinstance(inputs, dict):
+                if "text" in inputs:
+                    inputs["text"] = positive
+        if len(clip_nodes) > 1:
+            inputs = clip_nodes[1].get("inputs", {})
+            if isinstance(inputs, dict):
+                if "text" in inputs:
+                    inputs["text"] = negative
 
+    def _override_dimensions(self, prompt_dict: dict, width: int, height: int) -> None:
+        """Inject resolution across typical latent creators and samplers."""
+        for node in prompt_dict.values():
+            if not isinstance(node, dict):
+                continue
+            cls = str(node.get("class_type") or node.get("class", "")).strip()
+            inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+            if cls in {"EmptyLatentImage", "EmptyLatentImageBatch", "LatentImage", "CreateLatentImage"}:
+                if "width" in inputs:
+                    inputs["width"] = width
+                if "height" in inputs:
+                    inputs["height"] = height
+            if cls.startswith("KSampler"):
+                if "width" in inputs:
+                    inputs["width"] = width
+                if "height" in inputs:
+                    inputs["height"] = height
 
-def build_image_backend_from_name(name: BackendName, *, comfy_host: str, comfy_port: int, out_dir: str, comfy_timeout_sec: float = 180.0, workflow_path: Optional[str] = None) -> ImageBackend:
-    cfg = BackendConfig(
-        backend=name,
-        comfy_host=comfy_host,
-        comfy_port=comfy_port,
-        comfy_timeout_sec=comfy_timeout_sec,
-        workflow_path=workflow_path,
-        out_dir=out_dir,
-    )
-    return ImageBackend(cfg)
+    async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative_prompt: str | None = None, **kwargs: Any) -> Path:
+        # Load workflow and transform to prompt_dict
+        workflow_path = Path(os.getenv("APP_COMFY_WORKFLOW", str(self.cfg.workflow_path)) or str(self.cfg.workflow_path)).resolve()
+        if not workflow_path.exists():
+            raise FileNotFoundError(f"workflow_missing: {workflow_path}")
+        prompt_dict = self._load_prompt_file_only_prompt_dict()
+
+        # Inject positive/negative and dimensions
+        pos = (prompt or "").strip()
+        neg = (negative_prompt or self.cfg.negative or "").strip()
+        self._override_text_nodes(prompt_dict, positive=pos, negative=neg)
+        rw, rh = _resolve_size_for_backend("comfyui", width, height)
+        eff_w = int(rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width))
+        eff_h = int(rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height))
+        self._override_dimensions(prompt_dict, eff_w, eff_h)
+
+        # Resolve host/port (local or remote as configured in ENV)
+        host = (os.getenv("APP_COMFY_HOST", self.cfg.host) or self.cfg.host)
+        port = int(os.getenv("APP_COMFY_PORT", str(self.cfg.port)) or self.cfg.port)
+        if _dbg_enabled():
+            _log(f"Comfy target: {host}:{port} | steps={self.cfg.steps} cfg={self.cfg.cfg} sampler={self.cfg.sampler}")
+
+        # Dispatch to bridge
+        images: List[str] = await generate_from_prompt_dict(  # type: ignore[call-arg]
+            prompt_dict=prompt_dict,
+            out_dir=str(self.out_dir),
+            host=str(host),
+            port=int(port),
+            max_wait_sec=float(self.cfg.timeout_sec),
+        )
+
+        if images and isinstance(images[0], str):
+            p = Path(images[0]).resolve()
+            if p.exists() and p.is_file() and p.stat().st_size >= 1024:
+                return p
+        raise RuntimeError("comfyui_no_output_file")
+
+# ---------- Factory ----------
+def build_image_backend() -> ImageBackend:
+    backend = (_env_str("IMAGE_BACKEND", "comfyui") or "comfyui").lower()
+    out_dir = Path(_env_str("APP_OUTPUT_DIR", str(Path.cwd() / "outputs" / "images"))).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if backend in {"comfyui", "comfyui_remote"}:
+        return LocalComfyBackend(out_dir)
+    if backend == "pollinations":
+        return PollinationsBackend(out_dir)
+    # Default
+    return LocalComfyBackend(out_dir)

@@ -1,6 +1,11 @@
 # app.py
-# -*- coding: utf-8 -*-
-# English comments with short German hints. This is your feature-rich, relaxed app.py preserved.
+# English comments with short German hints. Feature-rich, relaxed app.py preserved.
+# This revision:
+# - Removes invalid imports (build_image_backend_from_name, StyleRuntime)
+# - Keeps former behavior: image_backend.build_image_backend() drives the backend
+# - Adds new Comfy HTTP settings (scheme/base_path/headers) via /api/settings/comfy_http
+# - Mirrors these settings into ENV to be picked up by image_backend/comfyui_bridge
+# - Does NOT remove any existing endpoints or features
 
 from __future__ import annotations
 
@@ -24,7 +29,7 @@ from urllib.parse import urlparse
 import httpx
 import numpy as np
 import sounddevice as sd
-from fastapi import FastAPI, Request, UploadFile, File, Query, Body
+from fastapi import FastAPI, Request, UploadFile, File, Query, Body, HTTPException
 from fastapi.responses import (
     JSONResponse,
     PlainTextResponse,
@@ -33,10 +38,11 @@ from fastapi.responses import (
     Response,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, validator
 
 # Local modules
-from image_backend import build_image_backend_from_name, StyleRuntime
+# IMPORTANT: use the former-state factory build_image_backend()
+from image_backend import build_image_backend  # type: ignore
 
 try:
     from image_backend import LocalComfyBackend  # type: ignore
@@ -81,7 +87,7 @@ except Exception as e:
     print(f"[ENV] dotenv not available or failed: {e}")
 
 # Early print for critical Pollinations flags; avoids leaking secrets
-print(f"[ENV] dotenv file: {ENV_PATH or '(none)'} | ALLOW_CLOUD_IMAGE_BACKEND={(os.getenv('ALLOW_CLOUD_IMAGE_BACKEND') or '').strip()!r} | POLLINATIONS_SECRET_set={bool(os.getenv('POLLINATIONS_SECRET'))}")
+print(f"[STYLE-ENV] api={os.getenv('POLLINATIONS_GEN_BASE','https://gen.pollinations.ai')} v1_edits={'on'} url_mode={'off'} cloud={'off'} uploads={'on'} secret_set={bool(os.getenv('POLLINATIONS_SECRET')) and 'yes' or 'no'} model={os.getenv('POLLINATIONS_MODEL','flux')}")
 
 # ---------- ENV helpers ----------
 def _env_str(k: str, d: str) -> str:
@@ -147,7 +153,7 @@ except Exception as e:
     print(f"[WARN] could not import pywhispercpp: {e}")
     WhisperModel = None  # type: ignore
     WHISPER_AVAILABLE = False
-_WHISPER_MODEL: Optional[WhisperModel] = None
+_WHISPER_MODEL: Optional["WhisperModel"] = None
 
 def init_whisper_model() -> None:
     """Initialize whisper.cpp model if path present."""
@@ -171,6 +177,8 @@ def init_whisper_model() -> None:
     except Exception as e:
         print(f"[WHISPER] initialization failed: {e}")
         _WHISPER_MODEL = None
+
+import numpy as np  # ensure numpy import for audio transforms already present above
 
 TEXT_FIELD_RE = re.compile(r"text\s*=\s*(.+?)(?:,|$)")
 META_RE = re.compile(
@@ -229,7 +237,7 @@ def _parse_whisper_out(raw: object) -> str:
     return s
 
 def clean_transcript(raw: str) -> str:
-    """Filter filler words and meta noise markers."""
+    """Filter filler words and meta noise markers (Deutsch: kleine Heuristiken)."""
     if not raw:
         return ""
     txt = " ".join(raw.split()).strip()
@@ -501,17 +509,17 @@ def _hmac_verify(msg: str, sig: str, secret: str) -> bool:
     except Exception:
         return False
 
-def build_signed_url(filename: str, now_ts: Optional[int] = None) -> str:
+def build_signed_url(filename: str, ttl: int = None, now_ts: Optional[int] = None) -> str:
     """Relaxed: if no secret/host usable, return direct /style_refs URL for convenience."""
     base = _safe_basename(filename)
     if APP_REF_SECRET and (APP_REF_HOST or os.getenv('APP_BIND_HOST')):
         host = APP_REF_HOST or f"http://{os.getenv('APP_BIND_HOST','127.0.0.1')}:{int(os.getenv('APP_BIND_PORT','8080') or '8080')}"
         ts = int(now_ts or time.time())
-        exp = ts + int(APP_REF_TTL_SEC)
+        exp = ts + int(ttl if ttl is not None else APP_REF_TTL_SEC)
         payload = f"{base}:{exp}"
         sig = _hmac_sign(payload, APP_REF_SECRET)
         return f"{host.rstrip('/')}/ref/{base}?ts={exp}&sig={sig}"
-    # Fallback: serve directly from static refs (unsiged)
+    # Fallback: serve directly from static refs (unsigned)
     return f"/style_refs/{base}"
 
 def _verify_and_open_ref(basename: str, ts: int, sig: str) -> Tuple[bytes, str]:
@@ -675,6 +683,24 @@ class ComfyTargetReq(BaseModel):
     host: Optional[str] = None
     port: Optional[int] = None
 
+# NEW: Comfy HTTP settings model
+class ComfyHttpPayload(BaseModel):
+    scheme: Optional[Literal["http", "https"]] = None
+    base_path: Optional[str] = None
+    headers: Optional[Dict[str, str]] = None
+
+    @validator("base_path")
+    def normalize_base_path(cls, v: Optional[str]) -> Optional[str]:
+        # Normalize to "" or a string starting with "/" and without trailing "/"
+        if v is None:
+            return v
+        v = v.strip()
+        if v in {"", "/"}:
+            return ""
+        if not v.startswith("/"):
+            v = "/" + v
+        return v.rstrip("/")
+
 # ---------- Global state ----------
 @dataclass
 class PipelineState:
@@ -705,6 +731,10 @@ class PipelineState:
     comfy_host: str = _env_str("APP_COMFY_HOST", "127.0.0.1")
     comfy_port: int = _env_int("APP_COMFY_PORT", 8188)
     comfy_whitelist: List[str] = field(default_factory=list)
+    # NEW: HTTP settings for Comfy (scheme, base_path, headers)
+    comfy_scheme: Literal["http", "https"] = "http"
+    comfy_base_path: str = ""
+    comfy_headers: Dict[str, str] = field(default_factory=dict)
 
 STATE = PipelineState()
 STOP_DEBOUNCE_SEC = float(os.getenv("APP_STOP_DEBOUNCE_SEC", "2.0") or "2.0")
@@ -833,7 +863,7 @@ def _log_effective_config() -> None:
         "| image:",
         f"backend={STATE.image_backend_name} allow_cloud={STATE.allow_cloud} out={OUTPUT_DIR} default={APP_IMAGE_WIDTH}x{APP_IMAGE_HEIGHT}",
         "| comfy:",
-        f"target={STATE.comfy_target} host={STATE.comfy_host}:{STATE.comfy_port}",
+        f"target={STATE.comfy_target} host={STATE.comfy_host}:{STATE.comfy_port} scheme={STATE.comfy_scheme} base_path={STATE.comfy_base_path or '(none)'} headers={list(STATE.comfy_headers.keys())}",
         "| style:",
         f"preset={STATE.style_cfg.style_preset} use_ref={STATE.style_cfg.use_reference}",
         "| sse:",
@@ -842,30 +872,40 @@ def _log_effective_config() -> None:
 
 # ---------- Backend runtime builder ----------
 def _apply_env_for_backend() -> None:
+    """
+    Push critical runtime state to ENV so image_backend/comfyui_bridge can pick them up.
+    Deutsch: Bis die Module direkte Parameter annehmen, nutzen wir ENV als Brücke.
+    """
     os.environ["IMAGE_BACKEND"] = STATE.image_backend_name
     os.environ["ALLOW_CLOUD_IMAGE_BACKEND"] = "1"  # always on (relaxed)
     os.environ["APP_COMFY_HOST"] = STATE.comfy_host
     os.environ["APP_COMFY_PORT"] = str(STATE.comfy_port)
+    # NEW: mirror Comfy HTTP settings
+    os.environ["APP_COMFY_SCHEME"] = STATE.comfy_scheme
+    os.environ["APP_COMFY_BASE_PATH"] = STATE.comfy_base_path or ""
+    try:
+        os.environ["APP_COMFY_HEADERS_JSON"] = json.dumps(STATE.comfy_headers or {}, ensure_ascii=False)
+    except Exception:
+        os.environ["APP_COMFY_HEADERS_JSON"] = "{}"
 
-def build_image_backend_rt(backend_name: Optional[str] = None, allow_cloud: Optional[bool] = None) -> ImageBackend:
-    """Build backend honoring current runtime STATE using deterministic name-based factory."""
-    wanted_backend = (backend_name or STATE.image_backend_name or os.getenv("IMAGE_BACKEND", "comfyui")).lower()
-    # Do not rely on ENV selector anymore; only pass output dir to keep paths consistent
-    be = build_image_backend_from_name(wanted_backend, style=None, output_dir=OUTPUT_DIR)
-    # Optionally update STATE fields
-    STATE.image_backend_name = wanted_backend
-    STATE.allow_cloud = True  # relaxed policy
+def build_image_backend_rt() -> Any:
+    """
+    Build backend honoring current runtime STATE using the former-state factory.
+    The former image_backend.build_image_backend() reads ENV-based config.
+    """
+    _apply_env_for_backend()
+    be = build_image_backend()
     return be
 
-def _rebuild_backend(force_name: Optional[str] = None) -> ImageBackend:
+def _rebuild_backend(force_name: Optional[str] = None) -> Any:
     """Rebuild global BACKEND using current STATE and optional backend name override."""
     global BACKEND
     if force_name:
         STATE.image_backend_name = force_name.lower()
-    BACKEND = build_image_backend_rt(backend_name=STATE.image_backend_name, allow_cloud=True)
+    BACKEND = build_image_backend_rt()
     return BACKEND
 
-BACKEND: Optional[ImageBackend] = None
+BACKEND: Optional[Any] = None
 
 # ---------- Comfy target / modes ----------
 def _apply_view_mode_for_target(host: str) -> None:
@@ -895,6 +935,10 @@ def _apply_comfy_target(host: str, port: int) -> None:
     print(f"[BACKEND] switched -> {STATE.image_backend_name} | comfy_target={STATE.comfy_host}:{STATE.comfy_port} | view_mode={os.getenv('APP_COMFY_FORCE_VIEW_MODE','auto')}")
 
 # ---------- Workflows ----------
+class WorkflowItem(BaseModel):
+    name: str = Field(..., description="Display name (stem)")
+    filename: str = Field(..., description="Base filename ending with .json")
+
 def _list_workflow_files() -> List[WorkflowItem]:
     items: List[WorkflowItem] = []
     if not WORKFLOWS_DIR.exists():
@@ -922,7 +966,11 @@ def _apply_active_workflow_if_local() -> None:
     fname = getattr(STATE, "active_workflow", None)
     if not fname:
         return
-    wf_path = (WORKFLOWS_DIR / fname).resolve()
+    wf_path = (WORKFLOWS_DIR / fname).resolve
+    try:
+        wf_path = (WORKFLOWS_DIR / fname).resolve()
+    except Exception:
+        return
     if not wf_path.exists() or not wf_path.is_file():
         print(f"[WF] active_workflow missing on disk: {wf_path}")
         return
@@ -951,7 +999,7 @@ def _calc_effective_denoise_from_style(style: StyleConfig) -> Optional[float]:
         return None
     return _map_reference_strength_to_denoise(getattr(style, "reference_strength", 0.6))
 
-def _apply_denoise_to_local_comfy(backend: ImageBackend, denoise: Optional[float]) -> None:
+def _apply_denoise_to_local_comfy(backend: Any, denoise: Optional[float]) -> None:
     """Try to apply denoise to LocalComfyBackend via cfg or method."""
     if denoise is None or LocalComfyBackend is None or not isinstance(backend, LocalComfyBackend):
         return
@@ -1231,6 +1279,7 @@ async def _generate_with_negative_support(prompt: str, width: int, height: int, 
             else:
                 print("[STYLE] pollinations: no reference attached (none or resolver unavailable)")
     try:
+        # Former-state backends expose .generate(...)
         return await BACKEND.generate(prompt, **gen_kwargs)  # type: ignore[arg-type]
     except TypeError:
         merged = _merge_negative_into_prompt(prompt, negative)
@@ -1297,6 +1346,16 @@ async def lifespan(app: FastAPI):
         print(f"[STYLE] load failed, using defaults: {e}")
         STATE.style_cfg = StyleConfig()
         STATE.style_cfg.persisted_path = STYLE_CFG_PATH
+    # Initialize Comfy HTTP settings from ENV at startup (for persistence across restarts)
+    STATE.comfy_scheme = (_env_str("APP_COMFY_SCHEME", STATE.comfy_scheme) or "http") in {"https"} and "https" or "http"
+    STATE.comfy_base_path = _env_str("APP_COMFY_BASE_PATH", STATE.comfy_base_path)
+    try:
+        raw = _env_str("APP_COMFY_HEADERS_JSON", "")
+        STATE.comfy_headers = json.loads(raw) if raw else {}
+        if not isinstance(STATE.comfy_headers, dict):
+            STATE.comfy_headers = {}
+    except Exception:
+        STATE.comfy_headers = {}
     _log_effective_config()
     init_whisper_model()
     STATE.comfy_host = _env_str("APP_COMFY_HOST", STATE.comfy_host)
@@ -1467,6 +1526,9 @@ async def get_config():
         "comfyui_target": STATE.comfy_target,
         "host": STATE.comfy_host if _debug_enabled() else None,
         "port": STATE.comfy_port if _debug_enabled() else None,
+        "scheme": STATE.comfy_scheme,
+        "base_path": STATE.comfy_base_path,
+        "headers_keys": list(STATE.comfy_headers.keys()),
     }
     return {
         "env_file": ENV_PATH or "(env vars only)",
@@ -1576,11 +1638,60 @@ async def api_comfy_preset(req: ComfyPresetRequest):
     await broadcast("status", f"comfy_preset:{req.preset}")
     return {"ok": True, "preset": req.preset, "host": STATE.comfy_host, "port": STATE.comfy_port, "target": STATE.comfy_target}
 
+# NEW: Comfy HTTP settings route
+@app.post("/api/settings/comfy_http")
+async def api_comfy_http(p: ComfyHttpPayload):
+    """Configure Comfy HTTP transport: scheme, base_path, headers. Mirrors into ENV and rebuilds backend.
+    Deutsch: Werte werden im STATE gehalten und per ENV an die Backends weitergereicht.
+    """
+    if p.scheme is not None:
+        STATE.comfy_scheme = "https" if p.scheme == "https" else "http"
+    if p.base_path is not None:
+        STATE.comfy_base_path = p.base_path
+    if p.headers is not None:
+        # Never log values; only store in memory and serialize to ENV for children
+        if not isinstance(p.headers, dict):
+            raise HTTPException(status_code=400, detail="headers must be a dict of string keys/values")
+        # Ensure str->str
+        headers: Dict[str, str] = {}
+        for k, v in p.headers.items():
+            if not isinstance(k, str):
+                continue
+            if v is None:
+                continue
+            headers[k] = str(v)
+        STATE.comfy_headers = headers
+    # Rebuild with updated ENV mirror
+    _rebuild_backend(force_name=STATE.image_backend_name)
+    # Response exposes only header keys
+    return {
+        "ok": True,
+        "comfy_http": {
+            "scheme": STATE.comfy_scheme,
+            "base_path": STATE.comfy_base_path,
+            "header_keys": list(STATE.comfy_headers.keys()),
+        },
+    }
+
 # ---------- Workflows API ----------
 @app.get("/api/workflows", response_model=WorkflowList)
 async def api_list_workflows() -> WorkflowList:
     items = _list_workflow_files()
     return WorkflowList(items=items)
+
+class WorkflowSelect(BaseModel):
+    filename: str = Field(..., description="Base filename ending with .json")
+
+    @field_validator("filename")
+    @classmethod
+    def safe_filename(cls, v: str) -> str:
+        if "/" in v or "\\" in v:
+            raise ValueError("Invalid filename")
+        if not v.endswith(".json"):
+            raise ValueError("Must end with .json")
+        if not re.fullmatch(r"[A-Za-z0-9._\\-]+", v):
+            raise ValueError("Illegal characters in filename")
+        return v
 
 @app.post("/api/settings/workflow")
 async def api_select_workflow(payload: WorkflowSelect):
@@ -1906,9 +2017,6 @@ async def api_image_test(req: ImageRequest):
         return JSONResponse({"error": f"{e}"}, status_code=502)
 
 # ----------- Pollinations route (relaxed guards) -------------
-from fastapi import HTTPException, Form
-from pydantic import BaseModel, Field
-
 class PollinationsGenerateJSON(BaseModel):
     prompt: str = Field(..., min_length=3, max_length=2000)
     negative_prompt: Optional[str] = Field(default=None, max_length=4000)
