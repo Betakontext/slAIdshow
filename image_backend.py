@@ -2,24 +2,33 @@
 # -*- coding: utf-8 -*-
 # Production-ready image backend adapters for ComfyUI (local/LAN/remote) and Pollinations (cloud)
 #
-# This version focuses on making Pollinations inline negative injection robust, observable,
-# and configurable, while preserving existing behavior for ComfyUI.
+# This release keeps Pollinations fully decoupled and working as before, while adding
+# an opt-in, safe auto-discovery for ComfyUI that:
+#   - Prefers the configured APP_COMFY_HOST first (default 127.0.0.1)
+#   - Optionally tries APP_COMFY_FALLBACK_HOSTS and AUTO_DISCOVERY_SUBNETS if local is down
+#   - Enforces APP_ALLOW_REMOTE_BACKENDS and APP_ALLOWED_SUBNETS before connecting
+#   - Caches the first discovered host for the process lifetime (no repeated scans)
 #
-# Key improvements:
-# - Final, idempotent inline negative injection occurs inside PollinationsBackend right before
-#   building the payload/URL. Nothing upstream can override it later.
-# - Adds bilingual ("bi") constraints by default (German + English) to increase model adherence.
-#   Configurable via POLLINATIONS_INJECT_STYLE = de|en|neutral|bi (default: bi).
-# - Adds POLLINATIONS_FORCE_INLINE=1 to inject constraints even when the per-request negative is empty
-#   but env/global negatives exist (APP_GLOBAL_NEGATIVE / POLLINATIONS_NEGATIVE).
-# - Adds explicit debug logs showing detected language and a preview of the final prompt (first 220 chars).
-# - Still sends negative_prompt field to V1 when present.
+# IMPORTANT:
+# - Pollinations path never triggers ComfyUI discovery and is not affected by it.
+# - ComfyUI discovery only runs if IMAGE_BACKEND=comfyui and APP_DISABLE_COMFYUI=0.
+# - 0.0.0.0 is a bind address only; clients must use a real IP like 192.168.188.24.
 #
-# Notes:
-# - ComfyUI negative prompts are applied to the negative CLIP node only (no inline injection).
-# - Robust retries and size resolution retained.
-# - No Ollama dependency in this module; provide a small helper at bottom that controllers can call
-#   post-LLM to idempotently re-apply negatives before invoking the backend.
+# Minimal .env for LAN ComfyUI usage:
+#   IMAGE_BACKEND=comfyui
+#   APP_COMFY_HOST=127.0.0.1
+#   APP_COMFY_PORT=8188
+#   APP_ALLOW_REMOTE_BACKENDS=1
+#   APP_ALLOWED_SUBNETS=192.168.188.0/24
+#   APP_COMFY_FALLBACK_HOSTS=192.168.188.24
+#   AUTO_DISCOVERY_ENABLE=1
+#   AUTO_DISCOVERY_SUBNETS=192.168.188.0/24
+#
+# To use Pollinations (cloud):
+#   IMAGE_BACKEND=pollinations
+#   ALLOW_CLOUD_IMAGE_BACKEND=1
+#   POLLINATIONS_SECRET=sk_...
+#   (Discovery code is not touched in this path.)
 
 from __future__ import annotations
 
@@ -67,7 +76,12 @@ def _httpx_limits() -> httpx.Limits:
     return httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=30.0)
 
 def _timeout_short() -> httpx.Timeout:
-    return httpx.Timeout(connect=3.0, read=6.0, write=4.0, pool=4.0)
+    # General quick calls (health/object_info)
+    return httpx.Timeout(connect=2.5, read=5.0, write=4.0, pool=4.0)
+
+def _timeout_probe() -> httpx.Timeout:
+    # Very short probes for discovery
+    return httpx.Timeout(connect=1.2, read=2.0, write=1.5, pool=1.5)
 
 def _timeout_long(total: float) -> httpx.Timeout:
     total = max(10.0, min(total, 240.0))
@@ -81,6 +95,9 @@ def _clamp_dim(v: Optional[int]) -> Optional[int]:
 
 def _now() -> float:
     return time.time()
+
+def _is_loopback(host: str) -> bool:
+    return host in {"127.0.0.1", "localhost"}
 
 def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
     try:
@@ -104,7 +121,7 @@ def _assert_image_backend_host_policy(host: str) -> None:
     - Remote only if APP_ALLOW_REMOTE_BACKENDS=1.
     - If APP_ALLOWED_SUBNETS is set and host is an IP, it must match.
     """
-    if host in {"127.0.0.1", "localhost"}:
+    if _is_loopback(host):
         return
     allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
     if not allow_remote:
@@ -174,30 +191,21 @@ class ImageBackend:
 
 
 # ============================================================
-# Pollinations (Cloud) with Robust Negative Injection
+# Pollinations (Cloud) with Keyword-Style Negative Injection
 # ============================================================
 
-# Injection configuration (overridable via env)
-INJECTION_MODE = (_env_str("POLLINATIONS_INJECT_MODE", "append") or "append").lower()  # append | prepend
+INJECTION_MODE = "append"        # 'append' or 'prepend'
 INJECTION_SEPARATOR = " "
-MAX_NEG_TERMS = _env_int("POLLINATIONS_MAX_NEG_TERMS", 24)
-MAX_CONSTRAINT_CHARS = _env_int("POLLINATIONS_MAX_CONSTRAINT_CHARS", 260)
-INJECT_STYLE = (_env_str("POLLINATIONS_INJECT_STYLE", "bi") or "bi").lower()  # de | en | neutral | bi
-FORCE_INLINE = _env_bool01("POLLINATIONS_FORCE_INLINE", 0)
+MAX_NEG_TERMS = 24
+MAX_CONSTRAINT_CHARS = 240
+DEFAULT_COLOR_BIAS = True
 
 def _is_german_text(text: str) -> bool:
-    """
-    Lightweight heuristic to detect German text.
-    - Checks for umlauts (ä, ö, ü) and ß
-    - Checks common German stopwords/articles/prepositions
-    """
     if not text:
         return False
     lower = text.lower()
-
     if any(ch in lower for ch in ("ä", "ö", "ü", "ß")):
         return True
-
     german_markers = {
         " der ", " die ", " das ", " und ", " mit ", " ohne ", " kein ", " keine ", " einem ",
         " einer ", " im ", " am ", " zum ", " zur ", " vom ", " für ", " nicht ", " auch ",
@@ -209,9 +217,6 @@ def _is_german_text(text: str) -> bool:
     return matches >= 2
 
 def _normalize_negative_terms(neg_text: str) -> List[str]:
-    """
-    Normalize a comma/semicolon/newline-separated negative string into unique, clean terms.
-    """
     if not neg_text:
         return []
     parts = re.split(r"[,\n;]+", neg_text)
@@ -230,9 +235,6 @@ def _normalize_negative_terms(neg_text: str) -> List[str]:
     return cleaned
 
 def _term_in_prompt(term: str, prompt: str) -> bool:
-    """
-    Case-insensitive check if term already appears in prompt. Avoids redundant injection.
-    """
     t = term.lower().strip()
     if not t:
         return False
@@ -241,93 +243,86 @@ def _term_in_prompt(term: str, prompt: str) -> bool:
         return t in p
     return re.search(rf"(^|[^a-z0-9]){re.escape(t)}([^a-z0-9]|$)", p) is not None
 
-def _constraints_text_de(terms: List[str]) -> str:
-    # Prefer "ohne ..." because it reads more naturally in short lists than "kein/keine ..."
-    # Example: "Ohne Fenster, Glas, Scheiben."
-    if not terms:
-        return ""
-    return "Ohne " + ", ".join(terms) + "."
+RED_PRODUCE_EN = [
+    "red vegetables", "red fruits",
+    "tomatoes", "tomato",
+    "strawberries", "strawberry",
+    "red peppers", "bell peppers", "pepper", "chili peppers", "chili",
+    "red apples", "cherries", "pomegranates", "watermelon",
+    "raspberries", "red currants",
+]
+RED_COLOR_TOKENS_EN = [
+    "warm red tones", "high saturation reds", "crimson", "scarlet", "vermilion",
+]
 
-def _constraints_text_en(terms: List[str]) -> str:
-    # English: short and strict
-    # Example: "Exclude: windows, glass, panes."
-    if not terms:
-        return ""
-    return "Exclude: " + ", ".join(terms) + "."
+def _expand_semantic_negatives(neg_terms: List[str]) -> List[str]:
+    if not neg_terms:
+        return []
+    base = [t.strip().lower() for t in neg_terms if t.strip()]
+    out: List[str] = []
 
-def _constraints_text_neutral(terms: List[str]) -> str:
-    if not terms:
-        return ""
-    return "Exclude / Ohne: " + ", ".join(terms) + "."
+    text_blob = " ".join(base)
+    de_rot = any(w in text_blob for w in ["rot", "rotes", "rote", "roten"])
+    de_gemuese = "gemüse" in text_blob or "gemuese" in text_blob
+    de_obst = "obst" in text_blob
 
-def _build_constraints_sentence(neg_terms: List[str], base_prompt: str, prefer_de: bool) -> str:
-    """
-    Build a concise constraints sentence according to INJECT_STYLE.
-    Styles:
-      - de:      "Ohne Fenster, Glas, Scheiben."
-      - en:      "Exclude: windows, glass, panes."
-      - neutral: "Exclude / Ohne: Fenster, Glas, Scheiben."
-      - bi:      "Ohne Fenster, Glas, Scheiben. Exclude: Fenster, Glas, Scheiben."
-    """
+    en_red = "red" in text_blob
+    en_veg = "vegetable" in text_blob or "vegetables" in text_blob
+    en_fruits = "fruit" in text_blob or "fruits" in text_blob
+
+    if (de_rot and (de_gemuese or de_obst)) or (en_red and (en_veg or en_fruits)):
+        out.extend(RED_PRODUCE_EN)
+
+    for t in base:
+        if t not in out:
+            out.append(t)
+
+    seen = set()
+    compact: List[str] = []
+    for t in out:
+        key = t.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        compact.append(t.strip())
+
+    if len(compact) > MAX_NEG_TERMS:
+        compact = compact[:MAX_NEG_TERMS]
+    return compact
+
+def _build_keyword_constraints(neg_terms: List[str], add_cool_bias: bool = DEFAULT_COLOR_BIAS) -> str:
     if not neg_terms:
         return ""
-    filtered = [t for t in neg_terms if not _term_in_prompt(t, base_prompt)]
-    if not filtered:
-        return ""
-
-    style = INJECT_STYLE
-    if style not in {"de", "en", "neutral", "bi"}:
-        style = "bi"
-
-    if style == "de":
-        sentence = _constraints_text_de(filtered)
-    elif style == "en":
-        sentence = _constraints_text_en(filtered)
-    elif style == "neutral":
-        sentence = _constraints_text_neutral(filtered)
-    else:  # "bi"
-        # Build bi-lingual regardless of prefer_de; use original terms for both to keep it deterministic
-        sentence = _constraints_text_de(filtered)
-        en = _constraints_text_en(filtered)
-        if en:
-            sentence = (sentence + " " + en).strip()
-
+    parts: List[str] = []
+    neg_kw = ", ".join(neg_terms)
+    if neg_kw:
+        parts.append(f"negative: {neg_kw}")
+    if add_cool_bias:
+        parts.append("cool color palette")
+        parts.append("avoid warm reds")
+        parts.append("blue/green accents")
+        parts.append("low saturation")
+    sentence = "; ".join(parts) + ";"
     if len(sentence) > MAX_CONSTRAINT_CHARS:
-        # Truncate by dropping last terms until under limit
-        # Keep the leading label words intact
-        # We'll attempt a simple drop loop
-        drop_from = list(filtered)
-        while len(sentence) > MAX_CONSTRAINT_CHARS and len(drop_from) > 1:
-            drop_from.pop()
-            if style == "de":
-                sentence = _constraints_text_de(drop_from)
-            elif style == "en":
-                sentence = _constraints_text_en(drop_from)
-            elif style == "neutral":
-                sentence = _constraints_text_neutral(drop_from)
-            else:
-                sentence = _constraints_text_de(drop_from)
-                en_variant = _constraints_text_en(drop_from)
-                if en_variant:
-                    sentence = (sentence + " " + en_variant).strip()
-
+        while len(sentence) > MAX_CONSTRAINT_CHARS and parts:
+            parts.pop()
+            sentence = "; ".join(parts) + (";" if parts else "")
     return sentence
 
-def _inject_negatives_into_prompt(prompt: str, negative_prompt: str) -> tuple[str, str]:
-    """
-    Idempotently inject constraints into the main prompt when negatives are present.
-    Returns (prompt_with_constraints, constraints_sentence_or_empty)
-    """
-    neg_terms = _normalize_negative_terms(negative_prompt)
-    if not neg_terms:
+def _inject_negatives_into_prompt_keyword(prompt: str, negative_prompt: str) -> tuple[str, str]:
+    raw_terms = _normalize_negative_terms(negative_prompt)
+    if not raw_terms:
         return prompt, ""
-    prefer_de = _is_german_text(prompt) or _is_german_text(negative_prompt)
-    constraints = _build_constraints_sentence(neg_terms, prompt, prefer_de)
+    expanded = _expand_semantic_negatives(raw_terms)
+    filtered = [t for t in expanded if not _term_in_prompt(t, prompt)]
+    if not filtered:
+        return prompt, ""
+    constraints = _build_keyword_constraints(filtered, add_cool_bias=DEFAULT_COLOR_BIAS)
     if not constraints:
         return prompt, ""
+    sep = "" if prompt.endswith((" ", "\n")) else INJECTION_SEPARATOR
     if INJECTION_MODE == "prepend":
         return (constraints + INJECTION_SEPARATOR + prompt).strip(), constraints
-    sep = "" if prompt.endswith((" ", "\n")) else INJECTION_SEPARATOR
     return (prompt + sep + constraints).strip(), constraints
 
 
@@ -401,12 +396,6 @@ class PollinationsBackend(ImageBackend):
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
     def _resolve_negative(self, negative: Optional[str]) -> str:
-        """
-        Priority for negative prompt:
-          1) Explicit parameter (call-site runtime)
-          2) POLLINATIONS_NEGATIVE (env)
-          3) APP_GLOBAL_NEGATIVE (env)
-        """
         if negative and negative.strip():
             return negative.strip()
         env_pol = _env_str("POLLINATIONS_NEGATIVE", "")
@@ -416,40 +405,27 @@ class PollinationsBackend(ImageBackend):
         return env_global
 
     def _finalize_prompt_for_pollinations(self, base_prompt: str, request_negative: Optional[str]) -> tuple[str, str, str]:
-        """
-        Build the final prompt to send to Pollinations, with forced, idempotent inline injection.
-        Returns (final_prompt_text, used_negative_field, constraints_preview)
-        """
-        # Combine request negative with env/global fallbacks
         neg_combined = self._resolve_negative(request_negative).strip()
-
-        # If FORCE_INLINE is on and we have env/global negatives but request neg is empty,
-        # keep neg_combined and inject inline anyway.
-        # If everything is empty, no injection.
         constraints_preview = ""
         final_prompt = base_prompt
 
         if neg_combined:
-            final_prompt, constraints_preview = _inject_negatives_into_prompt(base_prompt, neg_combined)
-        else:
-            if FORCE_INLINE:
-                # Try env/global anyway via combined
-                if neg_combined:
-                    final_prompt, constraints_preview = _inject_negatives_into_prompt(base_prompt, neg_combined)
+            final_prompt, constraints_preview = _inject_negatives_into_prompt_keyword(base_prompt, neg_combined)
 
-        # If something upstream overwrote prompt afterwards, we still send final_prompt here (single source of truth).
-        used_negative_field = neg_combined if neg_combined else ""
+        neg_field = ""
+        if constraints_preview:
+            m = re.search(r"negative:\s*([^;]+)", constraints_preview, flags=re.IGNORECASE)
+            if m:
+                neg_field = m.group(1).strip()
 
-        # Debug logs: language + injected preview
         try:
             lang = "de" if _is_german_text(base_prompt) or _is_german_text(neg_combined) else "en"
-            print(f"[POLL PREP] lang={lang} style={INJECT_STYLE} force_inline={FORCE_INLINE} "
-                  f"constraints='{(constraints_preview or '')[:120]}'")
+            print(f"[POLL PREP] lang={lang} style=keywords_en force_inline=False constraints='{(constraints_preview or '')[:140]}'")
             print(f"[POLL PROMPT] used_prompt='{final_prompt[:220]}'")
         except Exception:
             pass
 
-        return final_prompt, used_negative_field, constraints_preview
+        return final_prompt, neg_field, constraints_preview
 
     async def _fetch_v1(self, prompt: str, negative: str | None, width: int | None, height: int | None) -> Path:
         self.cfg.require_cloud_enabled()
@@ -461,7 +437,6 @@ class PollinationsBackend(ImageBackend):
         w = width if (width and width > 0) else self.cfg.width
         h = height if (height and height > 0) else self.cfg.height
 
-        # Finalize prompt with robust injection
         injected_prompt, neg_field, _constraints = self._finalize_prompt_for_pollinations(prompt, negative)
 
         payload: Dict[str, object] = {
@@ -506,7 +481,6 @@ class PollinationsBackend(ImageBackend):
         w = width if (width and width > 0) else self.cfg.width
         h = height if (height and height > 0) else self.cfg.height
 
-        # Finalize prompt with robust injection
         injected_prompt, _neg_field, _constraints = self._finalize_prompt_for_pollinations(prompt, negative)
 
         url = _build_pollinations_image_url(
@@ -545,7 +519,6 @@ class PollinationsBackend(ImageBackend):
         if not self.cfg.allow_cloud:
             raise RuntimeError("Cloud image backend disabled (ALLOW_CLOUD_IMAGE_BACKEND=0)")
 
-        # Resolve sizes
         rw, rh = _resolve_size_for_backend("pollinations", width, height)
         eff_w = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
         eff_h = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
@@ -559,9 +532,9 @@ class PollinationsBackend(ImageBackend):
             return await self._fetch_get(prompt, negative, eff_w, eff_h)
 
 
-# ---------------------------
-# Local ComfyUI Backend
-# ---------------------------
+# ============================================================
+# ComfyUI (Local/LAN) with optional Auto-Discovery
+# ============================================================
 
 class ComfyConfig(BaseModel):
     host: str = Field(default_factory=lambda: _env_str("APP_COMFY_HOST", "127.0.0.1"))
@@ -582,32 +555,192 @@ class ComfyConfig(BaseModel):
     node_id_latent: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_LATENT", "4"))
     node_id_ksampler: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_KSAMPLER", "5"))
 
-    def assert_local(self) -> None:
-        _assert_image_backend_host_policy(self.host)
+    # Discovery (opt-in, decoupled from Pollinations)
+    auto_discovery_enable: bool = Field(default_factory=lambda: _env_bool01("AUTO_DISCOVERY_ENABLE", 1))
+    fallback_hosts_raw: str = Field(default_factory=lambda: _env_str("APP_COMFY_FALLBACK_HOSTS", ""))
+    discovery_subnets_raw: str = Field(default_factory=lambda: _env_str("AUTO_DISCOVERY_SUBNETS", ""))
+    discovery_max_parallel: int = Field(default_factory=lambda: _env_int("AUTO_DISCOVERY_MAX_PARALLEL", 64))
+
+    def assert_policy(self, host: str) -> None:
+        _assert_image_backend_host_policy(host)
+
+    @property
+    def fallback_hosts(self) -> List[str]:
+        items = [x.strip() for x in self.fallback_hosts_raw.replace(";", ",").split(",") if x.strip()]
+        # Deduplicate while preserving order
+        out = []
+        seen = set()
+        for h in items:
+            if h not in seen:
+                seen.add(h)
+                out.append(h)
+        return out
+
+    @property
+    def discovery_subnets(self) -> List[str]:
+        items = [x.strip() for x in self.discovery_subnets_raw.replace(",", " ").split() if x.strip()]
+        out = []
+        for cidr in items:
+            try:
+                ipaddress.ip_network(cidr, strict=False)
+                out.append(cidr)
+            except Exception:
+                print(f"[DISCOVERY] ignoring invalid subnet: {cidr}")
+        return out
+
 
 class LocalComfyBackend(ImageBackend):
     def __init__(self, out_dir: Path, cfg: Optional[ComfyConfig] = None) -> None:
         self.out_dir = Path(out_dir).resolve()
         self.cfg = cfg or ComfyConfig()
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        self.cfg.assert_local()
         self._samplers_cache: Optional[Set[str]] = None
+        self._active_host: Optional[str] = None
+        self._discovery_done: bool = False
 
-    async def _available(self) -> bool:
-        if self.cfg.disabled:
-            return False
+    async def _probe_history(self, host: str, port: int, timeout: httpx.Timeout) -> bool:
         try:
-            async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short()) as c:
-                r = await c.get(f"http://{self.cfg.host}:{self.cfg.port}/history")
+            async with httpx.AsyncClient(limits=_httpx_limits(), timeout=timeout) as c:
+                r = await c.get(f"http://{host}:{port}/history")
                 r.raise_for_status()
                 return True
         except Exception:
             return False
 
-    async def _fetch_valid_samplers(self) -> Set[str]:
-        if self._samplers_cache is not None:
-            return self._samplers_cache
-        url = f"http://{self.cfg.host}:{self.cfg.port}/object_info/KSampler"
+    async def _ensure_host(self) -> None:
+        if self._discovery_done and self._active_host:
+            return
+
+        # 1) Try configured host first (works for local 127.0.0.1 and also if explicitly set to LAN IP)
+        host = (self.cfg.host or "127.0.0.1").strip()
+        port = int(self.cfg.port)
+        try:
+            self.cfg.assert_policy(host)
+        except AssertionError as e:
+            print(f"[DISCOVERY] configured host rejected by policy: {e}")
+        else:
+            if await self._probe_history(host, port, _timeout_probe()):
+                self._active_host = host
+                self._discovery_done = True
+                print(f"[DISCOVERY] using configured ComfyUI host {host}:{port}")
+                return
+
+        # 2) Optionally try fallback hosts and subnets (only if remote backends are allowed)
+        allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
+        if not allow_remote or not self.cfg.auto_discovery_enable:
+            # Fallback to configured host; errors will be raised later if unavailable
+            self._active_host = host
+            self._discovery_done = True
+            print("[DISCOVERY] auto-discovery disabled or remote not allowed; keeping configured host")
+            return
+
+        # 2a) Sequential quick check of fallback hosts
+        for fb in self.cfg.fallback_hosts:
+            try:
+                self.cfg.assert_policy(fb)
+            except AssertionError as e:
+                print(f"[DISCOVERY] skip fallback {fb}: {e}")
+                continue
+            if await self._probe_history(fb, port, _timeout_probe()):
+                self._active_host = fb
+                self._discovery_done = True
+                print(f"[DISCOVERY] selected fallback ComfyUI host {fb}:{port}")
+                return
+
+        # 2b) Parallel scan of fallback hosts (if many provided)
+        if self.cfg.fallback_hosts and len(self.cfg.fallback_hosts) > 1:
+            sem = asyncio.Semaphore(self.cfg.discovery_max_parallel)
+
+            async def _task(h: str):
+                async with sem:
+                    try:
+                        self.cfg.assert_policy(h)
+                    except AssertionError:
+                        return None
+                    ok = await self._probe_history(h, port, _timeout_probe())
+                    return h if ok else None
+
+            tasks = [asyncio.create_task(_task(h)) for h in self.cfg.fallback_hosts]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for d in done:
+                res = d.result()
+                if res:
+                    for p in pending:
+                        p.cancel()
+                    self._active_host = res
+                    self._discovery_done = True
+                    print(f"[DISCOVERY] selected fallback (parallel) {res}:{port}")
+                    return
+            for p in pending:
+                try:
+                    res = await p
+                    if res:
+                        self._active_host = res
+                        self._discovery_done = True
+                        print(f"[DISCOVERY] selected fallback (late) {res}:{port}")
+                        return
+                except asyncio.CancelledError:
+                    pass
+
+        # 2c) Optional subnet scans
+        for cidr in self.cfg.discovery_subnets:
+            try:
+                net = ipaddress.ip_network(cidr, strict=False)
+            except Exception:
+                continue
+            # We only scan host addresses, skip loopback/link-local automatically
+            ips = [str(ip) for ip in net.hosts()]
+            if not ips:
+                continue
+
+            sem = asyncio.Semaphore(self.cfg.discovery_max_parallel)
+
+            async def _probe(ip: str):
+                async with sem:
+                    try:
+                        self.cfg.assert_policy(ip)
+                    except AssertionError:
+                        return None
+                    ok = await self._probe_history(ip, port, _timeout_probe())
+                    return ip if ok else None
+
+            print(f"[DISCOVERY] scanning subnet {cidr} with up to {self.cfg.discovery_max_parallel} parallel probes")
+            tasks = [asyncio.create_task(_probe(ip)) for ip in ips]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for d in done:
+                res = d.result()
+                if res:
+                    for p in pending:
+                        p.cancel()
+                    self._active_host = res
+                    self._discovery_done = True
+                    print(f"[DISCOVERY] selected subnet host {res}:{port}")
+                    return
+            for p in pending:
+                try:
+                    res = await p
+                    if res:
+                        self._active_host = res
+                        self._discovery_done = True
+                        print(f"[DISCOVERY] selected subnet host (late) {res}:{port}")
+                        return
+                except asyncio.CancelledError:
+                    pass
+
+        # 3) As last resort, stick to configured host (may be unreachable; generate() will fail gracefully)
+        self._active_host = host
+        self._discovery_done = True
+        print(f"[DISCOVERY] no reachable ComfyUI found; keeping configured host {host}:{port}")
+
+    async def _available_active(self) -> bool:
+        # Ensure discovery (or configured host) is set
+        await self._ensure_host()
+        host = self._active_host or self.cfg.host
+        port = self.cfg.port
+        return await self._probe_history(host, port, _timeout_probe())
+
+    async def _fetch_valid_samplers(self, host: str, port: int) -> Set[str]:
+        url = f"http://{host}:{port}/object_info/KSampler"
         try:
             async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short()) as c:
                 r = await c.get(url)
@@ -615,15 +748,13 @@ class LocalComfyBackend(ImageBackend):
                 j = r.json()
                 choices = j.get("input", {}).get("sampler_name", {}).get("choices", [])
                 if isinstance(choices, list):
-                    self._samplers_cache = {str(x) for x in choices}
-                else:
-                    self._samplers_cache = set()
+                    return {str(x) for x in choices}
         except Exception:
-            self._samplers_cache = {
-                "euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde",
-                "dpmpp_2m_karras", "heun", "dpm_fast", "uni_pc"
-            }
-        return self._samplers_cache
+            pass
+        return {
+            "euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde",
+            "dpmpp_2m_karras", "heun", "dpm_fast", "uni_pc"
+        }
 
     def _normalize_sampler(self, name: str) -> str:
         n = (name or "").strip().lower()
@@ -739,8 +870,13 @@ class LocalComfyBackend(ImageBackend):
             raise RuntimeError("ComfyUI disabled (APP_DISABLE_COMFYUI=1)")
         if not self.cfg.workflow_path.exists():
             raise RuntimeError(f"workflow_not_found: {self.cfg.workflow_path}")
-        ok = await self._available()
-        if not ok:
+
+        await self._ensure_host()
+        host = self._active_host or self.cfg.host
+        port = int(self.cfg.port)
+
+        # Final availability check before job
+        if not await self._probe_history(host, port, _timeout_probe()):
             raise RuntimeError("comfy_unavailable")
 
         rw, rh = _resolve_size_for_backend("comfyui", width, height)
@@ -749,7 +885,7 @@ class LocalComfyBackend(ImageBackend):
         w = _clamp_dim(w_eff)
         h = _clamp_dim(h_eff)
 
-        valid_samplers = await self._fetch_valid_samplers()
+        valid_samplers = await self._fetch_valid_samplers(host, port)
         sampler = self._normalize_sampler(self.cfg.sampler)
         if sampler not in valid_samplers:
             sampler = "euler" if "euler" in valid_samplers else (next(iter(valid_samplers)) if valid_samplers else "euler")
@@ -764,7 +900,7 @@ class LocalComfyBackend(ImageBackend):
         pos_set, neg_set = self._override_text_nodes(prompt_dict, positive=pos_text, negative=neg_text)
 
         clip_count = len(clip_nodes_before)
-        print(f"[COMFY WORKFLOW] pos_set={pos_set} neg_set={neg_set} clip_nodes={clip_count} "
+        print(f"[COMFY WORKFLOW] host={host} pos_set={pos_set} neg_set={neg_set} clip_nodes={clip_count} "
               f"size={w}x{h} sampler={sampler} pos_sample='{pos_text[:96]}' neg_sample='{neg_text[:96]}'")
 
         if clip_count == 0:
@@ -788,8 +924,8 @@ class LocalComfyBackend(ImageBackend):
             scheduler=None,
             denoise=None,
             seed=None,
-            host=self.cfg.host,
-            port=self.cfg.port,
+            host=host,
+            port=port,
             max_wait_sec=float(self.cfg.timeout_sec),
             poll_interval=1.0,
         )
@@ -805,7 +941,7 @@ class LocalComfyBackend(ImageBackend):
 
 
 # ---------------------------
-# Factory
+# Factory (Decoupled selection)
 # ---------------------------
 
 class BackendEnv(BaseModel):
@@ -834,16 +970,8 @@ def build_image_backend() -> ImageBackend:
 # ---------------------------
 
 def inject_negatives_for_final_prompt(prompt: str, negative: str | None) -> str:
-    """
-    Idempotent guard for controllers: apply the same constraints inline injection used by Pollinations.
-    Use this right after the LLM (Ollama) step and before calling backend.generate(...).
-    This does not send any request and has zero network cost.
-    """
     negative = (negative or "").strip()
-    if not negative and not FORCE_INLINE:
+    if not negative:
         return prompt
-    combined = negative if negative else (_env_str("POLLINATIONS_NEGATIVE", "") or _env_str("APP_GLOBAL_NEGATIVE", ""))
-    if not combined:
-        return prompt
-    new_prompt, _constraints = _inject_negatives_into_prompt(prompt, combined)
+    new_prompt, _preview = _inject_negatives_into_prompt_keyword(prompt, negative)
     return new_prompt

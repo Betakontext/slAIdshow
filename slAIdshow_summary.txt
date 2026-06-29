@@ -3982,7 +3982,7 @@ APP_OLLAMA_MODEL=gemma3:1b
 # =========================
 
 # Global image size defaults (apply to all backends if UI does not send width/height)
-APP_IMAGE_BACKEND=comfyui
+IMAGE_BACKEND=comfyui
 APP_IMAGE_WIDTH=1280
 APP_IMAGE_HEIGHT=720
 
