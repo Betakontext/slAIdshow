@@ -1,29 +1,25 @@
 # image_backend.py
 # -*- coding: utf-8 -*-
+# Production-ready image backend adapters for ComfyUI (local/LAN/remote) and Pollinations (cloud)
 #
-# Production-ready image backend adapters for ComfyUI (local/LAN/remote) and Pollinations (cloud),
-# ensuring negative prompts are reliably delivered end-to-end via a clean API.
+# This version focuses on making Pollinations inline negative injection robust, observable,
+# and configurable, while preserving existing behavior for ComfyUI.
 #
-# Key points:
-# - API: generate(prompt, width=None, height=None, negative=None)
-#   The 'negative' parameter is honored by both backends. For Pollinations it is sent as:
-#     - v1 POST: negative_prompt field (if provided), plus inline fallback token
-#     - GET fallback: inline fallback token only
-#   For ComfyUI, the negative text is injected in the workflow CLIPTextEncode negative node(s).
+# Key improvements:
+# - Final, idempotent inline negative injection occurs inside PollinationsBackend right before
+#   building the payload/URL. Nothing upstream can override it later.
+# - Adds bilingual ("bi") constraints by default (German + English) to increase model adherence.
+#   Configurable via POLLINATIONS_INJECT_STYLE = de|en|neutral|bi (default: bi).
+# - Adds POLLINATIONS_FORCE_INLINE=1 to inject constraints even when the per-request negative is empty
+#   but env/global negatives exist (APP_GLOBAL_NEGATIVE / POLLINATIONS_NEGATIVE).
+# - Adds explicit debug logs showing detected language and a preview of the final prompt (first 220 chars).
+# - Still sends negative_prompt field to V1 when present.
 #
-# - Robust retries, timeouts, network policies (LAN/remote), and clear diagnostics logs.
-#
-# How to test quickly:
-# 1) ComfyUI:
-#    - Set IMAGE_BACKEND=comfyui, APP_DISABLE_COMFYUI=0
-#    - Call backend.generate("A green meadow", width=512, height=512, negative="yellow flowers")
-#    - Check logs: [COMFY WORKFLOW] ... neg_set=True ... neg_sample='yellow flowers'
-# 2) Pollinations:
-#    - Set IMAGE_BACKEND=pollinations, ALLOW_CLOUD_IMAGE_BACKEND=1, POLLINATIONS_SECRET=...
-#    - Call backend.generate("A green meadow", width=512, height=512, negative="yellow flowers")
-#    - Check logs: [POLLINATIONS V1] ... has_negative_field=True inline_neg=1
-#    - If v1 fails, fallback GET still uses inline negative.
-#
+# Notes:
+# - ComfyUI negative prompts are applied to the negative CLIP node only (no inline injection).
+# - Robust retries and size resolution retained.
+# - No Ollama dependency in this module; provide a small helper at bottom that controllers can call
+#   post-LLM to idempotently re-apply negatives before invoking the backend.
 
 from __future__ import annotations
 
@@ -31,11 +27,12 @@ import asyncio
 import ipaddress
 import json
 import os
+import re
 import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Optional, Set
+from typing import Optional, Set, Tuple, List, Dict
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
@@ -44,7 +41,7 @@ from comfyui_bridge import generate_from_prompt_dict
 
 
 # ---------------------------
-# Helper & Safety Utilities
+# Env helpers & HTTP config
 # ---------------------------
 
 def _env_str(k: str, d: str) -> str:
@@ -176,9 +173,163 @@ class ImageBackend:
         raise NotImplementedError
 
 
-# ---------------------------
-# Pollinations (Cloud)
-# ---------------------------
+# ============================================================
+# Pollinations (Cloud) with Robust Negative Injection
+# ============================================================
+
+# Injection configuration (overridable via env)
+INJECTION_MODE = (_env_str("POLLINATIONS_INJECT_MODE", "append") or "append").lower()  # append | prepend
+INJECTION_SEPARATOR = " "
+MAX_NEG_TERMS = _env_int("POLLINATIONS_MAX_NEG_TERMS", 24)
+MAX_CONSTRAINT_CHARS = _env_int("POLLINATIONS_MAX_CONSTRAINT_CHARS", 260)
+INJECT_STYLE = (_env_str("POLLINATIONS_INJECT_STYLE", "bi") or "bi").lower()  # de | en | neutral | bi
+FORCE_INLINE = _env_bool01("POLLINATIONS_FORCE_INLINE", 0)
+
+def _is_german_text(text: str) -> bool:
+    """
+    Lightweight heuristic to detect German text.
+    - Checks for umlauts (ä, ö, ü) and ß
+    - Checks common German stopwords/articles/prepositions
+    """
+    if not text:
+        return False
+    lower = text.lower()
+
+    if any(ch in lower for ch in ("ä", "ö", "ü", "ß")):
+        return True
+
+    german_markers = {
+        " der ", " die ", " das ", " und ", " mit ", " ohne ", " kein ", " keine ", " einem ",
+        " einer ", " im ", " am ", " zum ", " zur ", " vom ", " für ", " nicht ", " auch ",
+        " wie ", " aber ", " weil ", " wenn ", " dann ", " dort ", " hier ", " auf ", " aus ",
+        " über ", " unter ", " hinter ", " vor ", " zwischen ", " werden ", " wurde ",
+    }
+    padded = f" {lower} "
+    matches = sum(1 for token in german_markers if token in padded)
+    return matches >= 2
+
+def _normalize_negative_terms(neg_text: str) -> List[str]:
+    """
+    Normalize a comma/semicolon/newline-separated negative string into unique, clean terms.
+    """
+    if not neg_text:
+        return []
+    parts = re.split(r"[,\n;]+", neg_text)
+    cleaned: List[str] = []
+    seen = set()
+    for p in parts:
+        term = p.strip().strip('"').strip("'")
+        if not term:
+            continue
+        key = term.lower()
+        if key not in seen:
+            cleaned.append(term)
+            seen.add(key)
+    if len(cleaned) > MAX_NEG_TERMS:
+        cleaned = cleaned[:MAX_NEG_TERMS]
+    return cleaned
+
+def _term_in_prompt(term: str, prompt: str) -> bool:
+    """
+    Case-insensitive check if term already appears in prompt. Avoids redundant injection.
+    """
+    t = term.lower().strip()
+    if not t:
+        return False
+    p = prompt.lower()
+    if " " in t:
+        return t in p
+    return re.search(rf"(^|[^a-z0-9]){re.escape(t)}([^a-z0-9]|$)", p) is not None
+
+def _constraints_text_de(terms: List[str]) -> str:
+    # Prefer "ohne ..." because it reads more naturally in short lists than "kein/keine ..."
+    # Example: "Ohne Fenster, Glas, Scheiben."
+    if not terms:
+        return ""
+    return "Ohne " + ", ".join(terms) + "."
+
+def _constraints_text_en(terms: List[str]) -> str:
+    # English: short and strict
+    # Example: "Exclude: windows, glass, panes."
+    if not terms:
+        return ""
+    return "Exclude: " + ", ".join(terms) + "."
+
+def _constraints_text_neutral(terms: List[str]) -> str:
+    if not terms:
+        return ""
+    return "Exclude / Ohne: " + ", ".join(terms) + "."
+
+def _build_constraints_sentence(neg_terms: List[str], base_prompt: str, prefer_de: bool) -> str:
+    """
+    Build a concise constraints sentence according to INJECT_STYLE.
+    Styles:
+      - de:      "Ohne Fenster, Glas, Scheiben."
+      - en:      "Exclude: windows, glass, panes."
+      - neutral: "Exclude / Ohne: Fenster, Glas, Scheiben."
+      - bi:      "Ohne Fenster, Glas, Scheiben. Exclude: Fenster, Glas, Scheiben."
+    """
+    if not neg_terms:
+        return ""
+    filtered = [t for t in neg_terms if not _term_in_prompt(t, base_prompt)]
+    if not filtered:
+        return ""
+
+    style = INJECT_STYLE
+    if style not in {"de", "en", "neutral", "bi"}:
+        style = "bi"
+
+    if style == "de":
+        sentence = _constraints_text_de(filtered)
+    elif style == "en":
+        sentence = _constraints_text_en(filtered)
+    elif style == "neutral":
+        sentence = _constraints_text_neutral(filtered)
+    else:  # "bi"
+        # Build bi-lingual regardless of prefer_de; use original terms for both to keep it deterministic
+        sentence = _constraints_text_de(filtered)
+        en = _constraints_text_en(filtered)
+        if en:
+            sentence = (sentence + " " + en).strip()
+
+    if len(sentence) > MAX_CONSTRAINT_CHARS:
+        # Truncate by dropping last terms until under limit
+        # Keep the leading label words intact
+        # We'll attempt a simple drop loop
+        drop_from = list(filtered)
+        while len(sentence) > MAX_CONSTRAINT_CHARS and len(drop_from) > 1:
+            drop_from.pop()
+            if style == "de":
+                sentence = _constraints_text_de(drop_from)
+            elif style == "en":
+                sentence = _constraints_text_en(drop_from)
+            elif style == "neutral":
+                sentence = _constraints_text_neutral(drop_from)
+            else:
+                sentence = _constraints_text_de(drop_from)
+                en_variant = _constraints_text_en(drop_from)
+                if en_variant:
+                    sentence = (sentence + " " + en_variant).strip()
+
+    return sentence
+
+def _inject_negatives_into_prompt(prompt: str, negative_prompt: str) -> tuple[str, str]:
+    """
+    Idempotently inject constraints into the main prompt when negatives are present.
+    Returns (prompt_with_constraints, constraints_sentence_or_empty)
+    """
+    neg_terms = _normalize_negative_terms(negative_prompt)
+    if not neg_terms:
+        return prompt, ""
+    prefer_de = _is_german_text(prompt) or _is_german_text(negative_prompt)
+    constraints = _build_constraints_sentence(neg_terms, prompt, prefer_de)
+    if not constraints:
+        return prompt, ""
+    if INJECTION_MODE == "prepend":
+        return (constraints + INJECTION_SEPARATOR + prompt).strip(), constraints
+    sep = "" if prompt.endswith((" ", "\n")) else INJECTION_SEPARATOR
+    return (prompt + sep + constraints).strip(), constraints
+
 
 class _PollinationsV1Datum(BaseModel):
     b64_json: str
@@ -242,13 +393,6 @@ def _build_pollinations_image_url(api_base: str, prompt: str, model: Optional[st
         url = f"{url}?{urlencode(params)}"
     return url
 
-def _merge_negative_inline(prompt: str, negative: str | None) -> str:
-    negative = (negative or "").strip()
-    if not negative:
-        return prompt
-    if "-- negative:" in prompt.lower():
-        return prompt
-    return f"{prompt.strip()} -- negative: {negative}"
 
 class PollinationsBackend(ImageBackend):
     def __init__(self, out_dir: Path, cfg: Optional[PollinationsConfig] = None) -> None:
@@ -271,6 +415,42 @@ class PollinationsBackend(ImageBackend):
         env_global = _env_str("APP_GLOBAL_NEGATIVE", "")
         return env_global
 
+    def _finalize_prompt_for_pollinations(self, base_prompt: str, request_negative: Optional[str]) -> tuple[str, str, str]:
+        """
+        Build the final prompt to send to Pollinations, with forced, idempotent inline injection.
+        Returns (final_prompt_text, used_negative_field, constraints_preview)
+        """
+        # Combine request negative with env/global fallbacks
+        neg_combined = self._resolve_negative(request_negative).strip()
+
+        # If FORCE_INLINE is on and we have env/global negatives but request neg is empty,
+        # keep neg_combined and inject inline anyway.
+        # If everything is empty, no injection.
+        constraints_preview = ""
+        final_prompt = base_prompt
+
+        if neg_combined:
+            final_prompt, constraints_preview = _inject_negatives_into_prompt(base_prompt, neg_combined)
+        else:
+            if FORCE_INLINE:
+                # Try env/global anyway via combined
+                if neg_combined:
+                    final_prompt, constraints_preview = _inject_negatives_into_prompt(base_prompt, neg_combined)
+
+        # If something upstream overwrote prompt afterwards, we still send final_prompt here (single source of truth).
+        used_negative_field = neg_combined if neg_combined else ""
+
+        # Debug logs: language + injected preview
+        try:
+            lang = "de" if _is_german_text(base_prompt) or _is_german_text(neg_combined) else "en"
+            print(f"[POLL PREP] lang={lang} style={INJECT_STYLE} force_inline={FORCE_INLINE} "
+                  f"constraints='{(constraints_preview or '')[:120]}'")
+            print(f"[POLL PROMPT] used_prompt='{final_prompt[:220]}'")
+        except Exception:
+            pass
+
+        return final_prompt, used_negative_field, constraints_preview
+
     async def _fetch_v1(self, prompt: str, negative: str | None, width: int | None, height: int | None) -> Path:
         self.cfg.require_cloud_enabled()
         url = f"{self.cfg.api_base}/v1/images/generations"
@@ -281,14 +461,16 @@ class PollinationsBackend(ImageBackend):
         w = width if (width and width > 0) else self.cfg.width
         h = height if (height and height > 0) else self.cfg.height
 
-        neg = (negative or "").strip()
-        payload = {
+        # Finalize prompt with robust injection
+        injected_prompt, neg_field, _constraints = self._finalize_prompt_for_pollinations(prompt, negative)
+
+        payload: Dict[str, object] = {
             "model": self.cfg.model or "flux",
-            "prompt": _merge_negative_inline(prompt, neg),  # always inline as safety net
+            "prompt": injected_prompt,
             "size": (self.cfg.size_override or _size_from_wh(w, h)),
         }
-        if neg:
-            payload["negative_prompt"] = neg
+        if neg_field:
+            payload["negative_prompt"] = neg_field
 
         print(f"[POLLINATIONS V1] url={url} model={payload.get('model')} size={payload.get('size')} "
               f"has_negative_field={'negative_prompt' in payload} inline_neg=1")
@@ -324,9 +506,11 @@ class PollinationsBackend(ImageBackend):
         w = width if (width and width > 0) else self.cfg.width
         h = height if (height and height > 0) else self.cfg.height
 
-        merged = _merge_negative_inline(prompt, (negative or ""))
+        # Finalize prompt with robust injection
+        injected_prompt, _neg_field, _constraints = self._finalize_prompt_for_pollinations(prompt, negative)
+
         url = _build_pollinations_image_url(
-            self.cfg.api_base, merged, self.cfg.model, w, h, self.cfg.nologo, self.cfg.seed
+            self.cfg.api_base, injected_prompt, self.cfg.model, w, h, self.cfg.nologo, self.cfg.seed
         )
         params: dict[str, str] = {}
         if self.cfg.secret:
@@ -366,15 +550,13 @@ class PollinationsBackend(ImageBackend):
         eff_w = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
         eff_h = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
 
-        neg = self._resolve_negative(negative)
-
         if self.cfg.use_v1:
             try:
-                return await self._fetch_v1(prompt, neg, eff_w, eff_h)
+                return await self._fetch_v1(prompt, negative, eff_w, eff_h)
             except Exception:
-                return await self._fetch_get(prompt, neg, eff_w, eff_h)
+                return await self._fetch_get(prompt, negative, eff_w, eff_h)
         else:
-            return await self._fetch_get(prompt, neg, eff_w, eff_h)
+            return await self._fetch_get(prompt, negative, eff_w, eff_h)
 
 
 # ---------------------------
@@ -480,7 +662,7 @@ class LocalComfyBackend(ImageBackend):
                 inputs["text"] = negative
                 neg_set = True
 
-        # Fallback
+        # Fallback by scanning first two CLIP nodes
         if not (pos_set and neg_set):
             clip_nodes = self._find_clip_nodes(prompt_dict)
             if not clip_nodes:
@@ -577,7 +759,6 @@ class LocalComfyBackend(ImageBackend):
         self._override_dimensions_in_prompt(prompt_dict, width=w, height=h)
 
         pos_text = (prompt or "").strip()
-        # Priority: runtime parameter > cfg.negative
         neg_text = (negative or self.cfg.negative or "").strip()
 
         pos_set, neg_set = self._override_text_nodes(prompt_dict, positive=pos_text, negative=neg_text)
@@ -646,3 +827,23 @@ def build_image_backend() -> ImageBackend:
         return PollinationsBackend(out_dir=out_dir, cfg=cfg)
     else:
         raise RuntimeError(f"Unsupported IMAGE_BACKEND={env.image_backend}")
+
+
+# ---------------------------
+# Optional helper for controllers (post-LLM guard)
+# ---------------------------
+
+def inject_negatives_for_final_prompt(prompt: str, negative: str | None) -> str:
+    """
+    Idempotent guard for controllers: apply the same constraints inline injection used by Pollinations.
+    Use this right after the LLM (Ollama) step and before calling backend.generate(...).
+    This does not send any request and has zero network cost.
+    """
+    negative = (negative or "").strip()
+    if not negative and not FORCE_INLINE:
+        return prompt
+    combined = negative if negative else (_env_str("POLLINATIONS_NEGATIVE", "") or _env_str("APP_GLOBAL_NEGATIVE", ""))
+    if not combined:
+        return prompt
+    new_prompt, _constraints = _inject_negatives_into_prompt(prompt, combined)
+    return new_prompt
