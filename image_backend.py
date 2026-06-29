@@ -1,3 +1,19 @@
+# image_backend.py
+# -*- coding: utf-8 -*-
+#
+# Production-ready image backend adapters for ComfyUI (local/LAN/remote) and Pollinations (cloud),
+# ensuring negative prompts are reliably delivered end-to-end.
+#
+# Notes:
+# - ComfyUI: We inject positive/negative into CLIPTextEncode nodes inside the workflow dict and
+#   enforce width/height on the latent node. We DO NOT pass width/height into the bridge to avoid
+#   override collisions; the prompt_dict is authoritative.
+# - Pollinations: We support v1 POST (preferred) and GET fallback. We send "negative_prompt"
+#   (if allowed by API) and always include an inline fallback marker to increase robustness.
+# - Robust retries, timeouts, and host policies are implemented. Debug logs are added to help
+#   verify that negative prompts, sizes, and other parameters are actually applied.
+
+
 from __future__ import annotations
 
 import asyncio
@@ -256,6 +272,20 @@ def _build_pollinations_image_url(api_base: str, prompt: str, model: Optional[st
         url = f"{url}?{urlencode(params)}"
     return url
 
+def _merge_negative_inline(prompt: str, negative: str | None) -> str:
+    """
+    Safety net: Merge negative content inline into the positive prompt.
+    Uses a common hint token that many backends heuristically parse.
+    """
+    negative = (negative or "").strip()
+    if not negative:
+        return prompt
+    # Use a compact marker; avoid trailing punctuation collisions
+    if "-- negative:" in prompt.lower():
+        # Avoid duplicating if caller already merged
+        return prompt
+    return f"{prompt.strip()} -- negative: {negative}"
+
 class PollinationsBackend(ImageBackend):
     """Cloud image generation (optional). Disabled by default for privacy reasons."""
     def __init__(self, out_dir: Path, cfg: Optional[PollinationsConfig] = None) -> None:
@@ -263,7 +293,7 @@ class PollinationsBackend(ImageBackend):
         self.cfg = cfg or PollinationsConfig()
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
-    async def _fetch_v1(self, prompt: str, width: int | None, height: int | None) -> Path:
+    async def _fetch_v1(self, prompt: str, negative: str | None, width: int | None, height: int | None) -> Path:
         """Use POST /v1/images/generations which returns base64-encoded images."""
         self.cfg.require_cloud_enabled()
         url = f"{self.cfg.api_base}/v1/images/generations"
@@ -273,11 +303,19 @@ class PollinationsBackend(ImageBackend):
         }
         w = width if (width and width > 0) else self.cfg.width
         h = height if (height and height > 0) else self.cfg.height
+
+        # Build payload: include negative_prompt field (if API ignores it, inline fallback still helps)
         payload = {
             "model": self.cfg.model or "flux",
-            "prompt": prompt,
+            "prompt": _merge_negative_inline(prompt, negative),  # keep inline as safety net
             "size": (self.cfg.size_override or _size_from_wh(w, h)),
         }
+        # Optional: also pass separate negative_prompt field (harmless if ignored by API)
+        if (negative or "").strip():
+            payload["negative_prompt"] = (negative or "").strip()
+
+        print(f"[POLLINATIONS V1] url={url} model={payload.get('model')} size={payload.get('size')} "
+              f"has_negative_field={'negative_prompt' in payload} inline_neg=1")
         timeout = _timeout_long(120.0)
         delay = 1.0
         last_exc: Optional[Exception] = None
@@ -298,23 +336,29 @@ class PollinationsBackend(ImageBackend):
                     return target
                 except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError, ValidationError) as e:
                     last_exc = e
+                    print(f"[POLLINATIONS V1] attempt={attempt} error={type(e).__name__}: {e}")
                     if attempt < 5:
                         await asyncio.sleep(delay)
                         delay *= 1.7
                     continue
         raise RuntimeError(f"pollinations_v1_all_attempts_failed: {last_exc}")
 
-    async def _fetch_get(self, prompt: str, width: int | None, height: int | None) -> Path:
+    async def _fetch_get(self, prompt: str, negative: str | None, width: int | None, height: int | None) -> Path:
         """Use simple GET endpoint that streams a single image."""
         self.cfg.require_cloud_enabled()
         w = width if (width and width > 0) else self.cfg.width
         h = height if (height and height > 0) else self.cfg.height
+
+        merged = _merge_negative_inline(prompt, negative)
         url = _build_pollinations_image_url(
-            self.cfg.api_base, prompt, self.cfg.model, w, h, self.cfg.nologo, self.cfg.seed
+            self.cfg.api_base, merged, self.cfg.model, w, h, self.cfg.nologo, self.cfg.seed
         )
         params: dict[str, str] = {}
         if self.cfg.secret:
             params["key"] = self.cfg.secret
+
+        print(f"[POLLINATIONS GET] url_base={self.cfg.api_base} model={self.cfg.model or 'flux'} "
+              f"size={w}x{h} inline_neg=1 nologo={self.cfg.nologo}")
         timeout = _timeout_long(120.0)
         delay = 1.0
         last_exc: Optional[Exception] = None
@@ -331,6 +375,7 @@ class PollinationsBackend(ImageBackend):
                     return target
                 except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
                     last_exc = e
+                    print(f"[POLLINATIONS GET] attempt={attempt} error={type(e).__name__}: {e}")
                     if attempt < 4:
                         await asyncio.sleep(delay)
                         delay *= 1.7
@@ -338,7 +383,7 @@ class PollinationsBackend(ImageBackend):
         raise RuntimeError(f"pollinations_get_all_attempts_failed: {last_exc}")
 
     async def generate(self, prompt: str, width: int | None = None, height: int | None = None) -> Path:
-        """Public generate method with v1 try-first fallback to GET."""
+        """Public generate method with v1 try-first fallback to GET. Ensures negative prompt delivery."""
         if not self.cfg.allow_cloud:
             raise RuntimeError("Cloud image backend disabled (ALLOW_CLOUD_IMAGE_BACKEND=0)")
 
@@ -347,13 +392,18 @@ class PollinationsBackend(ImageBackend):
         eff_w = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
         eff_h = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
 
+        # Extract global negative prompt from env; app.py may also inline it itself if needed.
+        neg_env = _env_str("APP_GLOBAL_NEGATIVE", "")
+        # Also consider a Pollinations-specific override if set
+        neg_pol = _env_str("POLLINATIONS_NEGATIVE", "") or neg_env
+
         if self.cfg.use_v1:
             try:
-                return await self._fetch_v1(prompt, eff_w, eff_h)
+                return await self._fetch_v1(prompt, neg_pol, eff_w, eff_h)
             except Exception:
-                return await self._fetch_get(prompt, eff_w, eff_h)
+                return await self._fetch_get(prompt, neg_pol, eff_w, eff_h)
         else:
-            return await self._fetch_get(prompt, eff_w, eff_h)
+            return await self._fetch_get(prompt, neg_pol, eff_w, eff_h)
 
 
 # ---------------------------
@@ -379,6 +429,7 @@ class ComfyConfig(BaseModel):
     node_id_positive: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_POS", "2"))
     node_id_negative: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_NEG", "3"))
     node_id_latent: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_LATENT", "4"))
+    node_id_ksampler: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_KSAMPLER", "5"))
 
     def assert_local(self) -> None:
         """
@@ -451,12 +502,20 @@ class LocalComfyBackend(ImageBackend):
             return data["prompt"]
         return data
 
-    def _override_text_nodes(self, prompt_dict: dict, positive: str, negative: str) -> None:
+    def _find_clip_nodes(self, prompt_dict: dict) -> list[dict]:
+        nodes = []
+        for node in prompt_dict.values():
+            if isinstance(node, dict) and node.get("class_type") == "CLIPTextEncode":
+                nodes.append(node)
+        return nodes
+
+    def _override_text_nodes(self, prompt_dict: dict, positive: str, negative: str) -> tuple[bool, bool]:
         """
         Robustly set texts in CLIPTextEncode nodes.
         Strategy:
         1) Target explicit node IDs (configured in env, defaults: pos='2', neg='3').
         2) Fallback to the first two CLIPTextEncode nodes if IDs are missing.
+        Returns (pos_set, neg_set).
         """
         pos_set = False
         neg_set = False
@@ -479,10 +538,9 @@ class LocalComfyBackend(ImageBackend):
 
         # Fallback: first two CLIPTextEncode nodes
         if not (pos_set and neg_set):
-            clip_nodes = []
-            for node in prompt_dict.values():
-                if isinstance(node, dict) and node.get("class_type") == "CLIPTextEncode":
-                    clip_nodes.append(node)
+            clip_nodes = self._find_clip_nodes(prompt_dict)
+            if not clip_nodes:
+                return pos_set, neg_set
             if clip_nodes and not pos_set:
                 inputs = clip_nodes[0].get("inputs", {})
                 if isinstance(inputs, dict) and "text" in inputs:
@@ -493,6 +551,8 @@ class LocalComfyBackend(ImageBackend):
                 if isinstance(inputs, dict) and "text" in inputs:
                     inputs["text"] = negative
                     neg_set = True
+
+        return pos_set, neg_set
 
     def _override_dimensions_in_prompt(self, prompt_dict: dict, width: int, height: int) -> None:
         """
@@ -588,7 +648,7 @@ class LocalComfyBackend(ImageBackend):
         w = _clamp_dim(w_eff)
         h = _clamp_dim(h_eff)
 
-        # Validate/normalize sampler against ComfyUI choices (kept for future extension)
+        # Validate/normalize sampler against ComfyUI choices
         valid_samplers = await self._fetch_valid_samplers()
         sampler = self._normalize_sampler(self.cfg.sampler)
         if sampler not in valid_samplers:
@@ -596,8 +656,22 @@ class LocalComfyBackend(ImageBackend):
 
         # Load and override prompt dict (dimensions and text)
         prompt_dict = self._load_prompt_file()
+        clip_nodes_before = self._find_clip_nodes(prompt_dict)
         self._override_dimensions_in_prompt(prompt_dict, width=w, height=h)
-        self._override_text_nodes(prompt_dict, positive=(prompt or "").strip(), negative=(self.cfg.negative or "").strip())
+        pos_text = (prompt or "").strip()
+        neg_text = (self.cfg.negative or "").strip()
+        pos_set, neg_set = self._override_text_nodes(prompt_dict, positive=pos_text, negative=neg_text)
+
+        # Diagnostics
+        clip_count = len(clip_nodes_before)
+        print(f"[COMFY WORKFLOW] pos_set={pos_set} neg_set={neg_set} clip_nodes={clip_count} "
+              f"size={w}x{h} sampler={sampler} pos_sample='{pos_text[:96]}' neg_sample='{neg_text[:96]}'")
+
+        if clip_count == 0:
+            raise RuntimeError("workflow_missing_CLIPTextEncode_nodes: no CLIPTextEncode nodes found; cannot set positive/negative text")
+        if not neg_set:
+            print("[WARN] Negative prompt node not matched by configured IDs; "
+                  "used fallback if possible. Verify APP_COMFY_NODE_NEG or workflow structure.")
 
         started_at = _now()
 
@@ -609,7 +683,7 @@ class LocalComfyBackend(ImageBackend):
             negative_text=None,    # already applied in dict
             width=None,            # avoid override collisions
             height=None,           # avoid override collisions
-            steps=self.cfg.steps,  # if your bridge overwrites sampler/steps, set to None here
+            steps=self.cfg.steps,  # bridge will set steps/cfg/sampler on KSampler node if present
             cfg=self.cfg.cfg,
             sampler_name=sampler,
             scheduler=None,
