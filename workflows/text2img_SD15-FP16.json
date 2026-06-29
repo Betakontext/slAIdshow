@@ -10,7 +10,7 @@
   },
   "2": {
     "inputs": {
-      "text": "\"Kinder spielen in einem Schwimmbad an der Küste. Felsen gltzern im Sonenlicht.\"",
+      "text": "Kinder spielen in einem Schwimmbad an der Küste. Felsen glitzern im Sonnenlicht.",
       "clip": [
         "1",
         1
@@ -23,7 +23,7 @@
   },
   "3": {
     "inputs": {
-      "text": "“text, watermark, logo, low quality, blurry, bad anatomy”",
+      "text": "text, watermark, logo, low quality, blurry, bad anatomy, close-up, headshot, portrait, face, facial features, eyes, mouth, nose, selfie, tight crop, centered head, bokeh portrait",
       "clip": [
         "1",
         1

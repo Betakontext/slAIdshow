@@ -1,5 +1,4 @@
-#app.py
-##!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
@@ -182,7 +181,6 @@ APP_IMAGE_HEIGHT = _env_int("APP_IMAGE_HEIGHT", 512)
 
 # ---------- Workflows (ComfyUI) ----------
 
-# Root folder for ComfyUI workflow JSON files
 WORKFLOWS_DIR = Path(os.getenv("WORKFLOWS_DIR", "workflows")).resolve()
 WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -225,13 +223,10 @@ def _assert_image_backend_host() -> None:
     allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
     comfy_host = _env_str("APP_COMFY_HOST", "127.0.0.1")
     if not allow_remote:
-        # Only localhost allowed
         if comfy_host not in {"127.0.0.1", "localhost"}:
             raise AssertionError(f"Remote image backends disabled, got {comfy_host}")
 
-# call this once after reading env and before build_image_backend()
 _assert_image_backend_host()
-
 
 WARMUP_ENABLE = _env_bool01("APP_OLLAMA_WARMUP_ENABLE", 1)
 WARMUP_PROMPT = _env_str("APP_OLLAMA_WARMUP_PROMPT", "Sag Hallo auf Deutsch.")
@@ -279,7 +274,7 @@ class HealthReport(BaseModel):
 
 class ImageBackendSwitch(BaseModel):
     backend: Literal["comfyui", "pollinations"]
-    reset: bool = False  # if true, apply backend default size after switch
+    reset: bool = False
 
 _MIN_SIZE = 128
 _MAX_SIZE = 2048
@@ -339,7 +334,6 @@ class WorkflowSelect(BaseModel):
     @field_validator("filename")
     @classmethod
     def safe_filename(cls, v: str) -> str:
-        # Allow only simple base filenames with safe characters and .json suffix
         if "/" in v or "\\" in v:
             raise ValueError("Invalid filename")
         if not v.endswith(".json"):
@@ -377,18 +371,12 @@ def to_int16(x: np.ndarray) -> np.ndarray:
     return (x * 32767.0).astype(np.int16, copy=False)
 
 def rms_vad(frame: np.ndarray, rms_threshold: float = 0.01) -> bool:
-    """
-    Simple RMS-based voice activity detection.
-    """
     if frame.size == 0:
         return False
     rms = float(np.sqrt(np.mean(np.square(frame, dtype=np.float32), dtype=np.float64)))
     return rms >= rms_threshold
 
 def resample_to_16k(samples: np.ndarray, sr: int) -> np.ndarray:
-    """
-    Lightweight linear resampler to 16 kHz for whisper.cpp.
-    """
     if sr == 16000:
         return samples.astype(np.float32, copy=False)
     target_len = int(samples.shape[0] * (16000.0 / float(sr)))
@@ -468,13 +456,10 @@ def _parse_whisper_out(raw: object) -> str:
                 if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
                     t = t[1:-1]
                 cleaned.append(t.strip())
-            return " " .join(cleaned).strip()
+            return " ".join(cleaned).strip()
     return s
 
 def clean_transcript(raw: str) -> str:
-    """
-    Normalize transcript and remove short meta/noise tokens.
-    """
     if not raw:
         return ""
     txt = " ".join(raw.split()).strip()
@@ -491,9 +476,6 @@ def is_meaningful_text(t: str, min_chars: int, min_words: int) -> bool:
     return bool(t) and len(t) >= min_chars and len(t.split()) >= min_words and re.search(r"[A-Za-zÄÖÜäöüß]", t)
 
 def transcribe_chunk_with_whisper(samples: np.ndarray, sr: int) -> str:
-    """
-    Run whisper.cpp on a chunk and post-filter the text.
-    """
     if not WHISPER_AVAILABLE or _WHISPER_MODEL is None:
         return ""
     if samples.size == 0:
@@ -557,9 +539,6 @@ def _ollama_options_for_prompt() -> dict:
     }
 
 async def _post_with_retries(client: httpx.AsyncClient, url: str, body: dict, timeout: float) -> dict:
-    """
-    Robust POST with exponential backoff for local Ollama under load.
-    """
     delay = float(_env_float("APP_OLLAMA_RETRY_BASE_DELAY", 0.8))
     max_retries = int(_env_int("APP_OLLAMA_MAX_RETRIES", 4))
     last_exc: Optional[Exception] = None
@@ -582,9 +561,6 @@ async def _post_with_retries(client: httpx.AsyncClient, url: str, body: dict, ti
     raise RuntimeError(f"Ollama request failed after {max_retries} attempts: {last_exc}")
 
 async def _ollama_available() -> bool:
-    """
-    Quick health check against Ollama tags endpoint.
-    """
     try:
         async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short_http()) as c:
             r = await c.get(_ollama_url("/api/tags"))
@@ -594,9 +570,6 @@ async def _ollama_available() -> bool:
         return False
 
 async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> str:
-    """
-    Build a concise image prompt via Ollama /api/generate with a system prompt.
-    """
     sys = OLLAMA_SYS_PROMPT
     payload = {
         "user_text": (user_text or "").strip(),
@@ -612,55 +585,39 @@ async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> s
 
 @dataclass
 class PipelineState:
-    # Audio running flag controls the audio capture + whisper loop only
     running: bool = False
-    # Global shutdown flag for hard shutdown
     shutting_down: bool = False
-    # Main audio task
     task: Optional[asyncio.Task] = None
-    # SSE listeners
     listeners: List[asyncio.Queue] = field(default_factory=list)
-    # Audio metadata
     actual_sr: int = 16000
     device_used_index: Optional[int] = None
     device_used_name: Optional[str] = None
-    # LLM/image bookkeeping
     last_prompt: Optional[str] = None
     last_llm_error: Optional[str] = None
     last_llm_run_ts: float = 0.0
-    # Background tasks (LLM → Image jobs)
     bg_tasks: Set[asyncio.Task] = field(default_factory=set)
     ollama_ready_at: float = 0.0
     last_pending_text: Optional[str] = None
     start_ts: float = 0.0
-    # Image backend config
     image_backend_name: str = _env_str("IMAGE_BACKEND", "comfyui").lower()
     allow_cloud: bool = _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0)
     image_width: int = APP_IMAGE_WIDTH
     image_height: int = APP_IMAGE_HEIGHT
     negative_prompt: str = ""
-    # Workflow selection (filename like "text2img_SD15-FP16.json")
     active_workflow: Optional[str] = None
-    # Audio stream handle and stop event
     audio_stream: Any = None
-    audio_stopped_broadcasted: bool = False  # ensures single audio stop event
-
+    audio_stopped_broadcasted: bool = False
 
 STATE = PipelineState()
 STOP_DEBOUNCE_SEC = float(os.getenv("APP_STOP_DEBOUNCE_SEC", "2.0") or "2.0")
 
 async def safe_stop_audio_stream() -> None:
-    """
-    Deterministically stop and close current audio stream and broadcast
-    'audio_stream_stopped' exactly once (idempotent).
-    """
     if getattr(STATE, "audio_stream", None) is not None:
         with contextlib.suppress(Exception):
             STATE.audio_stream.stop()
         with contextlib.suppress(Exception):
             STATE.audio_stream.close()
         STATE.audio_stream = None
-
     if not STATE.audio_stopped_broadcasted:
         await broadcast("status", "audio_stream_stopped")
         STATE.audio_stopped_broadcasted = True
@@ -671,9 +628,6 @@ def sse_format(event: str, data: str) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 async def broadcast(event: str, data: str) -> None:
-    """
-    Broadcast SSE message to local listeners only; suppressed during shutdown.
-    """
     if STATE.shutting_down:
         return
     for q in list(STATE.listeners):
@@ -683,9 +637,6 @@ async def broadcast(event: str, data: str) -> None:
 _context_buffer: deque[str] = deque(maxlen=CONTEXT_MAX_SEGMENTS)
 
 async def _close_sse_listeners(timeout: float = 0.25) -> None:
-    """
-    Gracefully signal all SSE listeners to end streaming.
-    """
     listeners = getattr(STATE, "listeners", None)
     if not listeners:
         return
@@ -707,9 +658,6 @@ async def _close_sse_listeners(timeout: float = 0.25) -> None:
         setattr(STATE, "listeners", [])
 
 def update_context_buffer(text: str) -> str:
-    """
-    Maintain a rolling context buffer for LLM prompt optimization.
-    """
     _context_buffer.append(text)
     ctx = " ".join(_context_buffer)
     if len(ctx) > CONTEXT_MAX_CHARS:
@@ -741,9 +689,6 @@ def _log_effective_config() -> None:
 # ---------- Runtime-aware backend wrapper ----------
 
 def build_image_backend_rt(backend_name: Optional[str] = None, allow_cloud: Optional[bool] = None) -> ImageBackend:
-    """
-    Recreate image backend with runtime flags without restarting the app.
-    """
     wanted_backend = (backend_name or STATE.image_backend_name or _env_str("IMAGE_BACKEND", "comfyui")).lower()
     allowed = (STATE.allow_cloud if allow_cloud is None else bool(allow_cloud))
     old_backend = os.environ.get("IMAGE_BACKEND")
@@ -771,7 +716,6 @@ def rel_for_ui_path(p: Path) -> str:
 # ---------- Workflow helpers ----------
 
 def _list_workflow_files() -> List[WorkflowItem]:
-    """Scan WORKFLOWS_DIR for .json files and return as WorkflowItem list."""
     items: List[WorkflowItem] = []
     if not WORKFLOWS_DIR.exists():
         return items
@@ -782,9 +726,7 @@ def _list_workflow_files() -> List[WorkflowItem]:
     return items
 
 def _ensure_workflow_exists(filename: str) -> Path:
-    """Validate that filename refers to an existing file within WORKFLOWS_DIR."""
     candidate = (WORKFLOWS_DIR / filename).resolve()
-    # Enforce directory containment
     if WORKFLOWS_DIR not in candidate.parents and candidate != WORKFLOWS_DIR:
         raise FileNotFoundError("Invalid workflow path")
     if not candidate.exists() or not candidate.is_file():
@@ -792,10 +734,6 @@ def _ensure_workflow_exists(filename: str) -> Path:
     return candidate
 
 def _apply_active_workflow_if_local() -> None:
-    """
-    If LocalComfyBackend is active and a STATE.active_workflow is set,
-    point the backend's cfg.workflow_path to ./workflows/<filename>.
-    """
     if LocalComfyBackend is None or BACKEND is None:
         return
     if not isinstance(BACKEND, LocalComfyBackend):
@@ -803,17 +741,14 @@ def _apply_active_workflow_if_local() -> None:
     fname = getattr(STATE, "active_workflow", None)
     if not fname:
         return
-    # Resolve path under WORKFLOWS_DIR and ensure containment
     wf_path = (WORKFLOWS_DIR / fname).resolve()
     if not wf_path.exists() or not wf_path.is_file():
         print(f"[WF] active_workflow missing on disk: {wf_path}")
         return
     try:
-        # Sicherheitsnetz: verify containment
         if WORKFLOWS_DIR not in wf_path.parents and wf_path != WORKFLOWS_DIR:
             print(f"[WF] invalid workflow path escape blocked: {wf_path}")
             return
-        # Apply to backend config
         BACKEND.cfg.workflow_path = wf_path  # type: ignore[attr-defined]
         print(f"[WF] applied workflow to LocalComfyBackend: {wf_path.name}")
     except Exception as e:
@@ -822,14 +757,8 @@ def _apply_active_workflow_if_local() -> None:
 # ---------- Audio transcription loop ----------
 
 async def audio_transcription_loop() -> None:
-    """
-    Main audio capture + whisper transcription loop.
-    Respects STATE.running; on stop, loop exits but image pipeline continues.
-    """
     sr = int(SAMPLE_RATE)
     frame_len = max(1, int(sr * (FRAME_MS / 1000.0)))
-
-    # Reset stop broadcast gate on start
     STATE.audio_stopped_broadcasted = False
 
     try:
@@ -857,7 +786,6 @@ async def audio_transcription_loop() -> None:
     q: asyncio.Queue[np.ndarray] = asyncio.Queue(maxsize=100)
 
     def callback(indata, frames, time_info, status):
-        # Push frames only while running to minimize latency post-stop
         if not STATE.running:
             return
         mono = np.asarray(indata[:, 0], dtype=np.float32)
@@ -936,7 +864,6 @@ async def audio_transcription_loop() -> None:
                         pass
                     else:
                         ctx = update_context_buffer(text)
-                        # Gate LLM dispatch by STATE.running to avoid new prompts after stop
                         if not OLLAMA_DISABLED and (time.time() - STATE.last_llm_run_ts) >= float(LLM_INTERVAL_SEC):
                             if not STATE.running:
                                 break
@@ -959,16 +886,11 @@ async def audio_transcription_loop() -> None:
         print(f"[AUDIO] loop crashed: {e}")
         await broadcast("status", f"audio_loop_error:{e}")
     finally:
-        # Use helper for deterministic stop + event
         await safe_stop_audio_stream()
 
 # ---------- LLM + Image ----------
 
 async def run_llm_and_image(text: str) -> None:
-    """
-    End-to-end step: LLM prompt generation, then image generation.
-    This runs as a BG task and should not be cancelled by soft /stop.
-    """
     if await _ollama_available() is False:
         await broadcast("status", "ollama_unavailable")
         STATE.last_llm_error = "ollama_unavailable"
@@ -988,7 +910,6 @@ async def run_llm_and_image(text: str) -> None:
             await broadcast("llm_prompt", img_prompt)
             await broadcast("status", "llm_ok")
             try:
-                # Sync negative prompt to LocalComfyBackend if available
                 if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
                     if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
                         setattr(BACKEND.cfg, "negative", STATE.negative_prompt or "")
@@ -1010,20 +931,83 @@ async def run_llm_and_image(text: str) -> None:
 # ---------- Helpers: negative prompt passing ----------
 
 def _merge_negative_into_prompt(prompt: str, negative: str) -> str:
+    """
+    Legacy/basic inline merge used as a generic fallback if a backend lacks native support.
+    """
     p = (prompt or "").strip()
     n = (negative or "").strip()
     if not n:
         return p
     return f"{p}\n-- negative: {n}"
 
+def _inline_negative_phrases(positive: str, negative: str) -> str:
+    """
+    Build robust inline negative phrasing inside the positive prompt.
+    Strategy:
+    - Split negative terms by comma/semicolon/newline.
+    - Normalize and deduplicate.
+    - Create concise English exclusion phrases plus soft German equivalents.
+    - Append as a short clause to the positive prompt for stronger guidance.
+    """
+    base = (positive or "").strip()
+    neg = (negative or "").strip()
+    if not base or not neg:
+        return base
+
+    # Split into items
+    parts_raw = re.split(r"[,\n;]+", neg)
+    items = []
+    for it in parts_raw:
+        t = it.strip()
+        if not t:
+            continue
+        # Strip leading "no"/"kein"/"keine"/"without" etc. to avoid duplication
+        t = re.sub(r"^(no|kein(?:e|en|er)?|keine|without|exclude|vermeide|ohne)\s+", "", t, flags=re.I).strip()
+        if t:
+            items.append(t)
+
+    # Deduplicate while preserving order
+    seen: Set[str] = set()
+    uniq: List[str] = []
+    for it in items:
+        key = it.lower()
+        if key not in seen:
+            seen.add(key)
+            uniq.append(it)
+
+    if not uniq:
+        return base
+
+    # Build phrases; keep it compact to avoid overpowering the base prompt
+    # Example: "without yellow flowers; avoid yellow blooms; no yellow petals"
+    en_parts = [f"without {it}" for it in uniq]
+    en_parts += [f"avoid {it}" for it in uniq[:2]]  # limit duplicates
+    en_parts += [f"no {it}" for it in uniq[:2]]
+
+    # German soft hints (very compact)
+    de_parts = [f"ohne {it}" for it in uniq[:2]]
+
+    # Join segments; prefer one compact sentence
+    inline_clause = "; ".join(en_parts + de_parts)
+
+    # Final merged prompt: add as a parenthetical or trailing constraint
+    # Use a marker unlikely to confuse style: "Constraints:"
+    merged = f"{base}\nConstraints: {inline_clause}."
+    return merged
+
+# ENV switch for Pollinations inline negative (default ON)
+POLLINATIONS_INLINE_NEG = _env_bool01("POLLINATIONS_INLINE_NEG", 1)
+
 async def _generate_with_negative_support(prompt: str, width: int, height: int, negative: str) -> Path:
     """
-    Call backend.generate; if it lacks native negative_prompt, merge it manually.
+    Call backend.generate. For Pollinations:
+    - Optionally inline inject negatives into positive prompt (POLLINATIONS_INLINE_NEG=1).
+    - Still pass native 'negative' field for forward/model-specific support.
+    For other backends:
+    - Pass 'negative' normally; on TypeError fallback to legacy inline merge.
     """
     if BACKEND is None:
         raise RuntimeError("image_backend_not_initialized")
-
-
 
     # Ensure active workflow is applied for LocalComfyBackend
     try:
@@ -1033,14 +1017,26 @@ async def _generate_with_negative_support(prompt: str, width: int, height: int, 
 
     kwargs: Dict[str, Any] = {"width": width, "height": height}
 
-    print(f"[IMAGE REQ] backend={type(BACKEND).__name__} size={width}x{height} "
-          f"has_negative={(negative or '').strip() != ''} neg_sample='{(negative or '')[:64]}'")
+    backend_cls = type(BACKEND).__name__
+    neg_txt = (negative or "").strip()
+    use_inline_for_poll = bool(POLLINATIONS_INLINE_NEG and neg_txt and ("pollinations" in backend_cls.lower()))
+
+    eff_prompt = prompt
+    if use_inline_for_poll:
+        eff_prompt = _inline_negative_phrases(prompt, neg_txt)
+
+    print(
+        f"[IMAGE REQ] backend={backend_cls} size={width}x{height} "
+        f"has_negative={(neg_txt != '')} inline_for_poll={use_inline_for_poll} "
+        f"neg_sample='{neg_txt[:64]}'"
+    )
+
     try:
-        # Pass runtime negative cleanly to the backend API (Pollinations: sets negative_prompt in v1)
-        return await BACKEND.generate(prompt, negative=(negative or ""), **kwargs)  # type: ignore[arg-type]
+        # Always pass the 'negative' param if backend supports it
+        return await BACKEND.generate(eff_prompt, negative=(neg_txt or ""), **kwargs)  # type: ignore[arg-type]
     except TypeError:
-        # Legacy/back-compat path: if a custom backend lacks 'negative', merge inline
-        merged = _merge_negative_into_prompt(prompt, negative)
+        # Backend does not accept 'negative' → fallback: inline basic merge (non-Pollinations or old impl)
+        merged = _merge_negative_into_prompt(eff_prompt, neg_txt)
         return await BACKEND.generate(merged, **kwargs)
 
 # ---------- FastAPI app & lifespan ----------
@@ -1049,9 +1045,6 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Initialize whisper, backend, and optional Ollama warmup; finalize gracefully.
-    """
     print(f"[ENV] loaded from: {ENV_PATH or '(env vars only)'}")
     _log_effective_config()
     init_whisper_model()
@@ -1065,7 +1058,6 @@ async def lifespan(app: FastAPI):
         BACKEND = None
         print(f"[BACKEND] initialization failed: {e}")
 
-    # Initialize backend-specific default sizes into state only on first boot
     try:
         dw, dh = _backend_default_size(STATE.image_backend_name)
         STATE.image_width = STATE.image_width or dw
@@ -1093,7 +1085,6 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # Hard shutdown cleanup: stop audio, cancel BG tasks, close SSE
         STATE.shutting_down = True
         STATE.running = False
         if STATE.task:
@@ -1117,7 +1108,6 @@ app = FastAPI(lifespan=lifespan)
 
 # Static mounts
 app.mount("/static", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="static")
-# Expose ./workflows as read-only static for UI preview
 if not any(route for route in app.router.routes if getattr(route, "path", "") == "/workflows"):
     app.mount("/workflows", StaticFiles(directory=str(WORKFLOWS_DIR), html=False), name="workflows")
 
@@ -1127,9 +1117,6 @@ if web_dir.exists():
 
 @app.get("/", include_in_schema=False)
 async def root_redirect():
-    """
-    Redirect to web UI if present; otherwise show a basic JSON message.
-    """
     if web_dir.exists():
         return RedirectResponse(url="/web/index.html", status_code=307)
     return JSONResponse({"ok": True, "msg": "Web UI not found, use /static for images or API endpoints."})
@@ -1160,9 +1147,6 @@ async def health() -> HealthReport:
 
 @app.get("/config")
 async def get_config():
-    """
-    Return current runtime configuration for the front-end UI.
-    """
     wpath = WHISPER_MODEL_PATH
     masked = (wpath[:3] + "..." + wpath[-10:]) if wpath and len(wpath) > 16 else wpath
 
@@ -1171,7 +1155,6 @@ async def get_config():
     except Exception:
         def_w, def_h = APP_IMAGE_WIDTH, APP_IMAGE_HEIGHT
 
-    # Determine if ComfyUI is the active, enabled backend
     backend_lower = (STATE.image_backend_name or "").strip().lower()
     is_comfy = backend_lower == "comfyui"
     app_disable_comfy_env = os.getenv("APP_DISABLE_COMFYUI", "1").strip().lower()
@@ -1210,17 +1193,11 @@ async def get_config():
 
 @app.get("/api/workflows", response_model=WorkflowList)
 async def api_list_workflows() -> WorkflowList:
-    """
-    Return available workflow JSON files under ./workflows.
-    """
     items = _list_workflow_files()
     return WorkflowList(items=items)
 
 @app.post("/api/settings/workflow")
 async def api_select_workflow(payload: WorkflowSelect):
-    """
-    Select active workflow by filename; validates against ./workflows and applies to LocalComfyBackend.
-    """
     try:
         _ensure_workflow_exists(payload.filename)
     except FileNotFoundError as e:
@@ -1228,10 +1205,8 @@ async def api_select_workflow(payload: WorkflowSelect):
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
-    # Persist in state
     STATE.active_workflow = payload.filename
 
-    # Hot-apply to LocalComfyBackend if active
     try:
         _apply_active_workflow_if_local()
     except Exception as e:
@@ -1244,9 +1219,6 @@ async def api_select_workflow(payload: WorkflowSelect):
 
 @app.get("/events")
 async def events(request: Request):
-    """
-    Server-Sent Events endpoint that emits status, transcripts, prompts, and images.
-    """
     async def gen():
         q: asyncio.Queue[str] = asyncio.Queue()
         STATE.listeners.append(q)
@@ -1276,9 +1248,6 @@ async def events(request: Request):
 
 @app.get("/audio/devices")
 def audio_devices():
-    """
-    Enumerate input devices for diagnostics and selection.
-    """
     try:
         devs = sd.query_devices()
         ins = [
@@ -1292,9 +1261,6 @@ def audio_devices():
 
 @app.get("/audio/probe")
 def audio_probe():
-    """
-    Record a short snippet to estimate peak and RMS on current device.
-    """
     sr = SAMPLE_RATE
     dur = 0.5
     frames = int(sr * dur)
@@ -1316,9 +1282,6 @@ def audio_probe():
 
 @app.post("/start", response_class=PlainTextResponse)
 async def start_pipeline():
-    """
-    Start audio capture loop; image pipeline remains always enabled.
-    """
     print("[HTTP] /start called")
     if STATE.running:
         print("[HTTP] /start ignored (already running)")
@@ -1333,21 +1296,9 @@ async def start_pipeline():
 
 @app.post("/stop", response_class=PlainTextResponse)
 async def stop_pipeline():
-    """
-    Soft stop: stop audio input and prevent new LLM prompts.
-    Do NOT cancel in-flight or pending image generation tasks.
-    Do NOT broadcast 'server_stopped'; broadcast 'audio_stopped' instead.
-    """
     print("[HTTP] /stop called")
-
-    # 1) Turn off the audio running flag immediately
     STATE.running = False
-
-    # 2) Deterministically stop audio stream and send status once
     await safe_stop_audio_stream()
-
-    # 3) Cancel the audio task only; leave BG tasks (LLM/Image) running so that
-    #    already-generated prompts can finish image generation.
     if STATE.task:
         STATE.task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -1356,45 +1307,29 @@ async def stop_pipeline():
             except asyncio.TimeoutError:
                 pass
         STATE.task = None
-
-    # 4) Do NOT cancel STATE.bg_tasks here. Let existing jobs complete.
-    #    New LLM dispatches are naturally prevented because STATE.running is False
-    #    and the audio loop won't schedule new ones.
-
-    # 5) Broadcast a soft-stop status for the UI
     await broadcast("status", "audio_stopped")
     print("[HTTP] /stop completed")
     return PlainTextResponse("stopped")
 
-
 @app.post("/shutdown", response_class=PlainTextResponse)
 async def shutdown_server():
-    """
-    Hard stop: stop audio, cancel all BG tasks, close SSE, and exit the process.
-    """
     print("[HTTP] /shutdown called")
     STATE.shutting_down = True
-    # Reuse soft stop for audio
     try:
         await stop_pipeline()
     except Exception:
         pass
-    # Now cancel BG tasks (LLM/Image) for a hard shutdown
     for t in list(STATE.bg_tasks):
         t.cancel()
     with contextlib.suppress(Exception):
         await asyncio.gather(*list(STATE.bg_tasks), return_exceptions=True)
     STATE.bg_tasks.clear()
-    # Inform clients
     await broadcast("status", "server_stopped")
     await _close_sse_listeners()
     asyncio.create_task(_exit_after_delay())
     return PlainTextResponse("shutting down")
 
 async def _exit_after_delay():
-    """
-    Exit the process shortly after notifying clients.
-    """
     await asyncio.sleep(0.2)
     os._exit(0)
 
@@ -1429,10 +1364,6 @@ async def api_ollama_chat(req: OllamaChatRequest):
 
 @app.post("/api/plan")
 async def api_plan(req: PlanRequest):
-    """
-    Generate an image prompt via Ollama and immediately trigger image generation.
-    This endpoint is independent of the audio loop; it should work even after soft stop.
-    """
     if await _ollama_available() is False:
         return JSONResponse({"error": "ollama_unavailable"}, status_code=503)
     sys = OLLAMA_SYS_PROMPT
@@ -1452,7 +1383,6 @@ async def api_plan(req: PlanRequest):
                 await broadcast("llm_prompt", out)
                 if BACKEND is not None:
                     try:
-                        # Sync negative prompt to LocalComfyBackend
                         if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
                             if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
                                 setattr(BACKEND.cfg, "negative", STATE.negative_prompt or "")
@@ -1472,9 +1402,6 @@ async def api_plan(req: PlanRequest):
 
 @app.post("/api/image/direct", response_model=ImageResponse)
 async def api_image_direct(req: DirectImageRequest):
-    """
-    Generate an image directly from a prompt (independent of audio state).
-    """
     if BACKEND is None:
         return JSONResponse({"error": "image_backend_not_initialized"}, status_code=500)
     try:
@@ -1503,9 +1430,6 @@ async def api_image_direct(req: DirectImageRequest):
 
 @app.post("/api/image/test", response_model=ImageResponse)
 async def api_image_test(req: ImageRequest):
-    """
-    Small test image generation with default prompt.
-    """
     if BACKEND is None:
         return JSONResponse({"error": "image_backend_not_initialized"}, status_code=500)
     prompt = (req.prompt or "A colorful low-poly fox head, studio lighting, high detail, 3D render").strip()
@@ -1527,9 +1451,6 @@ async def api_image_test(req: ImageRequest):
 # ---------- Image backend switching & cloud toggle ----------
 
 def _rebuild_backend(force_name: Optional[str] = None) -> ImageBackend:
-    """
-    Rebuild the image backend and update state.
-    """
     global BACKEND
     if force_name:
         STATE.image_backend_name = force_name.lower()
@@ -1543,9 +1464,6 @@ class ImageAllowCloudReq(BaseModel):
 
 @app.post("/api/settings/image_allow_cloud")
 async def api_image_allow_cloud(req: ImageAllowCloudReq):
-    """
-    Toggle allowance for cloud-based image backends.
-    """
     val = req.allow if req.allow is not None else req.allow_cloud
     if val is None:
         return JSONResponse({"ok": False, "error": "missing_field_allow"}, status_code=400)
@@ -1554,7 +1472,6 @@ async def api_image_allow_cloud(req: ImageAllowCloudReq):
         STATE.image_backend_name = "comfyui"
     try:
         _rebuild_backend()
-        # Re-apply selected workflow if we are on LocalComfyBackend
         try:
             _apply_active_workflow_if_local()
         except Exception as e:
@@ -1565,13 +1482,6 @@ async def api_image_allow_cloud(req: ImageAllowCloudReq):
 
 @app.post("/api/settings/image_backend")
 async def api_switch_image_backend(req: ImageBackendSwitch):
-    """
-    Switch between local ComfyUI and Pollinations backend at runtime.
-
-    Behavior:
-    - Preserves current UI-selected image size by default.
-    - If reset=true in request body, sets image size to backend-specific defaults.
-    """
     target = req.backend.lower()
     if target not in {"comfyui", "pollinations"}:
         return JSONResponse({"ok": False, "error": "invalid_backend"}, status_code=400)
@@ -1582,7 +1492,6 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
         if not secret:
             return JSONResponse({"ok": False, "error": "missing_secret", "reason": "missing_secret"}, status_code=400)
     try:
-        # Keep current size unless reset requested
         cur_w, cur_h = STATE.image_width, STATE.image_height
         _rebuild_backend(force_name=target)
         if req.reset:
@@ -1593,7 +1502,6 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
             STATE.image_width = cur_w
             STATE.image_height = cur_h
 
-        # Re-apply selected workflow if we are on LocalComfyBackend
         try:
             _apply_active_workflow_if_local()
         except Exception as e:
@@ -1612,9 +1520,6 @@ async def get_image_size():
 
 @app.post("/api/settings/image_size")
 async def set_image_size(s: ImageSizeSettings):
-    """
-    Update image dimensions used by subsequent generations.
-    """
     STATE.image_width = int(s.width)
     STATE.image_height = int(s.height)
     await broadcast("status", f"image_size:{STATE.image_width}x{STATE.image_height}")
@@ -1626,9 +1531,6 @@ async def get_negative_prompt():
 
 @app.post("/api/settings/negative_prompt")
 async def set_negative_prompt(s: NegativePromptSettings):
-    """
-    Update global negative prompt and mirror it to LocalComfyBackend if supported.
-    """
     txt = (s.negative_prompt or "").strip()
     STATE.negative_prompt = txt
     if BACKEND is not None and LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
