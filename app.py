@@ -1023,6 +1023,8 @@ async def _generate_with_negative_support(prompt: str, width: int, height: int, 
     if BACKEND is None:
         raise RuntimeError("image_backend_not_initialized")
 
+
+
     # Ensure active workflow is applied for LocalComfyBackend
     try:
         _apply_active_workflow_if_local()
@@ -1030,9 +1032,14 @@ async def _generate_with_negative_support(prompt: str, width: int, height: int, 
         print(f"[WF] apply before generate failed: {e}")
 
     kwargs: Dict[str, Any] = {"width": width, "height": height}
+
+    print(f"[IMAGE REQ] backend={type(BACKEND).__name__} size={width}x{height} "
+          f"has_negative={(negative or '').strip() != ''} neg_sample='{(negative or '')[:64]}'")
     try:
-        return await BACKEND.generate(prompt, negative_prompt=(negative or ""), **kwargs)  # type: ignore[arg-type]
+        # Pass runtime negative cleanly to the backend API (Pollinations: sets negative_prompt in v1)
+        return await BACKEND.generate(prompt, negative=(negative or ""), **kwargs)  # type: ignore[arg-type]
     except TypeError:
+        # Legacy/back-compat path: if a custom backend lacks 'negative', merge inline
         merged = _merge_negative_into_prompt(prompt, negative)
         return await BACKEND.generate(merged, **kwargs)
 
