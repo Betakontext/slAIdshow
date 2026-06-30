@@ -13,22 +13,6 @@
 # - Pollinations path never triggers ComfyUI discovery and is not affected by it.
 # - ComfyUI discovery only runs if IMAGE_BACKEND=comfyui and APP_DISABLE_COMFYUI=0.
 # - 0.0.0.0 is a bind address only; clients must use a real IP like 192.168.188.24.
-#
-# Minimal .env for LAN ComfyUI usage:
-#   IMAGE_BACKEND=comfyui
-#   APP_COMFY_HOST=127.0.0.1
-#   APP_COMFY_PORT=8188
-#   APP_ALLOW_REMOTE_BACKENDS=1
-#   APP_ALLOWED_SUBNETS=192.168.188.0/24
-#   APP_COMFY_FALLBACK_HOSTS=192.168.188.24
-#   AUTO_DISCOVERY_ENABLE=1
-#   AUTO_DISCOVERY_SUBNETS=192.168.188.0/24
-#
-# To use Pollinations (cloud):
-#   IMAGE_BACKEND=pollinations
-#   ALLOW_CLOUD_IMAGE_BACKEND=1
-#   POLLINATIONS_SECRET=sk_...
-#   (Discovery code is not touched in this path.)
 
 from __future__ import annotations
 
