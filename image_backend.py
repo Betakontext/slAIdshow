@@ -952,6 +952,23 @@ def build_image_backend() -> ImageBackend:
 # ---------------------------
 # Optional helper for controllers (post-LLM guard)
 # ---------------------------
+def merge_style_prompt(content_prompt: str, style_positive: Optional[str]) -> str:
+    """
+    Merge content prompt with optional style-positive.
+    Strategy: append with a separator if not already contained.
+    Example: "<content>. Style: <style_positive>"
+    Keeps it short and backend-agnostic.
+    """
+    content = (content_prompt or "").strip()
+    style = (style_positive or "").strip()
+    if not style:
+        return content
+    # Avoid trivial duplicate
+    if style.lower() in content.lower():
+        return content
+    sep = " "
+    # Prefer a readable tag to help both backends/LLMs
+    return f"{content}{sep}Style: {style}".strip()
 
 def inject_negatives_for_final_prompt(prompt: str, negative: str | None) -> str:
     negative = (negative or "").strip()

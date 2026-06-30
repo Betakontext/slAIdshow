@@ -78,11 +78,11 @@
     #image-viewer:fullscreen { background: #000; }
     #image-viewer:fullscreen #current-image { max-width: 100vw; max-height: 100vh; cursor: zoom-out; }
     .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    input[type="text"], input[type="number"], textarea, select {
+    input[type="text"], input[type="number"], textarea, select, input[type="url"], input[type="file"] {
       background: #0e1118; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
       outline: none;
     }
-    input[type="text"], textarea { width: 100%; }
+    input[type="text"], input[type="url"], textarea { width: 100%; }
     input[type="number"] { width: 110px; }
     textarea { min-height: 80px; resize: vertical; }
     .log {
@@ -101,6 +101,8 @@
     }
     .warn { color: #ffd966; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 11px; }
+
+    .subtle { color: var(--muted); font-size: 12px; }
 
     /* Footer: bottom-left support/contact links */
     .footer-hud {
@@ -121,13 +123,11 @@
       pointer-events: auto;
     }
     .footer-hud a {
-      color: #9ecbff; /* leichtes Blau für Links */
+      color: #9ecbff;
       text-decoration: none;
     }
     .footer-hud a:hover {
       text-decoration: underline;
-    }
-
     }
   </style>
 </head>
@@ -183,7 +183,7 @@
             <span id="backend-warn" class="warn" style="display:none;"></span>
           </div>
 
-          <!-- Workflow switcher (wrapped to toggle visibility when backend is ComfyUI only) -->
+          <!-- Workflow switcher (only visible when ComfyUI backend is active) -->
           <div id="workflow-block" style="display:none;">
             <div class="row" style="margin-bottom:8px;">
               <label for="workflow-select" style="min-width:120px;" id="label-workflow">Workflow</label>
@@ -207,6 +207,41 @@
             <input id="height-input" type="number" min="64" max="2048" step="64" placeholder="z.B. 768" />
             <button id="btn-apply-size" title="Größe übernehmen">Übernehmen</button>
           </div>
+
+          <!-- Style Engine controls (INSERTED HERE) -->
+          <div id="style-block" style="margin-bottom:10px; border-top:1px dashed var(--border); padding-top:10px;">
+            <div class="row" style="margin-bottom:6px;">
+              <strong id="style-title">Style Controls</strong>
+              <span class="subtle">·</span>
+              <button id="btn-style-deactivate" title="Deactivate all styles"><span id="style-deactivate-label">Deactivate all styles</span></button>
+            </div>
+
+            <!-- Free-form style prompt -->
+            <div class="inline-input-line" style="margin-bottom:8px;">
+              <input id="style-text" type="text" placeholder="Style prompt (e.g., cinematic lighting, watercolor, matte, 35mm, pastel colors)" />
+              <button id="btn-apply-style-text" title="Apply style text"><span id="style-apply-label">Übernehmen</span></button>
+            </div>
+
+            <!-- Reference image: local file or URL -->
+            <div class="row" style="margin-bottom:8px;">
+              <label style="min-width:120px;" id="style-ref-label">Reference</label>
+              <input id="ref-file" type="file" accept="image/*" />
+            </div>
+            <div class="inline-input-line" style="margin-bottom:8px;">
+              <input id="ref-url" type="url" placeholder="https://example.com/your-image.jpg (optional alternative to file upload)" />
+              <button id="btn-load-url" title="Load URL as reference"><span id="style-load-url-label">Laden</span></button>
+            </div>
+
+            <!-- Toggles for analysis -->
+            <div class="row" style="margin-bottom:8px;">
+              <label><input id="toggle-local-style" type="checkbox" /> <span id="style-toggle-local">Local style analysis</span></label>
+              <label><input id="toggle-vision" type="checkbox" /> <span id="style-toggle-vision">Use Ollama vision</span></label>
+            </div>
+
+            <!-- Small status line for styles -->
+            <div class="log mono" id="style-log" style="max-height:120px;"></div>
+          </div>
+          <!-- END Style Engine controls -->
 
           <!-- Prompt input -->
           <div class="inline-input-line" style="margin-bottom:8px;">
@@ -312,6 +347,28 @@
         wf_applied_ok: "Workflow übernommen.",
         wf_applied_fail: "Workflow-Übernahme fehlgeschlagen。",
         wf_list_fail: "Workflows konnten nicht geladen werden。",
+        // New (style engine) - UI labels
+        style_ui_title: "Stil-Steuerung",
+        style_ui_deactivate: "Alle Stile deaktivieren",
+        style_ui_deactivate_title: "Alle Stile deaktivieren",
+        style_ui_text_ph: "Stil-Text (z. B. filmische Beleuchtung, Aquarell, matt, 35mm, Pastellfarben)",
+        style_ui_apply: "Übernehmen",
+        style_ui_apply_title: "Stil-Text anwenden",
+        style_ui_ref_label: "Referenz",
+        style_ui_ref_url_ph: "https://example.com/dein-bild.jpg (Alternative zum Datei-Upload)",
+        style_ui_load_url: "Laden",
+        style_ui_load_url_title: "URL als Referenz laden",
+        style_ui_toggle_local: "Lokale Stil-Analyse",
+        style_ui_toggle_vision: "Ollama Vision verwenden",
+        // Existing (style engine) - logs/status
+        style_deactivate: "Alle Styles deaktiviert.",
+        style_applied: "Style-Text übernommen.",
+        style_file_ok: "Referenzbild hochgeladen.",
+        style_file_fail: "Upload fehlgeschlagen.",
+        style_url_ok: "Referenzbild geladen.",
+        style_url_fail: "URL-Laden fehlgeschlagen.",
+        style_build_ok: "Style-Bausteine aktualisiert.",
+        style_build_fail: "Style-Build fehlgeschlagen。",
       },
       en: {
         brand: "slAIdshow | Local Speech-to-Image Pipeline",
@@ -373,6 +430,28 @@
         wf_applied_ok: "Workflow applied.",
         wf_applied_fail: "Failed to apply workflow。",
         wf_list_fail: "Failed to load workflows。",
+        // New (style engine) - UI labels
+        style_ui_title: "Style Controls",
+        style_ui_deactivate: "Deactivate all styles",
+        style_ui_deactivate_title: "Deactivate all styles",
+        style_ui_text_ph: "Style prompt (e.g., cinematic lighting, watercolor, matte, 35mm, pastel colors)",
+        style_ui_apply: "Apply",
+        style_ui_apply_title: "Apply style text",
+        style_ui_ref_label: "Reference",
+        style_ui_ref_url_ph: "https://example.com/your-image.jpg (optional alternative to file upload)",
+        style_ui_load_url: "Load",
+        style_ui_load_url_title: "Load URL as reference",
+        style_ui_toggle_local: "Local style analysis",
+        style_ui_toggle_vision: "Use Ollama vision",
+        // Existing (style engine) - logs/status
+        style_deactivate: "All styles deactivated.",
+        style_applied: "Style text applied.",
+        style_file_ok: "Reference image uploaded.",
+        style_file_fail: "Upload failed.",
+        style_url_ok: "Reference image loaded.",
+        style_url_fail: "URL load failed.",
+        style_build_ok: "Style components updated.",
+        style_build_fail: "Style build failed。",
       }
     };
 
@@ -397,7 +476,6 @@
       document.getElementById('btn-apply-backend').textContent = t('btn_apply_backend');
       document.getElementById('btn-apply-size').textContent = t('btn_apply_size');
       document.getElementById('btn-apply-neg').textContent = t('btn_apply_neg');
-      // Ensure workflow button is localized as well
       const wfBtn = document.getElementById('btn-apply-workflow');
       if (wfBtn) wfBtn.textContent = t('btn_apply_workflow');
 
@@ -409,11 +487,38 @@
       document.getElementById('label-height').textContent = t('label_height');
       document.getElementById('label-workflow').textContent = t('label_workflow');
 
-      // Placeholder updates
       document.getElementById('plan-input').placeholder = t('ph_plan');
       document.getElementById('neg-input').placeholder = t('ph_neg');
 
-      // Shutdown/Reconnect button text
+      // Style Engine UI: apply translations
+      const styleTitle = document.getElementById('style-title');
+      if (styleTitle) styleTitle.textContent = t('style_ui_title');
+      const styleDeactivate = document.getElementById('style-deactivate-label');
+      if (styleDeactivate) styleDeactivate.textContent = t('style_ui_deactivate');
+      const btnStyleDeactivate = document.getElementById('btn-style-deactivate');
+      if (btnStyleDeactivate) btnStyleDeactivate.title = t('style_ui_deactivate_title');
+
+      const styleText = document.getElementById('style-text');
+      if (styleText) styleText.placeholder = t('style_ui_text_ph');
+      const styleApplyLabel = document.getElementById('style-apply-label');
+      if (styleApplyLabel) styleApplyLabel.textContent = t('style_ui_apply');
+      const btnApplyStyleText = document.getElementById('btn-apply-style-text');
+      if (btnApplyStyleText) btnApplyStyleText.title = t('style_ui_apply_title');
+
+      const styleRefLabel = document.getElementById('style-ref-label');
+      if (styleRefLabel) styleRefLabel.textContent = t('style_ui_ref_label');
+      const refUrl = document.getElementById('ref-url');
+      if (refUrl) refUrl.placeholder = t('style_ui_ref_url_ph');
+      const styleLoadUrlLabel = document.getElementById('style-load-url-label');
+      if (styleLoadUrlLabel) styleLoadUrlLabel.textContent = t('style_ui_load_url');
+      const btnLoadUrl = document.getElementById('btn-load-url');
+      if (btnLoadUrl) btnLoadUrl.title = t('style_ui_load_url_title');
+
+      const styleToggleLocal = document.getElementById('style-toggle-local');
+      if (styleToggleLocal) styleToggleLocal.textContent = t('style_ui_toggle_local');
+      const styleToggleVision = document.getElementById('style-toggle-vision');
+      if (styleToggleVision) styleToggleVision.textContent = t('style_ui_toggle_vision');
+
       const btnShutdown = document.getElementById('btn-shutdown');
       if (btnShutdown.dataset.mode === 'reconnect') {
         btnShutdown.textContent = t('reconnect');
@@ -425,7 +530,6 @@
         btnShutdown.classList.add('btn-danger');
       }
 
-      // Header status if in connecting state
       const statusEl = document.getElementById('status');
       if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
     }
@@ -442,6 +546,7 @@
     const promptLog = $('#prompt-log');
     const transcriptLog = $('#transcript-log');
     const statusLog = $('#status-log');
+    const styleLog = $('#style-log');
     const img = $('#current-image');
     const caption = $('#img-caption');
     const viewer = $('#image-viewer');
@@ -450,7 +555,7 @@
     const backendWarn = $('#backend-warn');
     const btnApplyBackend = $('#btn-apply-backend');
 
-    const workflowBlock = document.getElementById('workflow-block'); // container to toggle visibility
+    const workflowBlock = document.getElementById('workflow-block');
     const workflowSelect = $('#workflow-select');
     const workflowPreview = $('#workflow-preview');
     const wfWarn = $('#wf-warn');
@@ -460,6 +565,16 @@
     const heightInput = $('#height-input');
     const btnApplySize = $('#btn-apply-size');
     const sizePill = $('#size-pill');
+
+    // Style controls
+    const styleTextInput = $('#style-text');
+    const btnApplyStyleText = $('#btn-apply-style-text');
+    const btnStyleDeactivate = $('#btn-style-deactivate');
+    const refFileInput = $('#ref-file');
+    const refUrlInput = $('#ref-url');
+    const btnLoadUrl = $('#btn-load-url');
+    const toggleLocalStyle = $('#toggle-local-style');
+    const toggleVision = $('#toggle-vision');
 
     function log(el, msg) {
       const ts = new Date().toLocaleTimeString();
@@ -481,7 +596,6 @@
 
     img.addEventListener('load', () => img.classList.add('loaded'));
     function setImage(filenameRel, captionText) {
-      // Always serve from local static folder
       const url = filenameRel.startsWith('/static/') ? filenameRel : `/static/${filenameRel.replace(/^\/+/, '')}`;
       img.classList.remove('loaded');
       img.src = url;
@@ -570,7 +684,7 @@
       log(statusLog, t('sse_connecting'));
       console.debug('[SSE] connecting to /events');
 
-    try { sse = new EventSource('/events'); }
+      try { sse = new EventSource('/events'); }
       catch (e) { console.debug('[SSE] EventSource ctor error:', e); connecting = false; scheduleReconnect(); return; }
 
       sse.onopen = () => {
@@ -703,7 +817,6 @@
 
     // ---------- Start/Stop ----------
     $('#btn-start').addEventListener('click', async () => {
-      // Ensure server knows current size before starting
       try {
         const size = currentSizePayload();
         await fetch('/api/settings/image_size', {
@@ -748,6 +861,201 @@
       return { width: w, height: h };
     }
 
+    // ---------- Style Engine: local state and helpers ----------
+    // Note: endpoints used here must already exist server-side.
+    const STYLE_STATE = {
+      reference_source: 'none',      // 'none' | 'local_file' | 'url'
+      reference_id: null,
+      reference_url: '',
+      style_text_prompt: '',
+      use_local_style_features: true,
+      use_ollama_vision: false,
+      deactivate_all_styles: false,
+    };
+
+    function loadStyleState() {
+      try {
+        const raw = localStorage.getItem('style_state_v1');
+        if (!raw) return;
+        const s = JSON.parse(raw);
+        Object.assign(STYLE_STATE, s || {});
+      } catch {}
+      // Reflect into UI
+      if (STYLE_STATE.style_text_prompt) styleTextInput.value = STYLE_STATE.style_text_prompt;
+      if (STYLE_STATE.reference_source === 'url' && STYLE_STATE.reference_url) {
+        refUrlInput.value = STYLE_STATE.reference_url;
+      }
+      toggleLocalStyle.checked = !!STYLE_STATE.use_local_style_features;
+      toggleVision.checked = !!STYLE_STATE.use_ollama_vision;
+    }
+
+    function saveStyleState() {
+      const s = Object.assign({}, STYLE_STATE);
+      localStorage.setItem('style_state_v1', JSON.stringify(s));
+    }
+
+    async function styleBuild(contentPositiveForNow = null) {
+      const payload = {
+        content_positive: contentPositiveForNow || '',
+        style_text_prompt: STYLE_STATE.style_text_prompt || '',
+        reference_source: STYLE_STATE.reference_source || 'none',
+        reference_id: STYLE_STATE.reference_id || null,
+        reference_url: STYLE_STATE.reference_url || null,
+        use_local_style_features: !!STYLE_STATE.use_local_style_features,
+        use_ollama_vision: !!STYLE_STATE.use_ollama_vision,
+        deactivate_all_styles: !!STYLE_STATE.deactivate_all_styles,
+      };
+      try {
+        const r = await fetch('/api/style/build', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j) throw new Error(`${r.status}`);
+        if (j.warnings && Array.isArray(j.warnings) && j.warnings.length) {
+          for (const w of j.warnings) log(styleLog, `warn: ${w}`);
+        }
+        log(styleLog, `${t('style_build_ok')} style_positive="${(j.style_positive||'').slice(0,200)}"`);
+        if (j.descriptors_used && j.descriptors_used.length) {
+          log(styleLog, `descriptors: ${j.descriptors_used.join(', ')}`);
+        }
+        if (j.vision_text_used) {
+          log(styleLog, `vision: ${j.vision_text_used}`);
+        }
+        if (j.reference_id) {
+          STYLE_STATE.reference_id = j.reference_id;
+          STYLE_STATE.reference_source = 'local_file';
+          saveStyleState();
+        }
+        return j;
+      } catch (e) {
+        log(styleLog, `${t('style_build_fail')}: ${e}`);
+        return null;
+      }
+    }
+
+    async function uploadReferenceFile(file) {
+      const fd = new FormData();
+      fd.append('file', file, file.name || 'reference.png');
+      try {
+        const r = await fetch('/api/style/upload', { method: 'POST', body: fd });
+        const j = await r.json().catch(()=> ({}));
+        if (r.ok && j?.reference_id) {
+          STYLE_STATE.reference_id = j.reference_id;
+          STYLE_STATE.reference_source = 'local_file';
+          saveStyleState();
+          log(styleLog, `${t('style_file_ok')} (${j.reference_id})`);
+          return j;
+        }
+        throw new Error(j?.detail || j?.error || `HTTP ${r.status}`);
+      } catch (e) {
+        log(styleLog, `${t('style_file_fail')}: ${e}`);
+        return null;
+      }
+    }
+
+    async function saveReferenceFromUrl(url) {
+      try {
+        const r = await fetch('/api/style/save_url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
+        });
+        const j = await r.json().catch(()=> ({}));
+        if (r.ok && j?.reference_id) {
+          STYLE_STATE.reference_id = j.reference_id;
+          STYLE_STATE.reference_source = 'local_file';
+          STYLE_STATE.reference_url = url;
+          saveStyleState();
+          log(styleLog, `${t('style_url_ok')} (${j.reference_id})`);
+          return j;
+        }
+        throw new Error(j?.detail || j?.error || `HTTP ${r.status}`);
+      } catch (e) {
+        log(styleLog, `${t('style_url_fail')}: ${e}`);
+        return null;
+      }
+    }
+
+    async function resetAllStylesServer() {
+      try {
+        const r = await fetch('/api/style/reset', { method: 'POST' });
+        const ok = r.ok;
+        if (!ok) throw new Error(`HTTP ${r.status}`);
+      } catch (e) {
+        log(styleLog, `reset(server) failed: ${e}`);
+      }
+    }
+
+    // Hook style text apply
+    btnApplyStyleText.addEventListener('click', async () => {
+      STYLE_STATE.style_text_prompt = styleTextInput.value.trim();
+      saveStyleState();
+      log(styleLog, t('style_applied'));
+      await styleBuild($('#plan-input').value.trim() || '');
+    });
+
+    // Hook file upload
+    refFileInput.addEventListener('change', async (ev) => {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      const up = await uploadReferenceFile(f);
+      if (up) {
+        await styleBuild($('#plan-input').value.trim() || '');
+      }
+    });
+
+    // Hook URL load
+    btnLoadUrl.addEventListener('click', async () => {
+      const url = (refUrlInput.value || '').trim();
+      if (!url) return;
+      STYLE_STATE.reference_source = 'url';
+      STYLE_STATE.reference_url = url;
+      saveStyleState();
+      const saved = await saveReferenceFromUrl(url);
+      if (saved) {
+        await styleBuild($('#plan-input').value.trim() || '');
+      }
+    });
+
+    // Toggle local style analysis
+    toggleLocalStyle.addEventListener('change', async () => {
+      STYLE_STATE.use_local_style_features = !!toggleLocalStyle.checked;
+      saveStyleState();
+      await styleBuild($('#plan-input').value.trim() || '');
+    });
+
+    // Toggle vision
+    toggleVision.addEventListener('change', async () => {
+      STYLE_STATE.use_ollama_vision = !!toggleVision.checked;
+      saveStyleState();
+      await styleBuild($('#plan-input').value.trim() || '');
+    });
+
+    // Deactivate all styles
+    btnStyleDeactivate.addEventListener('click', async () => {
+      STYLE_STATE.deactivate_all_styles = true;
+      STYLE_STATE.style_text_prompt = '';
+      STYLE_STATE.reference_source = 'none';
+      STYLE_STATE.reference_id = null;
+      STYLE_STATE.reference_url = '';
+      STYLE_STATE.use_local_style_features = false;
+      STYLE_STATE.use_ollama_vision = false;
+      saveStyleState();
+
+      styleTextInput.value = '';
+      refUrlInput.value = '';
+      if (refFileInput) refFileInput.value = '';
+      toggleLocalStyle.checked = false;
+      toggleVision.checked = false;
+
+      await resetAllStylesServer();
+      await styleBuild($('#plan-input').value.trim() || '');
+
+      log(styleLog, t('style_deactivate'));
+    });
+
     // ---------- Plan ----------
     $('#btn-plan').addEventListener('click', async () => {
       const text = $('#plan-input').value.trim();
@@ -755,6 +1063,8 @@
       const btn = $('#btn-plan');
       btn.disabled = true;
       try {
+        await styleBuild(text);
+
         const size = currentSizePayload();
         const r = await fetch('/api/plan', {
           method: 'POST',
@@ -778,6 +1088,8 @@
       btn.disabled = true;
       const size = currentSizePayload();
       try {
+        await styleBuild(prompt);
+
         const r = await fetch('/api/image/direct', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -829,7 +1141,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ allow: true })
         });
-        return r.ok;
+      return r.ok;
       } catch { return false; }
     }
 
@@ -851,9 +1163,7 @@
         const j = await r.json().catch(() => ({}));
         if (r.ok && j.ok) {
           log(statusLog, t('backend_switched_ok'));
-          // Pull fresh config (server decides show_workflow_selector)
           await refreshConfig();
-          // Only refresh workflows if the UI block is visible, otherwise clear stale UI
           if (workflowBlock.style.display !== 'none') {
             await refreshWorkflowList();
           } else {
@@ -902,13 +1212,7 @@
     });
 
     // ---------- Workflow switching ----------
-    // This expects:
-    // - Static files under /workflows/*.json
-    // - Optional server endpoints:
-    //   GET /api/workflows -> { items: [{name, filename}] }
-    //   POST /api/settings/workflow { filename } -> apply on server
     async function listWorkflowsFromServer() {
-      // Preferred: server provides list (allows server-side validation/ordering)
       try {
         const r = await fetch('/api/workflows', { cache: 'no-store' });
         if (r.ok) {
@@ -919,7 +1223,6 @@
       return null;
     }
     async function listWorkflowsByIndexJson() {
-      // Fallback: try to load a local index.json that enumerates available workflows
       try {
         const r = await fetch('/workflows/index.json', { cache: 'no-store' });
         if (!r.ok) return [];
@@ -933,7 +1236,6 @@
       return [];
     }
     async function refreshWorkflowList() {
-      // Do not attempt to list workflows when the UI block is hidden
       if (workflowBlock.style.display === 'none') {
         workflowSelect.innerHTML = '';
         workflowPreview.textContent = '';
@@ -945,7 +1247,6 @@
       let items = await listWorkflowsFromServer();
       if (!items) items = await listWorkflowsByIndexJson();
 
-      // If still empty, show warning
       if (!items || items.length === 0) {
         wfWarn.textContent = t('wf_list_fail');
         wfWarn.style.display = '';
@@ -954,7 +1255,6 @@
         return;
       }
 
-      // Populate select safely (no path traversal, only base filenames ending in .json)
       workflowSelect.innerHTML = '';
       const stored = localStorage.getItem('active_workflow') || '';
       let foundStored = false;
@@ -969,23 +1269,19 @@
         workflowSelect.appendChild(opt);
       }
       if (!foundStored && workflowSelect.options.length > 0) {
-        // Select first by default
         workflowSelect.selectedIndex = 0;
       }
-      // Load preview for selected
       const cur = workflowSelect.value;
       if (cur) await loadWorkflowPreview(cur);
     }
 
     async function loadWorkflowPreview(filename) {
-      // Preview JSON for user confirmation; does not execute anything
       workflowPreview.textContent = '';
       if (!filename || !/^[A-Za-z0-9._-]+$/.test(filename) || !filename.endsWith('.json')) return;
       try {
         const r = await fetch(`/workflows/${filename}`, { cache: 'no-store' });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const txt = await r.text();
-        // Try to pretty-print JSON
         try {
           const obj = JSON.parse(txt);
           workflowPreview.textContent = JSON.stringify(obj, null, 2);
@@ -1008,7 +1304,6 @@
       if (!filename) return;
       btnApplyWorkflow.disabled = true;
       try {
-        // Inform server about desired workflow
         const r = await fetch('/api/settings/workflow', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1038,7 +1333,6 @@
         const r = await fetch('/open_dir_hint');
         if (!r.ok) return;
         const j = await r.json();
-        // In a browser we cannot open file system paths directly; we can open static URL instead
         window.open(j?.static_url || '/static/', '_blank');
       } catch {}
     });
@@ -1054,27 +1348,21 @@
         $('#poll-pill').textContent = `Images: ${j?.image?.backend || '?'}`;
         $('#sr-pill').textContent = `SR: ${j?.audio?.sample_rate || '?'}`;
 
-        // Image backend select
         const current = (j?.image?.backend || 'comfyui').toLowerCase();
         backendSelect.value = current === 'pollinations' ? 'pollinations' : 'comfyui';
 
-        // Size fields
         const w = Number(j?.image?.current_width ?? j?.image?.width_default ?? 512);
         const h = Number(j?.image?.current_height ?? j?.image?.height_default ?? 512);
         widthInput.value = w;
         heightInput.value = h;
         updateSizePill();
 
-        // Negative prompt (if server exposes)
         const neg = (j?.image?.negative_prompt || '').trim();
         if (neg) document.getElementById('neg-input').value = neg;
 
-        // Toggle visibility of workflow block based on server flag
-        // Server should set image.show_workflow_selector=true only when ComfyUI backend is active
         const showWF = !!(j?.image?.show_workflow_selector);
         workflowBlock.style.display = showWF ? '' : 'none';
 
-        // Sync active workflow when visible; clear stale UI when hidden
         if (showWF) {
           const activeWF = j?.image?.active_workflow || localStorage.getItem('active_workflow') || '';
           if (activeWF) {
@@ -1088,6 +1376,11 @@
           wfWarn.style.display = 'none';
         }
 
+        if (j?.style) {
+          if (typeof j.style.use_local_style_features === 'boolean') toggleLocalStyle.checked = j.style.use_local_style_features;
+          if (typeof j.style.use_ollama_vision === 'boolean') toggleVision.checked = j.style.use_ollama_vision;
+        }
+
         if (statusEl.dataset.state !== 'connected') statusEl.textContent = t('status_ready');
       } catch (e) {
         log(statusLog, `config error: ${e}`);
@@ -1097,11 +1390,11 @@
 
     (async function init() {
       applyI18N();
+      loadStyleState();
       await refreshConfig();
       function onSizeInputChange() { updateSizePill(); scheduleSizeSync(); }
       widthInput.addEventListener('input', onSizeInputChange);
       heightInput.addEventListener('input', onSizeInputChange);
-      // Only load workflows when block is visible (ComfyUI)
       if (document.getElementById('workflow-block').style.display !== 'none') {
         await refreshWorkflowList();
       }
