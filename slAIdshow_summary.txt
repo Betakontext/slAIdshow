@@ -9,19 +9,22 @@ Drei Bild-Backends, in allen drei Modi
         Pollinations Cloud (mit robustem Fallback, Multipart/URL-Referenzen, Retries)
 
 Funktionierender Ausgangsstand:
+
 Negative Prompt Injektion in allen drei Modi (lokal, remote und Pollinations)
+Style-engine Intergration über positive prompt completion.
 
 Weiterentwicklung:
-Style_Engine: Text-Style-prompt Eingabemöglichkeit in allen drei Modi.
+
 Style Analyse eines Referenzbildes via style_engine.py oder via Ollama (Vision cloud LLM)
 
 Jegliche Code Erstellung auf strikt Englisch und in markdown Blöcken.
 
-HIer die Dateien auf dem derzeitigen Stand:
+Hier die Dateien auf dem derzeitigen Stand:
 
-#app.py
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# Production-ready FastAPI app for slAIdshow:
+# - Real-time audio → Whisper.cpp (pywhispercpp) → Ollama prompt → Image backend (ComfyUI or Pollinations)
+# - Style pipeline integrated: style_engine builds style_positive (and reference_text) used in generation
 
 from __future__ import annotations
 
@@ -51,7 +54,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator, HttpUrl
 
-# Image backend factory and interface (from your project)
+# Image backend factory and interface
 from image_backend import build_image_backend, ImageBackend
 from image_backend import merge_style_prompt  # helper
 
@@ -266,6 +269,25 @@ WARMUP_TIMEOUT_SEC = _env_float("APP_OLLAMA_TIMEOUT_SEC", 45.0)
 WARMUP_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 3)
 WARMUP_RETRY_DELAY = _env_float("APP_OLLAMA_RETRY_DELAY", 1.2)
 WARMUP_GRACE_SEC = _env_float("APP_OLLAMA_GRACE_SEC", 10.0)
+
+# ---------- Ollama Vision settings (for style_engine to consume) ----------
+
+class OllamaVisionSettings(BaseModel):
+    enabled: bool = True
+    mode: Literal["local", "remote", "cloud"] = "local"
+    local_url: str = "http://127.0.0.1:11434"
+    remote_url: str = ""
+    cloud_url: str = ""
+
+@dataclass
+class OllamaVisionState:
+    enabled: bool = True
+    mode: str = "local"
+    local_url: str = "http://127.0.0.1:11434"
+    remote_url: str = ""
+    cloud_url: str = ""
+
+VISION = OllamaVisionState()
 
 # ---------- Pydantic payloads ----------
 
@@ -646,6 +668,8 @@ class PipelineState:
     audio_stream: Any = None
     audio_stopped_broadcasted: bool = False
     style_positive: Optional[str] = None
+    # New: store human-readable reference/vision descriptor text to append as "Ref: ..."
+    reference_text: Optional[str] = None
 
 STATE = PipelineState()
 STOP_DEBOUNCE_SEC = float(os.getenv("APP_STOP_DEBOUNCE_SEC", "2.0") or "2.0")
@@ -723,6 +747,8 @@ def _log_effective_config() -> None:
         f"backend={STATE.image_backend_name} allow_cloud={STATE.allow_cloud} out={OUTPUT_DIR} default={APP_IMAGE_WIDTH}x{APP_IMAGE_HEIGHT}",
         "| sse:",
         f"tick={APP_SSE_TICK_SEC}s",
+        "| vision:",
+        f"enabled={VISION.enabled} mode={VISION.mode} local={VISION.local_url} remote={VISION.remote_url} cloud={VISION.cloud_url}",
     )
 
 # ---------- Runtime-aware backend wrapper ----------
@@ -927,6 +953,22 @@ async def audio_transcription_loop() -> None:
     finally:
         await safe_stop_audio_stream()
 
+# ---------- Prompt post-processing helpers ----------
+
+def _append_reference_block(prompt: str, reference_text: Optional[str]) -> str:
+    """
+    Transparently append a reference descriptor block to the prompt if present.
+    We keep it short and postfix-only to not disturb primary instruction order.
+    """
+    p = (prompt or "").strip()
+    r = (reference_text or "").strip()
+    if not r:
+        return p
+    # Avoid duplicate "Ref:" if already appended
+    if " Ref:" in p or p.endswith("Ref:"):
+        return p
+    return f"{p} Ref: {r}"
+
 # ---------- LLM + Image ----------
 
 async def run_llm_and_image(text: str) -> None:
@@ -945,7 +987,14 @@ async def run_llm_and_image(text: str) -> None:
                 STATE.last_llm_error = "llm_empty_response"
                 await broadcast("status", "llm_empty_response")
                 return
+
+            # Merge style (only if non-empty); style_text_prompt has already been resolved into STATE.style_positive.
             eff_prompt = merge_style_prompt(img_prompt, getattr(STATE, "style_positive", None))
+            # Append transparent reference block if we have vision/reference descriptors
+            eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
+
+            # DEBUG: Log full, final prompt (not truncated)
+            print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
 
             STATE.last_prompt = eff_prompt
             await broadcast("llm_prompt", eff_prompt)
@@ -1229,6 +1278,13 @@ async def get_config():
             }
         },
         "sse": {"tick_sec": APP_SSE_TICK_SEC},
+        "vision": {
+            "enabled": VISION.enabled,
+            "mode": VISION.mode,
+            "local_url": VISION.local_url,
+            "remote_url": VISION.remote_url,
+            "cloud_url": VISION.cloud_url,
+        },
     }
 
 # ---------- Workflows API ----------
@@ -1429,7 +1485,14 @@ async def api_plan(req: PlanRequest):
             data = await _post_with_retries(client, _ollama_url("/api/generate"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
             out = (data.get("response") or "").strip()
             if out:
+                # Merge style preference
                 eff_prompt = merge_style_prompt(out, req.style_positive or getattr(STATE, "style_positive", None))
+                # Append optional transparent reference descriptors
+                eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
+
+                # DEBUG: Log full, final prompt (not truncated)
+                print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
+
                 STATE.last_prompt = eff_prompt
                 await broadcast("llm_prompt", eff_prompt)
                 if BACKEND is not None:
@@ -1467,6 +1530,10 @@ async def api_image_direct(req: DirectImageRequest):
         style_src = req.style_positive if (req.style_positive and req.style_positive.strip()) else getattr(STATE, "style_positive", None)
         base_prompt = req.prompt.strip()
         eff_prompt = merge_style_prompt(base_prompt, style_src)
+        eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
+
+        # DEBUG: Log full, final prompt (not truncated)
+        print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
 
         w = req.width if (req.width and req.width > 0) else STATE.image_width
         h = req.height if (req.height and req.height > 0) else STATE.image_height
@@ -1501,6 +1568,10 @@ async def api_image_test(req: ImageRequest):
                 setattr(BACKEND.cfg, "negative", neg)
         style_src = req.style_positive if (req.style_positive and req.style_positive.strip()) else getattr(STATE, "style_positive", None)
         eff_prompt = merge_style_prompt(prompt, style_src)
+        eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
+
+        # DEBUG: Log full, final prompt (not truncated)
+        print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
 
         w = req.width if (req.width and req.width > 0) else STATE.image_width
         h = req.height if (req.height and req.height > 0) else STATE.image_height
@@ -1588,8 +1659,12 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
 async def get_image_size():
     return {"width": STATE.image_width, "height": STATE.image_height}
 
+class ImageSizeSettingsIn(BaseModel):
+    width: int = Field(ge=_MIN_SIZE, le=_MAX_SIZE)
+    height: int = Field(ge=_MIN_SIZE, le=_MAX_SIZE)
+
 @app.post("/api/settings/image_size")
-async def set_image_size(s: ImageSizeSettings):
+async def set_image_size(s: ImageSizeSettingsIn):
     STATE.image_width = int(s.width)
     STATE.image_height = int(s.height)
     await broadcast("status", f"image_size:{STATE.image_width}x{STATE.image_height}")
@@ -1621,7 +1696,29 @@ async def set_style_positive(s: StylePromptSettings):
     await broadcast("status", "style_positive:updated")
     return {"ok": True, "style_positive": STATE.style_positive or ""}
 
-# ---------- Style API (upload/save_url/build/reset) with enhanced compatibility ----------
+# ---------- Ollama Vision settings routes ----------
+
+@app.get("/api/settings/ollama_vision", response_model=OllamaVisionSettings)
+async def get_ollama_vision():
+    return OllamaVisionSettings(
+        enabled=VISION.enabled,
+        mode=VISION.mode if VISION.mode in {"local", "remote", "cloud"} else "local",
+        local_url=VISION.local_url,
+        remote_url=VISION.remote_url,
+        cloud_url=VISION.cloud_url,
+    )
+
+@app.post("/api/settings/ollama_vision", response_model=OllamaVisionSettings)
+async def set_ollama_vision(cfg: OllamaVisionSettings):
+    VISION.enabled = bool(cfg.enabled)
+    VISION.mode = cfg.mode if cfg.mode in {"local", "remote", "cloud"} else "local"
+    VISION.local_url = (cfg.local_url or "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434"
+    VISION.remote_url = (cfg.remote_url or "").strip()
+    VISION.cloud_url = (cfg.cloud_url or "").strip()
+    await broadcast("status", "ollama_vision:updated")
+    return await get_ollama_vision()
+
+# ---------- Style API (upload/save_url/build/reset) with no fallback ----------
 
 def detect_image_format(data: bytes) -> Optional[str]:
     """
@@ -1664,10 +1761,16 @@ def _sanitize_filename(name: str) -> str:
     return base + ext
 
 async def _maybe_await(fn, *args, **kwargs):
+    # Await coroutine objects or callables that return coroutines
     if asyncio.iscoroutinefunction(fn):
         return await fn(*args, **kwargs)
+    # If fn is a normal function but returns a coroutine, await it
+    res = fn(*args, **kwargs)
+    if asyncio.iscoroutine(res):
+        return await res
+    # Offload sync CPU-bound work
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
+    return await loop.run_in_executor(None, lambda: res)
 
 class SaveUrlRequest(BaseModel):
     url: HttpUrl
@@ -1684,13 +1787,19 @@ class SaveUrlResponse(UploadResponse):
 class StyleBuildRequest(BaseModel):
     content_positive: Optional[str] = None
     style_text_prompt: Optional[str] = None
-    reference_source: Optional[str] = Field(default=None, description="local_file|url_file|none")
+    reference_source: Optional[str] = Field(default=None, description="local_file|url_file|none|url")
     reference_id: Optional[str] = None
     use_local_style_features: bool = True
     use_ollama_vision: bool = False
     deactivate_all_styles: bool = False
     target_backend_name: Optional[str] = Field(default=None, description="comfy_local|comfy_remote|comfy_cloud|pollinations")
     ollama_vision_mode: Optional[str] = Field(default="local", description="local|remote|cloud")
+    # Additional URLs passed through to style_engine (if it supports them)
+    ollama_vision_local_url: Optional[str] = None
+    ollama_vision_remote_url: Optional[str] = None
+    ollama_vision_cloud_url: Optional[str] = None
+    # Optional convenience field some UIs might send (not required):
+    reference_url: Optional[str] = None
 
 class StyleBuildResponse(BaseModel):
     style_positive: str
@@ -1792,7 +1901,7 @@ def _sanitize_for_style_engine(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Ensure compatibility with StyleEngineRequest:
     - target_backend_name must be a non-empty string
-    - remove ollama_vision_mode if the model forbids extras
+    - remove or map extra keys if the engine model forbids them
     """
     payload = dict(payload)
     # Ensure target_backend_name
@@ -1800,20 +1909,24 @@ def _sanitize_for_style_engine(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(tbn, str) or not tbn.strip():
         payload["target_backend_name"] = _infer_target_backend_name()
 
+    # Try to validate against engine's pydantic model if present
     model = getattr(style_engine, "StyleEngineRequest", None) if style_engine else None
     if model is None:
-        payload.pop("ollama_vision_mode", None)
+        # Fallback: keep extra fields; some engines accept dict freestyle
         return payload
 
     valid_keys = set(getattr(model, "model_fields", {}).keys()) if hasattr(model, "model_fields") else None
     if valid_keys:
-        to_drop = [k for k in payload.keys() if k not in valid_keys]
-        for k in to_drop:
-            payload.pop(k, None)
+        # Pass through vision URLs if they exist in the model; else drop
+        for k in list(payload.keys()):
+            if k not in valid_keys:
+                payload.pop(k, None)
+
         if "target_backend_name" not in payload or not payload["target_backend_name"]:
             payload["target_backend_name"] = _infer_target_backend_name()
     else:
-        payload.pop("ollama_vision_mode", None)
+        # Unknown model field schema; keep as-is
+        pass
 
     try:
         model(**payload)
@@ -1822,17 +1935,24 @@ def _sanitize_for_style_engine(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 def _to_engine_req(req: StyleBuildRequest) -> Any:
+    # Inject current vision settings into the request so the engine can route properly
     raw = {
         "content_positive": req.content_positive,
         "style_text_prompt": req.style_text_prompt,
         "reference_source": req.reference_source,
         "reference_id": req.reference_id,
         "use_local_style_features": req.use_local_style_features,
-        "use_ollama_vision": req.use_ollama_vision,
+        "use_ollama_vision": req.use_ollama_vision and VISION.enabled,
         "deactivate_all_styles": req.deactivate_all_styles,
-        "target_backend_name": req.target_backend_name,
-        "ollama_vision_mode": (req.ollama_vision_mode or "local"),
+        "target_backend_name": req.target_backend_name or _infer_target_backend_name(),
+        "ollama_vision_mode": (req.ollama_vision_mode or VISION.mode or "local"),
+        # Provide URLs from global VISION unless explicitly overridden by payload
+        "ollama_vision_local_url": (req.ollama_vision_local_url or VISION.local_url),
+        "ollama_vision_remote_url": (req.ollama_vision_remote_url or VISION.remote_url),
+        "ollama_vision_cloud_url": (req.ollama_vision_cloud_url or VISION.cloud_url),
+        "reference_url": getattr(req, "reference_url", None),
     }
+
     payload = _sanitize_for_style_engine(raw)
     model = getattr(style_engine, "StyleEngineRequest", None) if style_engine else None
     if style_engine is None or model is None:
@@ -1849,13 +1969,80 @@ def _from_engine_result(res: Any) -> StyleBuildResponse:
         d = res.dict() if hasattr(res, "dict") else dict(res)
     except Exception:
         d = {}
-    return StyleBuildResponse(
-        style_positive=d.get("style_positive") or "",
-        style_components=d.get("style_components") or {},
-        merged_prompt_preview=d.get("merged_prompt_preview"),
-        reference_used=d.get("reference_used") or d.get("ref_used"),
-        info=d.get("info"),
-    )
+    # Normalize response fields against style_engine.StyleEngineResponse when possible
+    try:
+        style_positive = d.get("style_positive") or ""
+        reference_used = d.get("reference_id") or d.get("reference_used") or d.get("ref_used")
+        # Optional: include raw notes/warnings in style_components for transparency
+        style_components = {
+            "notes": d.get("notes") or [],
+            "warnings": d.get("warnings") or [],
+            "vision_text_used": d.get("vision_text_used") or "",
+            "descriptors_used": d.get("descriptors_used") or [],
+            "reference_file_saved": d.get("reference_file_saved"),
+            "content_positive": d.get("content_positive") or "",
+            "style_text_prompt_raw": d.get("style_text_prompt_raw") or "",
+        }
+        return StyleBuildResponse(
+            style_positive=(style_positive or "").strip(),
+            style_components=style_components,
+            merged_prompt_preview=None,
+            reference_used=reference_used,
+            info=None,
+        )
+    except Exception:
+        return StyleBuildResponse(
+            style_positive=d.get("style_positive") or "",
+            style_components=d.get("style_components") or {},
+            merged_prompt_preview=d.get("merged_prompt_preview"),
+            reference_used=d.get("reference_used") or d.get("ref_used"),
+            info=d.get("info"),
+        )
+
+def _extract_reference_text_from_engine_result(res: Any) -> Optional[str]:
+    """
+    Best-effort extraction of a human-readable descriptor for the reference image analysis.
+    We try common attributes used by style_engine:
+      - vision_text_used
+      - reference_text
+      - descriptors / keywords joined
+    """
+    try:
+        # Prefer exact attributes on object
+        for attr in ("vision_text_used", "reference_text"):
+            if hasattr(res, attr):
+                val = getattr(res, attr)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+        # If dict-like
+        if isinstance(res, dict):
+            for k in ("vision_text_used", "reference_text"):
+                val = res.get(k)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            # Join fallback lists if present
+            for k in ("descriptors_used", "descriptors", "keywords"):
+                arr = res.get(k)
+                if isinstance(arr, (list, tuple)):
+                    txt = ", ".join(str(x).strip() for x in arr if str(x).strip())
+                    if txt:
+                        return txt
+        # If pydantic-like
+        if hasattr(res, "model_dump"):
+            d = res.model_dump()
+            for k in ("vision_text_used", "reference_text"):
+                val = d.get(k)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            for k in ("descriptors_used", "descriptors", "keywords"):
+                arr = d.get(k)
+                if isinstance(arr, (list, tuple)):
+                    txt = ", ".join(str(x).strip() for x in arr if str(x).strip())
+                    if txt:
+                        return txt
+    except Exception:
+        pass
+    return None
 
 def _call_build_styles_compat(req_obj: Any) -> Any:
     """
@@ -1871,60 +2058,108 @@ def _call_build_styles_compat(req_obj: Any) -> Any:
         params = list(sig.parameters.values())
     except Exception:
         params = []
-    try:
-        if len(params) >= 2:
-            print(f"[STYLE] calling build_styles(req, refs_dir)")
-            return fn(req_obj, REFS_DIR)
-        else:
-            print(f"[STYLE] calling build_styles(req)")
-            return fn(req_obj)
-    except TypeError as e:
-        print(f"[STYLE] build_styles signature TypeError: {e}. Retrying with req only.")
-        return fn(req_obj)
-
-def _fallback_style_positive(style_text_prompt: Optional[str]) -> str:
-    """
-    Conservative fallback ensuring visible 'comic/cartoon' style.
-    """
-    base_tokens = [
-        "comic style", "hand-drawn", "cel shading", "bold black outlines",
-        "flat colors", "high contrast", "inked lines", "cartoonish"
-    ]
-    user_tokens = [t.strip() for t in (style_text_prompt or "").split(",") if t.strip()]
-    merged = base_tokens + user_tokens
-    seen = set()
-    dedup = []
-    for t in merged:
-        key = t.lower()
-        if key not in seen:
-            seen.add(key)
-            dedup.append(t)
-    return ", ".join(dedup)
+    # Always return a coroutine to be awaited by caller
+    async def _call():
+        try:
+            if len(params) >= 2:
+                print(f"[STYLE] calling build_styles(req, refs_dir)")
+                return await fn(req_obj, REFS_DIR)  # type: ignore[misc]
+            else:
+                print(f"[STYLE] calling build_styles(req)")
+                return await fn(req_obj)  # type: ignore[misc]
+        except TypeError as e:
+            print(f"[STYLE] build_styles signature TypeError: {e}. Retrying with req only.")
+            return await fn(req_obj)  # type: ignore[misc]
+    return _call()
 
 @app.post("/api/style/build", response_model=StyleBuildResponse)
 async def api_style_build(req: StyleBuildRequest = Body(...)):
+    """
+    Build style string using the style_engine if available. No fallback is applied:
+    - If engine returns empty: we keep it empty.
+    - If engine returns non-empty: we store and use it as-is.
+    The global STATE.style_positive is updated accordingly (None when empty/whitespace).
+
+    Additional behavior enforced by style policy:
+    - If deactivate_all_styles=True, style_text_prompt and reference analysis are ignored.
+    - If deactivate_all_styles=False and style_text_prompt is non-empty, it has priority over reference-derived keywords.
+
+    New in this version (server-side safeguard):
+    - If deactivate_all_styles=True but new inputs are present in the request (style_text_prompt or reference),
+      we force deactivate_all_styles=False for this single request (auto-reactivation), so UX remains robust
+      even if the UI sends a stale deactivate flag.
+
+    New in this version (visibility tweak):
+    - We persist engine-provided reference descriptor text (if any) in STATE.reference_text and later
+      append it at the end of image prompts as "Ref: ...".
+    """
     if style_engine is None:
         return JSONResponse({"error": "style_engine_unavailable"}, status_code=500)
     try:
-        print(f"[STYLE] build request (raw): {req.model_dump()}")
+        req_dict = req.model_dump()
+        print(f"[STYLE] build request (raw): {req_dict}")
+
+        # Server-side safeguard: detect "new inputs"
+        has_new_style = bool((req.style_text_prompt or "").strip())
+        has_new_reference = (
+            (req.reference_source in {"local_file", "url", "url_file"}) and
+            (bool(req.reference_id) or bool(getattr(req, "reference_url", None)))
+        )
+
+        # Compute and potentially override deactivate for this request
+        effective_deactivate = bool(req.deactivate_all_styles)
+        if effective_deactivate and (has_new_style or has_new_reference):
+            # Honor the user's new inputs by auto-reactivating styles for this call.
+            req.deactivate_all_styles = False
+            effective_deactivate = False
+
+        # Add a soft info note when we auto-reactivated despite a 'deactivate' flag in the request
+        info_note: Dict[str, Any] = {}
+        if bool(req_dict.get("deactivate_all_styles")) and not effective_deactivate and (has_new_style or has_new_reference):
+            info_note["auto_reactivated"] = True
+            info_note["reason"] = "New style inputs detected while deactivate_all_styles=True; using inputs and enabling styles for this request."
+
+        # Build engine request after applying the safeguard
         eng_req = _to_engine_req(req)
         _log_style_engine_fn("build_styles")
 
         try:
+            # IMPORTANT: await the async function (wrapped to always be a coroutine)
             res = await _maybe_await(_call_build_styles_compat, eng_req)
         except Exception as e:
             tb = traceback.format_exc()
             print(f"[STYLE] build_styles failed: {e}\n{tb}")
             return JSONResponse({"error": "style_build_failed", "reason": f"{e}"}, status_code=502)
 
+        # Map to API result
         api_res = _from_engine_result(res)
-        if not api_res.style_positive.strip():
-            api_res.style_positive = _fallback_style_positive(req.style_text_prompt)
-            print(f"[STYLE] engine returned empty style; using fallback len={len(api_res.style_positive)}")
-        else:
-            print(f"[STYLE] build result: style_positive_len={len(api_res.style_positive)} ref_used={api_res.reference_used}")
 
-        STATE.style_positive = (api_res.style_positive or "").strip() or None
+        # No fallback: keep exactly what the engine produced (possibly empty)
+        normalized = (api_res.style_positive or "").strip()
+        api_res.style_positive = normalized  # reflect trimmed value in response
+        STATE.style_positive = normalized or None
+
+        # Extract human-readable vision/reference text (if present) for transparent "Ref: ..." appending later
+        try:
+            ref_text = _extract_reference_text_from_engine_result(res)
+            if ref_text:
+                STATE.reference_text = ref_text
+            else:
+                # If deactivate is true or no reference info, we reset reference_text to avoid stale appends
+                if effective_deactivate or not has_new_reference:
+                    STATE.reference_text = None
+        except Exception:
+            # Be safe: do not crash style build on extraction issues
+            pass
+
+        # Attach local info note if any
+        if info_note:
+            if api_res.info and isinstance(api_res.info, dict):
+                api_res.info.update(info_note)
+            else:
+                api_res.info = info_note
+
+        print(f"[STYLE] build result: len={len(normalized)} ref_used={api_res.reference_used} deactivate={effective_deactivate} ref_text_len={len((STATE.reference_text or ''))}")
         await broadcast("status", "style_positive:updated")
         return api_res
     except Exception as e:
@@ -1935,6 +2170,7 @@ async def api_style_build(req: StyleBuildRequest = Body(...)):
 @app.post("/api/style/reset")
 async def api_style_reset():
     STATE.style_positive = None
+    STATE.reference_text = None
     await broadcast("status", "style_positive:updated")
     return {"ok": True, "style_positive": ""}
 
@@ -1958,21 +2194,10 @@ if __name__ == "__main__":
 
 
 
+
 # image_backend.py
 # -*- coding: utf-8 -*-
 # Production-ready image backend adapters for ComfyUI (local/LAN/remote) and Pollinations (cloud)
-#
-# This release keeps Pollinations fully decoupled and working as before, while adding
-# an opt-in, safe auto-discovery for ComfyUI that:
-#   - Prefers the configured APP_COMFY_HOST first (default 127.0.0.1)
-#   - Optionally tries APP_COMFY_FALLBACK_HOSTS and AUTO_DISCOVERY_SUBNETS if local is down
-#   - Enforces APP_ALLOW_REMOTE_BACKENDS and APP_ALLOWED_SUBNETS before connecting
-#   - Caches the first discovered host for the process lifetime (no repeated scans)
-#
-# IMPORTANT:
-# - Pollinations path never triggers ComfyUI discovery and is not affected by it.
-# - ComfyUI discovery only runs if IMAGE_BACKEND=comfyui and APP_DISABLE_COMFYUI=0.
-# - 0.0.0.0 is a bind address only; clients must use a real IP like 192.168.188.24.
 
 from __future__ import annotations
 
@@ -2302,8 +2527,8 @@ class PollinationsConfig(BaseModel):
     def require_cloud_enabled(self) -> None:
         if not self.allow_cloud:
             raise RuntimeError("Cloud image backend not allowed (set ALLOW_CLOUD_IMAGE_BACKEND=1 to enable)")
-        if not self.secret:
-            raise RuntimeError("POLLINATIONS_SECRET missing in environment")
+        if not self.secret and self.use_v1:
+            raise RuntimeError("POLLINATIONS_SECRET missing in environment for v1 API")
 
 def _size_from_wh(width: int, height: int) -> str:
     if width > 0 and height > 0:
@@ -2324,7 +2549,7 @@ def _build_pollinations_image_url(api_base: str, prompt: str, model: Optional[st
         params["width"] = str(width)
     if height and height > 0:
         params["height"] = str(height)
-    if nlogo:
+    if nologo:
         params["nologo"] = "true"
     if seed is not None:
         params["seed"] = str(seed)
@@ -2477,7 +2702,7 @@ class PollinationsBackend(ImageBackend):
 
 
 # ============================================================
-# ComfyUI (Local/LAN) with optional Auto-Discovery
+# ComfyUI (Local/LAN) with optional Auto-Discovery + Style Mapping
 # ============================================================
 
 class ComfyConfig(BaseModel):
@@ -2494,10 +2719,16 @@ class ComfyConfig(BaseModel):
     comfy_output_dir: Optional[Path] = Field(default_factory=lambda: (Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).resolve() if _env_str("APP_COMFY_OUTPUT_DIR", "") else None))
     negative: str = Field(default_factory=lambda: _env_str("APP_COMFY_NEGATIVE", "text, watermark, logo, low quality, blurry, bad anatomy"))
 
+    # Node IDs for default single-encode workflows
     node_id_positive: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_POS", "2"))
     node_id_negative: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_NEG", "3"))
     node_id_latent: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_LATENT", "4"))
     node_id_ksampler: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_KSAMPLER", "5"))
+
+    # Optional style-aware workflow IDs
+    node_id_style_positive: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_STYLE_POS", "8"))  # CLIPTextEncode (Style)
+    node_id_conditioning_combine: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_COND_COMBINE", "9"))  # ConditioningCombine
+    style_weight: float = Field(default_factory=lambda: _env_float("APP_COMFY_STYLE_WEIGHT", 1.8))
 
     # Discovery (opt-in, decoupled from Pollinations)
     auto_discovery_enable: bool = Field(default_factory=lambda: _env_bool01("AUTO_DISCOVERY_ENABLE", 1))
@@ -2541,6 +2772,12 @@ class LocalComfyBackend(ImageBackend):
         self._samplers_cache: Optional[Set[str]] = None
         self._active_host: Optional[str] = None
         self._discovery_done: bool = False
+
+        # Optional per-request overrides: can be set by caller before generate()
+        self.request_style_text: Optional[str] = None
+        self.request_style_weight: Optional[float] = None
+
+    # ----- Discovery / probing -----
 
     async def _probe_history(self, host: str, port: int, timeout: httpx.Timeout) -> bool:
         try:
@@ -2706,6 +2943,8 @@ class LocalComfyBackend(ImageBackend):
             return "euler_ancestral"
         return n
 
+    # ----- Workflow parsing/mutation helpers -----
+
     def _load_prompt_file(self) -> dict:
         data = json.loads(self.cfg.workflow_path.read_text(encoding="utf-8"))
         if "prompt" in data and isinstance(data["prompt"], dict):
@@ -2720,6 +2959,10 @@ class LocalComfyBackend(ImageBackend):
         return nodes
 
     def _override_text_nodes(self, prompt_dict: dict, positive: str, negative: str) -> tuple[bool, bool]:
+        """
+        Legacy single-encode mapping: set positive into node_id_positive and negative into node_id_negative;
+        fallback: first two CLIPTextEncode nodes if configured IDs are absent.
+        """
         pos_set = False
         neg_set = False
 
@@ -2755,6 +2998,41 @@ class LocalComfyBackend(ImageBackend):
 
         return pos_set, neg_set
 
+    def _override_style_nodes(self, prompt_dict: dict, style_text: Optional[str]) -> tuple[bool, Optional[str]]:
+        """
+        Style-aware mapping:
+        - If node_id_style_positive exists and is CLIPTextEncode: set its 'text' to style_text (if provided).
+        - If node_id_conditioning_combine exists and has 'strength', optionally set it to style_weight/request override.
+        Returns (style_set, info_message).
+        """
+        if not style_text:
+            return False, None
+
+        style_set = False
+        info = None
+
+        node_style = prompt_dict.get(self.cfg.node_id_style_positive)
+        if isinstance(node_style, dict) and node_style.get("class_type") == "CLIPTextEncode":
+            inputs = node_style.get("inputs")
+            if isinstance(inputs, dict) and "text" in inputs:
+                inputs["text"] = style_text
+                style_set = True
+        else:
+            return False, "style_node_missing"
+
+        # Optional ConditioningCombine weight
+        node_combine = prompt_dict.get(self.cfg.node_id_conditioning_combine)
+        if isinstance(node_combine, dict) and (node_combine.get("class_type") or "").lower().startswith("conditioning"):
+            combine_inputs = node_combine.get("inputs", {})
+            if isinstance(combine_inputs, dict) and "strength" in combine_inputs:
+                wt = self.request_style_weight if (self.request_style_weight is not None) else self.cfg.style_weight
+                try:
+                    combine_inputs["strength"] = float(wt)
+                    info = f"style_weight_set:{wt}"
+                except Exception:
+                    info = "style_weight_invalid"
+        return style_set, info
+
     def _override_dimensions_in_prompt(self, prompt_dict: dict, width: int, height: int) -> None:
         node_latent = prompt_dict.get(self.cfg.node_id_latent)
         if isinstance(node_latent, dict):
@@ -2787,6 +3065,28 @@ class LocalComfyBackend(ImageBackend):
                     if "height" in inputs:
                         inputs["height"] = height
 
+    def _override_sampling_params(self, prompt_dict: dict, steps: Optional[int], cfg: Optional[float], sampler_name: Optional[str]) -> None:
+        """
+        Best-effort override of KSampler inputs if present in workflow.
+        """
+        for node in prompt_dict.values():
+            if not isinstance(node, dict):
+                continue
+            cls = str(node.get("class_type") or node.get("class", "")).strip().lower()
+            if "ksampler" in cls:
+                inputs = node.get("inputs", {})
+                if not isinstance(inputs, dict):
+                    continue
+                if steps is not None and "steps" in inputs:
+                    inputs["steps"] = int(steps)
+                if cfg is not None and "cfg" in inputs:
+                    try:
+                        inputs["cfg"] = float(cfg)
+                    except Exception:
+                        pass
+                if sampler_name and "sampler_name" in inputs:
+                    inputs["sampler_name"] = sampler_name
+
     def _copy_latest_from_comfy(self, since_ts: float) -> Optional[Path]:
         src_dir = self.cfg.comfy_output_dir
         if not src_dir or not src_dir.exists():
@@ -2809,11 +3109,32 @@ class LocalComfyBackend(ImageBackend):
         except Exception:
             return None
 
-    async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative: str | None = None) -> Path:
+    # ----- Public API -----
+
+    async def generate(
+        self,
+        prompt: str,
+        width: int | None = None,
+        height: int | None = None,
+        negative: str | None = None,
+        style_text: Optional[str] = None,
+        style_weight: Optional[float] = None
+    ) -> Path:
+        """
+        Generate via ComfyUI.
+        - prompt: content prompt (required)
+        - negative: negative prompt (optional; env fallback exists)
+        - style_text: optional separate style prompt to inject into a dedicated CLIPTextEncode (Style) node, if present
+        - style_weight: optional override for ConditioningCombine.strength
+        """
         if self.cfg.disabled:
             raise RuntimeError("ComfyUI disabled (APP_DISABLE_COMFYUI=1)")
         if not self.cfg.workflow_path.exists():
             raise RuntimeError(f"workflow_not_found: {self.cfg.workflow_path}")
+
+        # Allow per-request style overrides
+        self.request_style_text = (style_text or self.request_style_text)
+        self.request_style_weight = (style_weight if style_weight is not None else self.request_style_weight)
 
         await self._ensure_host()
         host = self._active_host or self.cfg.host
@@ -2836,19 +3157,55 @@ class LocalComfyBackend(ImageBackend):
 
         prompt_dict = self._load_prompt_file()
         clip_nodes_before = self._find_clip_nodes(prompt_dict)
+
+        # Dimensions and sampling params
         self._override_dimensions_in_prompt(prompt_dict, width=w, height=h)
+        self._override_sampling_params(prompt_dict, steps=self.cfg.steps, cfg=self.cfg.cfg, sampler_name=sampler)
 
         pos_text = (prompt or "").strip()
         neg_text = (negative or self.cfg.negative or "").strip()
 
+        # Legacy mapping (content + negative)
         pos_set, neg_set = self._override_text_nodes(prompt_dict, positive=pos_text, negative=neg_text)
 
+        # Style mapping (if style node exists)
+        style_info_log = ""
+        style_set = False
+        if self.request_style_text:
+            style_set, style_info = self._override_style_nodes(prompt_dict, style_text=self.request_style_text)
+            if style_info:
+                style_info_log = style_info
+
+        # Fallback: if no style node, append style to positive prompt (to not lose user intent)
+        if self.request_style_text and not style_set:
+            # Inject only if not already included
+            if self.request_style_text.lower() not in pos_text.lower():
+                # Try to locate the actual positive node used and append; else just update node_id_positive
+                node_pos = prompt_dict.get(self.cfg.node_id_positive)
+                style_suffix = f" Style: {self.request_style_text}"
+                if isinstance(node_pos, dict) and node_pos.get("class_type") == "CLIPTextEncode":
+                    inputs = node_pos.get("inputs", {})
+                    if isinstance(inputs, dict) and "text" in inputs and isinstance(inputs["text"], str):
+                        inputs["text"] = (inputs["text"] or "") + style_suffix
+                        pos_set = True
+                else:
+                    # as last resort, scan first CLIP
+                    clip_nodes = self._find_clip_nodes(prompt_dict)
+                    if clip_nodes:
+                        inputs = clip_nodes[0].get("inputs", {})
+                        if isinstance(inputs, dict) and "text" in inputs and isinstance(inputs["text"], str):
+                            inputs["text"] = (inputs["text"] or "") + style_suffix
+                            pos_set = True
+            style_info_log = style_info_log or "style_appended_to_positive"
+
         clip_count = len(clip_nodes_before)
-        print(f"[COMFY WORKFLOW] host={host} pos_set={pos_set} neg_set={neg_set} clip_nodes={clip_count} "
-              f"size={w}x{h} sampler={sampler} pos_sample='{pos_text[:96]}' neg_sample='{neg_text[:96]}'")
+        print(f"[COMFY WORKFLOW] host={host} pos_set={pos_set} neg_set={neg_set} style_set={style_set} "
+              f"clip_nodes={clip_count} size={w}x{h} sampler={sampler} "
+              f"pos_sample='{pos_text[:96]}' style_text='{(self.request_style_text or '')[:72]}' "
+              f"neg_sample='{neg_text[:96]}' style_info='{style_info_log or ''}'")
 
         if clip_count == 0:
-            raise RuntimeError("workflow_missing_CLIPTextEncode_nodes: no CLIPTextEncode nodes found; cannot set positive/negative text")
+            raise RuntimeError("workflow_missing_CLIPTextEncode_nodes: no CLIPTextEncode nodes found; cannot set positive/negative/style text")
         if not neg_set:
             print("[WARN] Negative prompt node not matched by configured IDs; used fallback if possible. "
                   "Verify APP_COMFY_NODE_NEG or workflow structure.")
@@ -2858,13 +3215,13 @@ class LocalComfyBackend(ImageBackend):
         images = await generate_from_prompt_dict(
             prompt_dict=prompt_dict,
             out_dir=self.out_dir,
-            positive_text=None,
-            negative_text=None,
-            width=None,
-            height=None,
-            steps=self.cfg.steps,
-            cfg=self.cfg.cfg,
-            sampler_name=sampler,
+            positive_text=None,   # already injected into nodes
+            negative_text=None,   # already injected into nodes
+            width=None,           # already set on latent nodes
+            height=None,          # already set on latent nodes
+            steps=None,           # already overridden in graph if possible
+            cfg=None,             # already overridden in graph if possible
+            sampler_name=None,    # already overridden in graph if possible
             scheduler=None,
             denoise=None,
             seed=None,
@@ -2912,6 +3269,7 @@ def build_image_backend() -> ImageBackend:
 # ---------------------------
 # Optional helper for controllers (post-LLM guard)
 # ---------------------------
+
 def merge_style_prompt(content_prompt: str, style_positive: Optional[str]) -> str:
     """
     Merge content prompt with optional style-positive.
@@ -2927,10 +3285,13 @@ def merge_style_prompt(content_prompt: str, style_positive: Optional[str]) -> st
     if style.lower() in content.lower():
         return content
     sep = " "
-    # Prefer a readable tag to help both backends/LLMs
     return f"{content}{sep}Style: {style}".strip()
 
 def inject_negatives_for_final_prompt(prompt: str, negative: str | None) -> str:
+    """
+    Optional helper to inline negative constraints into a text-only backend prompt.
+    Reuses the Pollinations keyword injection logic to keep consistent behavior.
+    """
     negative = (negative or "").strip()
     if not negative:
         return prompt
@@ -2939,603 +3300,14 @@ def inject_negatives_for_final_prompt(prompt: str, negative: str | None) -> str:
 
 
 
-
-#comfyui_bridge.py
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-from __future__ import annotations
-
-import asyncio
-import ipaddress
-import json
-import os
-import time
-import uuid
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Iterable
-from urllib.parse import urlencode, quote
-
-import httpx
-from pydantic import BaseModel, Field
-
-# -----------------------------
-# Env helpers & host policy
-# -----------------------------
-
-def _env_str(k: str, d: str = "") -> str:
-    return (os.getenv(k, d) or "").strip()
-
-def _env_bool01(k: str, d: int = 0) -> bool:
-    v = (os.getenv(k, str(d)) or "").strip().lower()
-    return v in {"1", "true", "yes", "on"}
-
-def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
-    try:
-        ip_addr = ipaddress.ip_address(ip)
-    except Exception:
-        return False
-    parts = [p.strip() for p in (subnets_str or "").replace(",", " ").split() if p.strip()]
-    for cidr in parts:
-        try:
-            net = ipaddress.ip_network(cidr, strict=False)
-            if ip_addr in net:
-                return True
-        except Exception:
-            continue
-    return False
-
-def _assert_image_backend_host_policy(host: str) -> None:
-    """
-    Privacy policy:
-    - Always allow loopback.
-    - Remote only if APP_ALLOW_REMOTE_BACKENDS=1 and optional subnets allowlist matches.
-    """
-    if host in {"127.0.0.1", "localhost"}:
-        return
-    allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
-    if not allow_remote:
-        raise AssertionError(f"Only localhost allowed, got {host}")
-    subnets = _env_str("APP_ALLOWED_SUBNETS", "")
-    if not subnets:
-        return
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        return
-    if not _is_in_allowed_subnets(host, subnets):
-        raise AssertionError(f"Remote host {host} not in allowed subnets ({subnets})")
-
-# Optional filesystem fallback when /view is unavailable or unsuitable (mounted output dir).
-_COMFY_OUTPUT_DIR: Optional[Path] = Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).resolve() if _env_str("APP_COMFY_OUTPUT_DIR", "") else None
-
-# -----------------------------
-# Connection / helpers
-# -----------------------------
-
-class ComfyConnection(BaseModel):
-    host: str = Field(default="127.0.0.1")
-    port: int = Field(default=8188)
-
-    @property
-    def base(self) -> str:
-        _assert_image_backend_host_policy(self.host)
-        return f"http://{self.host}:{self.port}"
-
-def _limits() -> httpx.Limits:
-    return httpx.Limits(max_keepalive_connections=8, max_connections=16, keepalive_expiry=30.0)
-
-def _timeout(total: float = 150.0) -> httpx.Timeout:
-    total = max(30.0, min(total, 300.0))
-    return httpx.Timeout(connect=5.0, read=total, write=8.0, pool=8.0)
-
-def _clamp_dim(v: Optional[int]) -> Optional[int]:
-    if v is None:
-        return None
-    x = int(v)
-    x = max(64, min(2048, x))
-    return x - (x % 8)
-
-def _select_view_mode(host: str) -> str:
-    """
-    Decide view mode: 'path' for local, 'query' for remote.
-    Override via APP_COMFY_FORCE_VIEW_MODE in {'auto','path','query'}.
-    """
-    override = _env_str("APP_COMFY_FORCE_VIEW_MODE", "auto").lower()
-    if override in {"path", "query"}:
-        return override
-    # auto
-    if host in {"127.0.0.1", "localhost"}:
-        return "path"
-    return "query"
-
-# -----------------------------
-# Prompt manipulation
-# -----------------------------
-
-def _ensure_api_prompt_dict(body: Dict[str, Any]) -> Dict[str, Any]:
-    if isinstance(body, dict) and "prompt" in body and isinstance(body["prompt"], dict):
-        return body
-    if isinstance(body, dict) and body:
-        if all(isinstance(k, str) and isinstance(v, dict) and "class_type" in v for k, v in body.items()):
-            return {"prompt": body}
-    raise RuntimeError("invalid_prompt_format: expected a 'prompt' dict or a node mapping")
-
-def _get_node(prompt: Dict[str, Any], node_id: str) -> Optional[Dict[str, Any]]:
-    n = prompt.get(node_id)
-    return n if isinstance(n, dict) else None
-
-def _set_input_if_present(node: Dict[str, Any], key: str, value: Any) -> None:
-    ins = node.get("inputs")
-    if isinstance(ins, dict) and key in ins:
-        ins[key] = value
-
-def override_prompt_inplace(
-    body: Dict[str, Any],
-    *,
-    positive_text: Optional[str] = None,
-    negative_text: Optional[str] = None,
-    width: Optional[int] = None,
-    height: Optional[int] = None,
-    steps: Optional[int] = None,
-    cfg: Optional[float] = None,
-    sampler_name: Optional[str] = None,
-    scheduler: Optional[str] = None,
-    denoise: Optional[float] = None,
-    seed: Optional[int] = None,
-    node_id_positive: str = "2",
-    node_id_negative: str = "3",
-    node_id_latent: str = "4",
-    node_id_ksampler: str = "5",
-) -> Dict[str, Any]:
-    payload = _ensure_api_prompt_dict(body)
-    prompt: Dict[str, Any] = payload["prompt"]
-
-    if positive_text is not None:
-        n2 = _get_node(prompt, node_id_positive)
-        if n2:
-            _set_input_if_present(n2, "text", positive_text)
-    if negative_text is not None:
-        n3 = _get_node(prompt, node_id_negative)
-        if n3:
-            _set_input_if_present(n3, "text", negative_text)
-
-    w = _clamp_dim(width) if width is not None else None
-    h = _clamp_dim(height) if height is not None else None
-    if w is not None or h is not None:
-        n4 = _get_node(prompt, node_id_latent)
-        if n4:
-            if w is not None:
-                _set_input_if_present(n4, "width", int(w))
-            if h is not None:
-                _set_input_if_present(n4, "height", int(h))
-
-    n5 = _get_node(prompt, node_id_ksampler)
-    if n5:
-        if steps is not None:
-            _set_input_if_present(n5, "steps", int(steps))
-        if cfg is not None:
-            _set_input_if_present(n5, "cfg", float(cfg))
-        if sampler_name is not None:
-            _set_input_if_present(n5, "sampler_name", sampler_name)
-        if scheduler is not None:
-            _set_input_if_present(n5, "scheduler", scheduler)
-        if denoise is not None:
-            _set_input_if_present(n5, "denoise", float(denoise))
-        if seed is not None:
-            _set_input_if_present(n5, "seed", int(seed))
-
-    return payload
-
-# -----------------------------
-# HTTP calls
-# -----------------------------
-
-async def _post_prompt(
-    client: httpx.AsyncClient,
-    base_url: str,
-    body: Dict[str, Any],
-) -> str:
-    delay = 0.8
-    last_exc: Optional[Exception] = None
-    for attempt in range(1, 5):
-        try:
-            r = await client.post(f"{base_url}/prompt", json=body)
-            if r.status_code == 400:
-                text = r.text[:300].replace("\n", " ")
-                raise RuntimeError(f"comfy_400: {text}")
-            r.raise_for_status()
-            j = r.json()
-            if not isinstance(j, dict):
-                raise RuntimeError(f"comfy_prompt_non_object: {type(j)}")
-            pid = j.get("prompt_id") or j.get("promptId") or j.get("id")
-            if not pid:
-                raise RuntimeError("comfy_no_prompt_id")
-            print(f"DEBUG comfy prompt_id: {pid}")
-            return str(pid)
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
-            last_exc = e
-            if attempt < 4:
-                await asyncio.sleep(delay)
-                delay *= 1.7
-                continue
-            break
-        except Exception:
-            raise
-    raise RuntimeError(f"comfy_post_prompt_failed: {last_exc}")
-
-def _node_maps_from_history_obj(history_json: Dict[str, Any], prompt_id: str) -> List[Dict[str, Any]]:
-    node_maps: List[Dict[str, Any]] = []
-    if isinstance(history_json, dict) and all(isinstance(v, dict) for v in history_json.values()):
-        node_maps.append(history_json)
-    entry = history_json.get(prompt_id)
-    if isinstance(entry, dict) and all(isinstance(v, dict) for v in entry.values()):
-        node_maps.append(entry)
-    if isinstance(entry, dict):
-        outputs = entry.get("outputs")
-        if isinstance(outputs, dict) and all(isinstance(v, dict) for v in outputs.values()):
-            node_maps.append(outputs)
-    seen_ids = set()
-    deduped: List[Dict[str, Any]] = []
-    for m in node_maps:
-        if id(m) in seen_ids:
-            continue
-        seen_ids.add(id(m))
-        deduped.append(m)
-    return deduped
-
-def _any_images_in_node_maps(node_maps: Iterable[Dict[str, Any]]) -> bool:
-    for node_map in node_maps:
-        for _, node in node_map.items():
-            if not isinstance(node, dict):
-                continue
-            outs = node.get("outputs")
-            if not isinstance(outs, dict):
-                continue
-            for outv in outs.values():
-                if isinstance(outv, dict) and isinstance(outv.get("images"), list) and outv["images"]:
-                    return True
-    return False
-
-async def _poll_history_ready(
-    client: httpx.AsyncClient,
-    base_url: str,
-    prompt_id: str,
-    max_wait_sec: float = 150.0,
-    poll_interval: float = 1.0,
-) -> Dict[str, Any]:
-    deadline = time.time() + max_wait_sec
-    last_payload: Optional[Dict[str, Any]] = None
-    while time.time() < deadline:
-        r = await client.get(f"{base_url}/history/{prompt_id}")
-        if r.status_code == 404:
-            await asyncio.sleep(poll_interval)
-            continue
-        r.raise_for_status()
-        j = r.json()
-        if not isinstance(j, dict):
-            await asyncio.sleep(poll_interval)
-            continue
-        last_payload = j
-        maps = _node_maps_from_history_obj(j, prompt_id)
-        if maps and _any_images_in_node_maps(maps):
-            return j
-        await asyncio.sleep(poll_interval)
-    try:
-        keys = list(last_payload.keys()) if isinstance(last_payload, dict) else "n/a"
-        print("DEBUG comfy history keys:", keys)
-        sample = json.dumps(last_payload or {}, ensure_ascii=False)[:2000]
-        print("DEBUG comfy history sample:", sample)
-    except Exception:
-        pass
-    raise TimeoutError(f"comfy_history_timeout (last_payload_keys={keys if isinstance(keys, list) else keys})")
-
-def _iter_image_descriptors_from_history(history_obj: Dict[str, Any], prompt_id: str) -> Iterable[Dict[str, Any]]:
-    maps = _node_maps_from_history_obj(history_obj, prompt_id)
-    for node_map in maps:
-        for _, node in node_map.items():
-            if not isinstance(node, dict):
-                continue
-            outs = node.get("outputs")
-            if not isinstance(outs, dict):
-                continue
-            for _, outv in outs.items():
-                if isinstance(outv, dict) and isinstance(outv.get("images"), list):
-                    yield outv
-
-def _build_view_candidates(folder_type: str, subfolder: str, filename: str) -> List[Tuple[str, str, str]]:
-    """
-    Build alternative (type, subfolder, filename) triples to try.
-    Used by both path and query modes.
-    """
-    sub = (subfolder or "").strip().strip("/")
-    candidates: List[Tuple[str, str, str]] = []
-    candidates.append((folder_type or "output", sub, filename))
-    if sub:
-        candidates.append((folder_type or "output", "", filename))
-    candidates.append(("temp", sub, filename))
-    if sub:
-        candidates.append(("temp", "", filename))
-    candidates.append(("output", "", filename))
-    seen = set()
-    uniq: List[Tuple[str, str, str]] = []
-    for t, s, f in candidates:
-        key = (t, s, f)
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append(key)
-    return uniq
-
-async def _download_via_view_path(
-    client: httpx.AsyncClient,
-    base_url: str,
-    folder_type: str,
-    subfolder: str,
-    filename: str,
-) -> bytes:
-    """
-    Download via legacy path style: /view/{type}/{subfolder}/{filename}
-    Tries multiple candidates; URL-encodes each segment.
-    """
-    filename = filename.strip().lstrip("/")
-    candidates = _build_view_candidates(folder_type, subfolder, filename)
-    last_exc: Optional[Exception] = None
-    for idx, (t, s, f) in enumerate(candidates, start=1):
-        seg_t = quote((t or "").strip(), safe="")
-        seg_s = quote((s or "").strip(), safe="") if s else ""
-        seg_f = quote((f or "").strip(), safe="")
-        path = f"/view/{seg_t}"
-        if seg_s:
-            path += f"/{seg_s}"
-        path += f"/{seg_f}"
-        url = f"{base_url}{path}"
-        delay = 0.2
-        for attempt in range(1, 3):
-            try:
-                print(f"DEBUG comfy GET[path] try#{attempt} cand#{idx}: {url}")
-                r = await client.get(url)
-                print(f"DEBUG comfy GET[path] status={r.status_code} bytes={len(r.content) if r.content else 0}")
-                r.raise_for_status()
-                data = r.content
-                if not data or len(data) < 256:
-                    raise RuntimeError("image_download_too_small")
-                return data
-            except Exception as e:
-                last_exc = e
-                if attempt < 2:
-                    await asyncio.sleep(delay)
-                    delay *= 2.0
-                else:
-                    break
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("image_download_failed_unknown_path")
-
-async def _download_via_view_query(
-    client: httpx.AsyncClient,
-    base_url: str,
-    folder_type: str,
-    subfolder: str,
-    filename: str,
-) -> bytes:
-    """
-    Download via query style: /api/view?filename=...&type=...&subfolder=...
-    Tries multiple (type,subfolder,filename) candidates; parameters are URL-encoded via urlencode.
-    """
-    filename = (filename or "").strip().lstrip("/")
-    candidates = _build_view_candidates(folder_type, subfolder, filename)
-    last_exc: Optional[Exception] = None
-    for idx, (t, s, f) in enumerate(candidates, start=1):
-        params = {
-            "filename": f,
-            "type": (t or "output"),
-            "subfolder": (s or ""),
-        }
-        qs = urlencode(params, safe="/")
-        url = f"{base_url}/api/view?{qs}"
-        delay = 0.2
-        for attempt in range(1, 3):
-            try:
-                print(f"DEBUG comfy GET[query] try#{attempt} cand#{idx}: {url}")
-                r = await client.get(url)
-                print(f"DEBUG comfy GET[query] status={r.status_code} bytes={len(r.content) if r.content else 0}")
-                r.raise_for_status()
-                data = r.content
-                if not data or len(data) < 256:
-                    raise RuntimeError("image_download_too_small")
-                return data
-            except Exception as e:
-                last_exc = e
-                if attempt < 2:
-                    await asyncio.sleep(delay)
-                    delay *= 2.0
-                else:
-                    break
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("image_download_failed_unknown_query")
-
-def _fs_fallback_read(folder_type: str, subfolder: str, filename: str) -> Optional[bytes]:
-    if _COMFY_OUTPUT_DIR is None:
-        return None
-    base = _COMFY_OUTPUT_DIR
-    sub = (subfolder or "").strip().strip("/")
-    if sub:
-        base = base / sub
-    f = base / filename
-    try:
-        if f.is_file():
-            return f.read_bytes()
-    except Exception:
-        return None
-    return None
-
-async def _download_images(
-    client: httpx.AsyncClient,
-    base_url: str,
-    history_obj: Dict[str, Any],
-    prompt_id: str,
-    out_dir: Path,
-    view_mode: str,
-) -> List[Path]:
-    """
-    Download images from history using either 'path' or 'query' mode.
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    saved: List[Path] = []
-    found_any = False
-
-    for outv in _iter_image_descriptors_from_history(history_obj, prompt_id):
-        images = outv.get("images", [])
-        if not isinstance(images, list) or not images:
-            continue
-        found_any = True
-        for item in images:
-            if not isinstance(item, dict):
-                continue
-            filename = (item.get("filename") or "").strip()
-            subfolder = item.get("subfolder", "")
-            folder_type = item.get("type", "output")
-            if not filename:
-                continue
-
-            delay = 0.8
-            data: Optional[bytes] = None
-            for attempt in range(1, 3):
-                try:
-                    if view_mode == "query":
-                        data = await _download_via_view_query(client, base_url, folder_type, subfolder, filename)
-                    else:
-                        data = await _download_via_view_path(client, base_url, folder_type, subfolder, filename)
-                    break
-                except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError):
-                    if attempt < 2:
-                        await asyncio.sleep(delay)
-                        delay *= 1.7
-                        continue
-                except Exception:
-                    # Fall through to FS fallback
-                    pass
-
-            if data is None:
-                data = _fs_fallback_read(folder_type, subfolder, filename)
-
-            if data is None:
-                print(f"DEBUG comfy: skip missing image filename='{filename}' type='{folder_type}' subfolder='{subfolder}'")
-                continue
-
-            suffix = Path(filename).suffix or ".png"
-            target = out_dir / f"img_{uuid.uuid4().hex}{suffix}"
-            target.write_bytes(data)
-            saved.append(target)
-
-    if not found_any:
-        print("DEBUG comfy: no images found in history object (iter yielded none).")
-
-    return saved
-
-# -----------------------------
-# Public entry point
-# -----------------------------
-
-async def generate_from_prompt_dict(
-    prompt_dict: Dict[str, Any],
-    out_dir: Path,
-    *,
-    positive_text: Optional[str] = None,
-    negative_text: Optional[str] = None,
-    width: Optional[int] = None,
-    height: Optional[int] = None,
-    steps: Optional[int] = None,
-    cfg: Optional[float] = None,
-    sampler_name: Optional[str] = None,
-    scheduler: Optional[str] = None,
-    denoise: Optional[float] = None,
-    seed: Optional[int] = None,
-    host: str = "127.0.0.1",
-    port: int = 8188,
-    max_wait_sec: float = 150.0,
-    poll_interval: float = 1.0,
-) -> List[Path]:
-    """
-    Submit a ComfyUI API prompt dict, poll history, and download images to out_dir.
-    Selects view mode automatically (path for local, query for remote) or via env override.
-    """
-    payload = override_prompt_inplace(
-        body=prompt_dict,
-        positive_text=positive_text,
-        negative_text=negative_text,
-        width=width,
-        height=height,
-        steps=steps,
-        cfg=cfg,
-        sampler_name=sampler_name,
-        scheduler=scheduler,
-        denoise=denoise,
-        seed=seed,
-    )
-
-    conn = ComfyConnection(host=host, port=port)
-    base = conn.base
-    view_mode = _select_view_mode(conn.host)
-    print(f"[COMFY VIEW MODE] {view_mode} (host={conn.host})")
-
-    async with httpx.AsyncClient(limits=_limits(), timeout=_timeout(max_wait_sec + 30)) as client:
-        prompt_id = await _post_prompt(client, base, payload)
-        history_obj = await _poll_history_ready(client, base, prompt_id, max_wait_sec=max_wait_sec, poll_interval=poll_interval)
-        images = await _download_images(client, base, history_obj, prompt_id, out_dir=Path(out_dir), view_mode=view_mode)
-    return images
-
-
 #Aktuelle style-engine.py
 
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-style-engine.py
-
-Purpose:
-- Provide a single, production-grade style enrichment module that:
-  - Accepts a free-form "style text prompt" from the UI
-  - Accepts an optional reference image either from local file upload or by downloading from a URL
-  - Optionally analyzes the reference locally (OpenCV/skimage) to extract style descriptors
-  - Optionally uses an Ollama Vision model to summarize the reference image into concise style text
-  - Returns additive "style_positive" text and structured details that the existing image_backend.py
-    can consume for prompt synthesis WITHOUT changing the existing negative prompt logic.
-
-Key design constraints:
-- Do NOT change existing negative prompt logic in image_backend.py. This engine only enriches positive style inputs.
-- Keep cloud access opt-in and policy-controlled (localhost by default; remote only if allowed by env).
-- Be fully async (I/O) and offload CPU-bound analysis to threads to avoid blocking the event loop.
-- Robust error handling and retries (for network operations).
-- Safe local file handling and URL downloads with type/size guards.
-
-Integration points:
-- FastAPI controller can expose /api/style/build that calls build_styles() with the user request data.
-- image_backend.py remains the "single source of truth" for final negative prompt composition.
-- The style_positive returned here should be merged additively into positive prompt synthesis in image_backend.py,
-  mirroring how the existing negative prompt blueprint is handled.
-
-Testing checklist (manual):
-1) Enable only style_text_prompt and verify it is appended to style_positive (no image).
-2) Upload a local reference image, enable "use_local_style_features", verify descriptors appended.
-3) Provide a reference image URL, enable "use_ollama_vision", verify concise vision text appended.
-4) Toggle "deactivate_all_styles" and confirm style_positive and all style-derived fields are empty.
-5) Confirm that Pollinations/Comfy generation still work with the additive style_positive combined by image_backend.py.
-
-Notes:
-- For Ollama Vision, ensure a compatible multimodal model is available (e.g., `llava:latest`, `moondream:latest`, `bakllava:latest`, etc.)
-  and that ollama serve is running. The API used is /api/generate with images: [base64-encoded content].
-
-"""
-
+# style_engine.py
 from __future__ import annotations
 
 import asyncio
 import base64
 import contextlib
-import io
 import mimetypes
 import os
 import re
@@ -3544,12 +3316,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import httpx
-from pydantic import BaseModel, Field, ConfigDict, field_validator, HttpUrl, ValidationError
-
-# Optional style features dependencies
-# We import lazily when used; helpers will raise friendly errors if unavailable
-# Required: opencv-python, scikit-image; sklearn is optional.
-
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 # =========================
 # Environment helpers
@@ -3582,21 +3349,15 @@ def _env_bool01(k: str, d: int = 0) -> bool:
 APP_IMAGE_WIDTH = _env_int("APP_IMAGE_WIDTH", 1280)
 APP_IMAGE_HEIGHT = _env_int("APP_IMAGE_HEIGHT", 720)
 
-# Reference directory where images are stored for subsequent use
-# We use the main outputs/images folder so UI can serve them via /static.
-# Optionally a subfolder for refs can be used; here we go with outputs/images/refs.
+# Reference directory used by the app UI (/static serves outputs/images)
 DEFAULT_REFS_DIR = Path(_env_str("APP_REFS_DIR", "./outputs/images/refs")).resolve()
 
-# Network and retry defaults (reuse existing app defaults if present)
+# HTTP retry/timeouts aligned with app.py defaults
 HTTP_TIMEOUT_SEC = float(_env_float("APP_OLLAMA_TIMEOUT_SEC", 90.0))
-HTTP_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 4)
+HTTP_MAX_RETRIES = int(_env_int("APP_OLLAMA_MAX_RETRIES", 4))
 HTTP_RETRY_BASE_DELAY = float(_env_float("APP_OLLAMA_RETRY_BASE_DELAY", 0.8))
 
-# Pollinations cloud policy (this module doesn't call their generation endpoints,
-# but may download a URL or later be extended; leave policy hints here)
-ALLOW_CLOUD_IMAGE_BACKEND = _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0)
-
-# Ollama Vision configuration
+# Vision defaults (local by default; policy can forbid remote)
 OLLAMA_HOST = _env_str("APP_OLLAMA_HOST", "127.0.0.1")
 OLLAMA_PORT = _env_int("APP_OLLAMA_PORT", 11434)
 OLLAMA_VISION_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
@@ -3608,24 +3369,24 @@ OLLAMA_VISION_TOP_K = _env_int("APP_OLLAMA_TOP_K", 40)
 OLLAMA_VISION_TOP_P = float(_env_float("APP_OLLAMA_TOP_P", 0.9))
 OLLAMA_VISION_REPEAT_PENALTY = float(_env_float("APP_OLLAMA_REPEAT_PENALTY", 1.1))
 
-# Vision remote/cloud policy:
-# - By default, enforce localhost only. Optional remote allowed flag:
+# Remote vision policy: disabled unless explicitly enabled
 APP_ALLOW_REMOTE_VISION = _env_bool01("APP_ALLOW_REMOTE_VISION", 0)
-APP_ALLOWED_SUBNETS_VISION = set((os.getenv("APP_ALLOWED_SUBNETS_VISION", "") or "").split()) - {""}
 
 # File download limits
 MAX_DOWNLOAD_BYTES = _env_int("APP_STYLE_MAX_DOWNLOAD_BYTES", 15_000_000)  # 15 MB
 ALLOWED_IMAGE_MIME = {
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-    "image/bmp",
-    "image/gif",
+    "image/jpeg", "image/png", "image/webp", "image/bmp", "image/gif",
 }
 
 # Feature toggles
 FEATURE_LOCAL_STYLE_ANALYSIS_DEFAULT = _env_bool01("FEATURE_LOCAL_STYLE_ANALYSIS_DEFAULT", 1)
 FEATURE_OLLAMA_VISION_DEFAULT = _env_bool01("FEATURE_OLLAMA_VISION_DEFAULT", 0)
+
+# Token caps per source to keep prompt concise and user-prioritized
+MAX_TOKENS_STYLE_TEXT = _env_int("STYLE_ENGINE_MAX_TOKENS_STYLE_TEXT", 40)
+MAX_TOKENS_VISION = _env_int("STYLE_ENGINE_MAX_TOKENS_VISION", 24)
+MAX_TOKENS_DESCRIPTORS = _env_int("STYLE_ENGINE_MAX_TOKENS_DESCRIPTORS", 12)
+MAX_TOKENS_FINAL = _env_int("STYLE_ENGINE_MAX_TOKENS_FINAL", 40)
 
 
 # =========================
@@ -3634,46 +3395,46 @@ FEATURE_OLLAMA_VISION_DEFAULT = _env_bool01("FEATURE_OLLAMA_VISION_DEFAULT", 0)
 
 class StyleEngineRequest(BaseModel):
     """
-    A single enriched-style build request. This module DOES NOT generate the image.
-    It only returns additive style prompt components and structured metadata that
-    image_backend.py can use in its existing synthesis pipeline.
+    Input to style builder. This module does NOT generate images.
+    It returns an additive style string plus metadata.
     """
     model_config = ConfigDict(extra="forbid")
 
-    # Core prompts (content-positive is the main user/LLM prompt outside styles)
     content_positive: str = Field(default="")
-    # New free-form style text prompt from UI (additive)
     style_text_prompt: str = Field(default="")
 
-    # Reference source selection
     reference_source: str = Field(default="none")  # "none" | "local_file" | "url"
-    # If "local_file": UI will POST a file; controller should save it by calling
-    #   style-engine.save_reference_file(bytes, filename) to get a reference_id,
-    #   then set reference_id here.
-    # If "url": controller sets reference_url here and we download it.
     reference_id: Optional[str] = Field(default=None)
     reference_url: Optional[str] = Field(default=None)
     reference_strength: float = Field(default=0.6, ge=0.0, le=1.0)
 
-    # Optional analysis toggles
     use_local_style_features: bool = Field(default=FEATURE_LOCAL_STYLE_ANALYSIS_DEFAULT)
     use_ollama_vision: bool = Field(default=FEATURE_OLLAMA_VISION_DEFAULT)
 
-    # UI kill switch for all styles
+    # UI "Reset styles" control: if true AND no new inputs supplied, clear styles.
+    # If true BUT new inputs are present in this same request (style_text or usable reference),
+    # we IGNORE the reset and apply the new inputs (auto-reactivation).
     deactivate_all_styles: bool = Field(default=False)
 
-    # Optional hints for later generation (not used here, passed-through to caller)
     width: Optional[int] = Field(default=None)
     height: Optional[int] = Field(default=None)
     seed: Optional[int] = Field(default=None)
 
-    # Which backend is targeted downstream (for reference only; no generation here)
-    target_backend_name: str = Field(default="comfyui")  # "comfyui" | "pollinations" | others
+    target_backend_name: str = Field(default="comfyui")
+
+    # Optional routing hints for Ollama Vision (provided by app; not strictly required)
+    ollama_vision_mode: Optional[str] = Field(default=None)  # "local" | "remote" | "cloud"
+    ollama_vision_local_url: Optional[str] = Field(default=None)
+    ollama_vision_remote_url: Optional[str] = Field(default=None)
+    ollama_vision_cloud_url: Optional[str] = Field(default=None)
 
     @field_validator("reference_source")
     @classmethod
     def _validate_source(cls, v: str) -> str:
         vv = (v or "").strip().lower()
+        # Legacy "url_file" maps to "url" for compatibility
+        if vv == "url_file":
+            vv = "url"
         if vv not in {"none", "local_file", "url"}:
             raise ValueError("reference_source must be one of: none | local_file | url")
         return vv
@@ -3681,28 +3442,23 @@ class StyleEngineRequest(BaseModel):
 
 class StyleEngineResponse(BaseModel):
     """
-    Result of style enrichment for downstream prompt synthesis.
-    - style_positive: additive style text to be merged into the positive prompt.
-    - negative_hint: optional text with negative style hints; NOT auto-injected.
-    - artifacts and metadata are included for UI and debugging.
+    Output: additive style text and metadata for transparency.
+    The caller (app/image_backend) merges style_positive with the content prompt.
     """
     model_config = ConfigDict(extra="ignore")
 
-    # Additive style content to be appended by image_backend.py
-    style_positive: str = Field(default="")
-
-    # The following fields are metadata for transparency and UI display:
+    style_positive: str = Field(default="")  # Final additive style tags
     descriptors_used: List[str] = Field(default_factory=list)
     vision_text_used: str = Field(default="")
-    reference_file_saved: Optional[str] = Field(default=None)  # local path
+    reference_file_saved: Optional[str] = Field(default=None)
     reference_id: Optional[str] = Field(default=None)
     warnings: List[str] = Field(default_factory=list)
     notes: List[str] = Field(default_factory=list)
 
-    # Passthrough (caller can use these to assemble final requests)
+    # passthrough
     content_positive: str = Field(default="")
     style_text_prompt_raw: str = Field(default="")
-    negative_hint: str = Field(default="")  # blueprint only; DO NOT auto-inject
+    negative_hint: str = Field(default="")  # blueprint only; not injected automatically
 
 
 # =========================
@@ -3710,7 +3466,7 @@ class StyleEngineResponse(BaseModel):
 # =========================
 
 class ReferenceStore:
-    """Local reference image store with strict filename handling."""
+    """Safe local store under DEFAULT_REFS_DIR."""
 
     def __init__(self, base_dir: Union[str, Path]) -> None:
         self.base = Path(base_dir).resolve()
@@ -3722,24 +3478,21 @@ class ReferenceStore:
             raise ValueError("empty name")
         if "/" in name or "\\" in name:
             raise ValueError("invalid path separator")
-        # Allow only safe characters to avoid traversal or script injection
         if not re.fullmatch(r"[A-Za-z0-9._\-]+", name):
             raise ValueError("illegal characters")
         return name
 
     def put(self, filename: str, data: bytes) -> Tuple[str, Path]:
-        """Store bytes under a sanitized filename; de-duplicate by suffix _N if needed."""
         if not isinstance(data, (bytes, bytearray)):
             raise ValueError("data must be bytes")
+        base_raw = Path(filename or "ref.png").name
         try:
-            base_raw = filename or "ref.png"
-            base = self._safe_basename(Path(base_raw).name)
+            base = self._safe_basename(base_raw)
         except Exception:
             base = "ref.png"
 
-        # Add default extension if missing
         if "." not in base:
-            base = base + ".png"
+            base += ".png"
 
         target = self.base / base
         if target.exists():
@@ -3755,8 +3508,8 @@ class ReferenceStore:
         return (target.name, target)
 
     def get_path(self, reference_id: str) -> Path:
-        base = self._safe_basename(reference_id)
-        p = (self.base / base).resolve()
+        safe = self._safe_basename(reference_id)
+        p = (self.base / safe).resolve()
         if p.parent != self.base or not p.exists() or not p.is_file():
             raise FileNotFoundError(f"reference not found: {reference_id}")
         return p
@@ -3784,8 +3537,10 @@ async def _get_with_retries(
     delay = float(base_delay)
     for attempt in range(1, int(max_retries) + 1):
         try:
-            return await client.get(url, headers=headers)
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+            r = await client.get(url, headers=headers)
+            r.raise_for_status()
+            return r
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
             last_exc = e
             if attempt >= max_retries:
                 break
@@ -3806,8 +3561,10 @@ async def _post_json_with_retries(
     delay = float(base_delay)
     for attempt in range(1, int(max_retries) + 1):
         try:
-            return await client.post(url, json=json, headers=headers)
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+            r = await client.post(url, json=json, headers=headers)
+            r.raise_for_status()
+            return r
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
             last_exc = e
             if attempt >= max_retries:
                 break
@@ -3823,7 +3580,7 @@ async def _post_json_with_retries(
 MAGIC_HEADERS = (
     b"\x89PNG",        # PNG
     b"\xFF\xD8\xFF",   # JPEG
-    b"RIFF",           # WEBP (requires 'WEBP' within first bytes)
+    b"RIFF",           # WEBP
     b"BM",             # BMP
     b"GIF87a",         # GIF
     b"GIF89a",         # GIF
@@ -3840,11 +3597,10 @@ def validate_image_bytes_minimal(data: bytes) -> None:
             raise ValueError("invalid WEBP magic")
         return
     if not any(head.startswith(m) for m in MAGIC_HEADERS):
-        # Allow unknown headers but warn (still accept to be format-agnostic)
+        # Permit unknown but warn, to be robust with broader formats
         print("[STYLE] unknown image magic header; continuing")
 
 def sniff_mime_from_bytes(data: bytes, fallback: str = "application/octet-stream") -> str:
-    # Heuristic by magic
     head = data[:16]
     if head.startswith(b"\x89PNG"):
         return "image/png"
@@ -3876,65 +3632,66 @@ def ensure_image_extension(name: str, mime: str) -> str:
 
 
 # =========================
-# Public reference helpers (to be called by controller)
+# Public reference helpers (controller-compat)
 # =========================
 
-async def save_reference_file(data: bytes, filename: str, refs_dir: Union[str, Path] = DEFAULT_REFS_DIR) -> Tuple[str, Path]:
+def ensure_dirs() -> None:
+    """Ensure refs dir exists and is writable."""
+    DEFAULT_REFS_DIR.mkdir(parents=True, exist_ok=True)
+    test = DEFAULT_REFS_DIR / ".__touch_test__"
+    test.write_text("ok", encoding="utf-8")
+    with contextlib.suppress(Exception):
+        test.unlink()
+
+async def save_reference_from_bytes(filename: str, data: bytes) -> Dict[str, str]:
     """
-    Save a reference image uploaded by the UI. Returns (reference_id, path).
-    Accepts any common image format; performs minimal validation and safe naming.
+    Save uploaded bytes to refs dir. Returns dict with reference_id, path, url_path.
     """
+    ensure_dirs()
     validate_image_bytes_minimal(data)
     mime = sniff_mime_from_bytes(data, fallback=mimetypes.guess_type(filename or "")[0] or "application/octet-stream")
     safe_name = Path(filename or "reference").name
     safe_name = re.sub(r"[^A-Za-z0-9._\-]", "_", safe_name)
     safe_name = ensure_image_extension(safe_name, mime)
-    store = ReferenceStore(refs_dir)
-    return store.put(safe_name, data)
+    store = ReferenceStore(DEFAULT_REFS_DIR)
+    rid, path = store.put(safe_name, data)
+    return {"reference_id": rid, "path": str(path), "url_path": f"/static/{Path(path).name}"}
 
-async def save_reference_from_url(url: str, refs_dir: Union[str, Path] = DEFAULT_REFS_DIR) -> Tuple[str, Path]:
+async def save_reference_from_url(url: str, filename_hint: Optional[str] = None) -> Dict[str, str]:
     """
-    Download an image by URL and store locally. Returns (reference_id, path).
-    Applies content-type and size restrictions to avoid abuse.
+    Download an image by URL and store locally. Returns same dict as save_reference_from_bytes.
     """
+    ensure_dirs()
     url = (url or "").strip()
     if not url or not (url.startswith("http://") or url.startswith("https://")):
         raise ValueError("invalid url")
 
     async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_generic(), follow_redirects=True, http2=True) as client:
-        # HEAD might be blocked; use GET and abort if content-length too large
-        resp = await _get_with_retries(client, url)
-        if resp.status_code >= 400:
-            raise RuntimeError(f"download error {resp.status_code}")
-
-        cl = int(resp.headers.get("Content-Length", "0") or "0")
+        r = await _get_with_retries(client, url)
+        # Basic size & type checks
+        cl = int(r.headers.get("Content-Length", "0") or "0")
         if cl and cl > MAX_DOWNLOAD_BYTES:
             raise ValueError(f"file too large: {cl} bytes")
-
-        ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-        if ctype and ctype not in ALLOWED_IMAGE_MIME:
-            # Some servers mislabel; still allow if magic is valid later
-            pass
-
-        data = resp.content
+        data = r.content
         if len(data) > MAX_DOWNLOAD_BYTES:
             raise ValueError(f"file too large after download: {len(data)} bytes")
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
 
     validate_image_bytes_minimal(data)
     mime = sniff_mime_from_bytes(data, fallback=ctype or "application/octet-stream")
-    filename = Path(httpx.URL(url).path or "reference").name or "reference"
-    filename = re.sub(r"[^A-Za-z0-9._\-]", "_", filename)
-    filename = ensure_image_extension(filename, mime)
-    store = ReferenceStore(refs_dir)
-    return store.put(filename, data)
+
+    name = filename_hint or Path(httpx.URL(url).path or "reference").name or "reference"
+    name = re.sub(r"[^A-Za-z0-9._\-]", "_", name)
+    name = ensure_image_extension(name, mime)
+
+    store = ReferenceStore(DEFAULT_REFS_DIR)
+    rid, path = store.put(name, data)
+    return {"reference_id": rid, "path": str(path), "url_path": f"/static/{Path(path).name}"}
 
 
 # =========================
-# Local style features (OpenCV + skimage)
+# Local style features (OpenCV + skimage), lazy
 # =========================
-
-# We inline essential parts of the previously separate style_features.py to keep a single-file module.
-# Import lazily to avoid import cost if not used.
 
 @dataclass
 class _StyleAnalysis:
@@ -3969,82 +3726,11 @@ def _lazy_import_cv_stack():
         _have_sklearn = False
     return cv2, np, canny, rgb2gray, silhouette_score, _have_sklearn
 
-def _base_descriptors_for_class(a: _StyleAnalysis) -> List[str]:
-    c = a.primary_class
-    d: List[str] = []
-
-    if c == "comic":
-        d.append("clear line art" if a.edge_coherence < 0.34 or a.edge_thickness_score < 0.03 else "bold outlines")
-        d.append("flat colors" if a.saturation_mean < 0.18 and a.saturation_std < 0.06 and a.color_clusters <= 5 else "balanced palette")
-        if a.contrast > 0.16:
-            d.append("high contrast")
-        if a.dot_pattern_score > 0.9:
-            d.append("screen-tone dots")
-        if a.hf_ratio < 1.1 and a.grain_score < 70.0:
-            d.append("clean finish")
-
-    elif c == "manga":
-        d += ["monochrome", "clear line art"]
-        if a.dot_pattern_score > 0.8:
-            d.append("halftone shading")
-        if a.contrast > 0.15:
-            d.append("high contrast")
-        if a.hf_ratio < 1.15:
-            d.append("clean finish")
-
-    elif c == "photo":
-        d.append("natural lighting")
-        if a.hf_ratio > 1.20:
-            d.append("fine detail")
-        d.append("smooth gradients")
-        if a.saturation_std > 0.1:
-            d.append("rich colors")
-        if a.bokeh_score > 0.30:
-            d.append("shallow depth of field")
-
-    elif c == "science illustration/infographic":
-        d += ["thin precise lines", "flat colors", "clean layout"]
-        if a.straight_line_score > 0.35:
-            d.append("geometric accuracy")
-        if a.saturation_std < 0.08:
-            d.append("limited palette")
-
-    elif c == "classical oil painting":
-        d += ["brush textures", "rich tones", "soft transitions"]
-        if a.brush_texture_score > 0.45:
-            d.append("impasto strokes")
-
-    elif c == "watercolor":
-        d += ["soft washes", "bleeding edges", "delicate tones"]
-        if a.saturation_mean < 0.2:
-            d.append("pastel palette")
-
-    elif c == "children sketches":
-        d += ["simple shapes", "thin uneven lines", "playful composition"]
-
-    elif c == "technical drawing/technical sketch":
-        d += ["precise straight lines", "monochrome", "high clarity"]
-
-    else:
-        d += ["loose strokes", "expressive lines", "dynamic texture"]
-
-    out: List[str] = []
-    for x in d:
-        if x not in out:
-            out.append(x)
-    return out[:5]
-
+# Condensed analysis consistent with user's provided version
 def _analyze_style(image_path: Path, debug: bool = False) -> _StyleAnalysis:
-    # Inline implementation adapted for single-file usage (condensed; behavior consistent)
     cv2, np, canny, rgb2gray, silhouette_score, _HAVE_SKLEARN = _lazy_import_cv_stack()
 
-    def _load_bgr(path: Path) -> "np.ndarray":
-        img = cv2.imread(str(path), cv2.IMREAD_COLOR)
-        if img is None:
-            raise FileNotFoundError(f"cannot read image: {path}")
-        return img
-
-    def _downscale(img: "np.ndarray", max_side: int = 640) -> "np.ndarray":
+    def _downscale(img, max_side=640):
         h, w = img.shape[:2]
         ms = max(h, w)
         if ms <= max_side:
@@ -4052,431 +3738,230 @@ def _analyze_style(image_path: Path, debug: bool = False) -> _StyleAnalysis:
         s = max_side / ms
         return cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
 
-    def _edge_metrics(bgr: "np.ndarray") -> Tuple[float, float, float]:
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        gray = _downscale(gray, 640)
-        edges = canny(gray.astype("float32") / 255.0, sigma=1.2)
-        edge_density = float(edges.mean())
+    bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise FileNotFoundError(f"cannot read image: {image_path}")
 
-        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-        mag = np.hypot(gx, gy) + 1e-6
-        ori = np.arctan2(gy, gx)
+    # Edges
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    gray_s = _downscale(gray, 640)
+    edges = canny(gray_s.astype("float32") / 255.0, sigma=1.2)
+    edge_density = float(edges.mean())
+    gx = cv2.Sobel(gray_s, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray_s, cv2.CV_32F, 0, 1, ksize=3)
+    mag = (gx * gx + gy * gy) ** 0.5 + 1e-6
+    ori = np.arctan2(gy, gx)
+    mask = (mag > (mag.mean() + mag.std()))
+    if int(mask.sum()) > 100:
+        ori_edges = ori[mask]
+        var_ori = float(np.var(np.sin(ori_edges)) + np.var(np.cos(ori_edges)))
+        edge_coherence = max(0.0, 1.0 - min(1.0, var_ori / 1.0))
+    else:
+        edge_coherence = 0.0
+    edges_u = (edges.astype("uint8") * 255)
+    dil = np.maximum(edges_u, cv2.dilate(edges_u, np.ones((3, 3), "uint8"), 1))
+    edge_thickness_score = float((dil > 0).mean() - edge_density)
 
-        mask = (mag > (mag.mean() + mag.std()))
-        if int(mask.sum()) > 100:
-            ori_edges = ori[mask]
-            var_ori = float(np.var(np.sin(ori_edges)) + np.var(np.cos(ori_edges)))
-            edge_coherence = max(0.0, 1.0 - min(1.0, var_ori / 1.0))
+    # Color stats + kmeans
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    s = hsv[:, :, 1].astype("float32") / 255.0
+    s_mean = float(s.mean())
+    s_std = float(s.std())
+    sample = _downscale(bgr, 480)
+    flat = sample.reshape(-1, 3).astype("float32")
+    if flat.shape[0] > 30000:
+        idx = np.random.choice(flat.shape[0], 30000, replace=False)
+        flat = flat[idx]
+    best_k = 3
+    best_sil = -1.0
+    prev_compact = None
+    for k in range(3, 9):
+        criteria = (cv2.TERM_CRITERIA_MAX_ITER + cv2.TERM_CRITERIA_EPS, 20, 1.0)
+        compactness, labels, centers = cv2.kmeans(flat, k, None, criteria, 2, cv2.KMEANS_PP_CENTERS)
+        if silhouette_score is not None:
+            try:
+                sub = flat
+                labs = labels.ravel()
+                if flat.shape[0] > 2000:
+                    ridx = np.random.choice(flat.shape[0], 2000, replace=False)
+                    sub = flat[ridx]
+                    labs = labs[ridx]
+                sil = float(silhouette_score(sub, labs, metric="euclidean"))  # type: ignore
+            except Exception:
+                sil = -1.0
         else:
-            edge_coherence = 0.0
+            sil = -1.0
+        if sil > best_sil:
+            best_sil = sil
+            best_k = k
+        if prev_compact is None:
+            prev_compact = compactness
+        else:
+            if compactness > prev_compact * 0.98:
+                break
+            prev_compact = compactness
 
-        edges_u = (edges.astype("uint8") * 255)
-        dil = cv2.dilate(edges_u, np.ones((3, 3), "uint8"), 1)
-        thickness_score = float((dil > 0).mean() - edge_density)
-        return edge_density, edge_coherence, thickness_score
+    # Contrast
+    gray_f = gray.astype("float32") / 255.0
+    contrast = float(gray_f.std())
 
-    def _estimate_silhouette_fallback(X: "np.ndarray", labels: "np.ndarray") -> float:
-        try:
-            labs = labels.reshape(-1)
-            ks = np.unique(labs)
-            if ks.size < 2:
-                return -0.05
-            cents = []
-            intras = []
-            for k in ks:
-                pts = X[labs == k]
-                if pts.size == 0:
-                    continue
-                c = pts.mean(axis=0)
-                cents.append(c)
-                d = np.linalg.norm(pts - c, axis=1).mean()
-                intras.append(d if np.isfinite(d) else 0.0)
-            if len(cents) < 2:
-                return -0.03
-            cents = np.vstack(cents)
-            dsum = 0.0
-            cnt = 0
-            for i in range(len(cents)):
-                for j in range(i + 1, len(cents)):
-                    dsum += float(np.linalg.norm(cents[i] - cents[j]))
-                    cnt += 1
-            inter = (dsum / cnt) if cnt else 0.0
-            intra = float(np.mean(intras)) if intras else 0.0
-            if intra <= 1e-6:
-                return 0.2
-            ratio = inter / intra
-            val = (ratio - 1.0) * 0.15
-            return float(np.clip(val, -0.1, 0.5))
-        except Exception:
-            return -0.05
+    # Grayscale ratio
+    b, g, r = cv2.split(bgr.astype("float32"))
+    diff = (abs(r - g) + abs(g - b) + abs(r - b)) / (3.0 * 255.0)
+    grayscale_ratio = float((diff < 0.03).mean())
 
-    def _color_metrics(bgr: "np.ndarray") -> Tuple[float, float, int, float]:
-        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-        s = hsv[:, :, 1].astype("float32") / 255.0
-        s_mean = float(s.mean())
-        s_std = float(s.std())
+    # Grain + HF ratio
+    gs = _downscale(gray_f, 512)
+    lap = cv2.Laplacian(gs, cv2.CV_32F)
+    grain = float(lap.var())
+    F = np.fft.fftshift(np.fft.fft2(gs))
+    mag = np.log1p(np.abs(F))
+    H, W = mag.shape
+    yy, xx = np.ogrid[:H, :W]
+    cy, cx = H // 2, W // 2
+    r = ((yy - cy) ** 2 + (xx - cx) ** 2) ** 0.5
+    hf_mask = (r > min(H, W) * 0.22) & (r < min(H, W) * 0.48)
+    lf_mask = (r < min(H, W) * 0.12)
+    hf_ratio = float(mag[hf_mask].mean() / (mag[lf_mask].mean() + 1e-6))
 
-        sample = _downscale(bgr, 480)
-        flat = sample.reshape(-1, 3).astype("float32")
-        if flat.shape[0] > 40000:
-            idx = np.random.choice(flat.shape[0], 40000, replace=False)
-            flat = flat[idx]
+    # Dot pattern
+    from skimage.color import rgb2gray as _rgb2gray  # type: ignore
+    gray_rgb = _rgb2gray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    grs = _downscale((gray_rgb * 255).astype("uint8"), 512).astype("float32") / 255.0
+    F2 = np.fft.fftshift(np.fft.fft2(grs))
+    mag2 = np.log1p(np.abs(F2))
+    H2, W2 = mag2.shape
+    yy2, xx2 = np.ogrid[:H2, :W2]
+    cy2, cx2 = H2 // 2, W2 // 2
+    r2 = ((yy2 - cy2) ** 2 + (xx2 - cx2) ** 2) ** 0.5
+    ring = (r2 > 26) & (r2 < 46)
+    neigh = ((r2 > 18) & (r2 < 24)) | ((r2 > 48) & (r2 < 56))
+    ring_mean = float(mag2[ring].mean())
+    neigh_mean = float(mag2[neigh].mean() + 1e-6)
+    dot_pattern_score = float(max(0.0, (ring_mean - neigh_mean) / (neigh_mean + 1e-6) * 3.0))
 
-        best_k = 3
-        best_sil = -1.0
-        prev_compact = None
-        for k in range(3, 9):
-            criteria = (cv2.TERM_CRITERIA_MAX_ITER + cv2.TERM_CRITERIA_EPS, 20, 1.0)
-            compactness, labels, _ = cv2.kmeans(flat, k, None, criteria, 2, cv2.KMEANS_PP_CENTERS)
-            if _HAVE_SKLEARN and silhouette_score is not None:
-                try:
-                    if flat.shape[0] > 2000:
-                        idx = np.random.choice(flat.shape[0], 2000, replace=False)
-                        sil = silhouette_score(flat[idx], labels[idx].ravel(), metric='euclidean')  # type: ignore
-                    else:
-                        sil = silhouette_score(flat, labels.ravel(), metric='euclidean')  # type: ignore
-                except Exception:
-                    sil = -1.0
-            else:
-                sil = _estimate_silhouette_fallback(flat, labels)
-
-            if sil > best_sil:
-                best_sil = sil
-                best_k = k
-
-            if prev_compact is None:
-                prev_compact = compactness
-            else:
-                if compactness > prev_compact * 0.98:
-                    break
-                prev_compact = compactness
-
-        return s_mean, s_std, int(best_k), float(best_sil)
-
-    def _contrast_metric(bgr: "np.ndarray") -> float:
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype("float32") / 255.0
-        return float(gray.std())
-
-    def _grayscale_ratio(bgr: "np.ndarray") -> float:
-        b, g, r = cv2.split(bgr.astype("float32"))
-        diff = (np.abs(r - g) + np.abs(g - b) + np.abs(r - b)) / (3.0 * 255.0)
-        return float((diff < 0.03).mean())
-
-    def _grain_and_hf(bgr: "np.ndarray") -> Tuple[float, float]:
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype("float32") / 255.0
-        g_small = _downscale((gray * 255).astype("uint8"), 512).astype("float32") / 255.0
-        lap = cv2.Laplacian(g_small, cv2.CV_32F)
-        grain = float(lap.var())
-
-        G = _downscale(gray, 512)
-        F = np.fft.fftshift(np.fft.fft2(G))
-        mag = np.log1p(np.abs(F))
-        H, W = mag.shape
-        yy, xx = np.ogrid[:H, :W]
-        cy, cx = H // 2, W // 2
-        r = np.hypot(yy - cy, xx - cx)
-        hf_mask = (r > min(H, W) * 0.22) & (r < min(H, W) * 0.48)
-        lf_mask = (r < min(H, W) * 0.12)
-        hf_ratio = float(mag[hf_mask].mean() / (mag[lf_mask].mean() + 1e-6))
-        return grain, hf_ratio
-
-    def _dot_pattern_score(bgr: "np.ndarray") -> float:
-        gray = rgb2gray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-        gray = _downscale((gray * 255).astype("uint8"), 512).astype("float32") / 255.0
-        F = np.fft.fftshift(np.fft.fft2(gray))
-        mag = np.log1p(np.abs(F))
-        H, W = mag.shape
-        yy, xx = np.ogrid[:H, :W]
-        cy, cx = H // 2, W // 2
-        r = np.hypot(yy - cy, xx - cx)
-        ring = (r > 26) & (r < 46)
-        neigh = ((r > 18) & (r < 24)) | ((r > 48) & (r < 56))
-        ring_mean = float(mag[ring].mean())
-        neigh_mean = float(mag[neigh].mean() + 1e-6)
-        z = (ring_mean - neigh_mean) / (neigh_mean + 1e-6)
-        return float(max(0.0, z * 3.0))
-
-    def _straight_line_score(bgr: "np.ndarray") -> float:
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        gray = _downscale(gray, 800)
-        edges = cv2.Canny(gray, 80, 160, apertureSize=3, L2gradient=True)
-        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=80, minLineLength=40, maxLineGap=3)
-        if lines is None or len(lines) == 0:
-            return 0.0
-        h, w = gray.shape
+    # Straight line score
+    edges_c = cv2.Canny(_downscale(gray, 800), 80, 160, apertureSize=3, L2gradient=True)
+    lines = cv2.HoughLinesP(edges_c, 1, 3.14159 / 180.0, threshold=80, minLineLength=40, maxLineGap=3)
+    if lines is None or len(lines) == 0:
+        straight_line_score = 0.0
+    else:
+        h, w = edges_c.shape
         per = float(h + w)
-        total_len = 0.0
+        total = 0.0
         for l in lines:
             x1, y1, x2, y2 = l[0]
-            total_len += float(np.hypot(x2 - x1, y2 - y1))
-        return float(min(1.0, total_len / (per * 15.0)))
+            total += float(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5)
+        straight_line_score = float(min(1.0, total / (per * 15.0)))
 
-    def _brush_texture_score(bgr: "np.ndarray") -> float:
-        lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
-        L = lab[:, :, 0].astype("float32") / 255.0
-        Ls = _downscale(L, 512)
-        g1 = cv2.GaussianBlur(Ls, (0, 0), 1.0)
-        g2 = cv2.GaussianBlur(Ls, (0, 0), 3.0)
-        dog = cv2.absdiff(g1, g2)
-        mean = cv2.blur(dog, (9, 9))
-        sq = cv2.blur(dog * dog, (9, 9))
-        var = sq - mean * mean
-        return float(np.clip(var.mean() * 50.0, 0.0, 1.0))
+    # Brush texture (DoG variance)
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
+    L = lab[:, :, 0].astype("float32") / 255.0
+    Ls = _downscale(L, 512)
+    g1 = cv2.GaussianBlur(Ls, (0, 0), 1.0)
+    g2 = cv2.GaussianBlur(Ls, (0, 0), 3.0)
+    dog = cv2.absdiff(g1, g2)
+    mean = cv2.blur(dog, (9, 9))
+    sq = cv2.blur(dog * dog, (9, 9))
+    var = sq - mean * mean
+    brush_texture_score = float(max(0.0, min(1.0, var.mean() * 50.0)))
 
-    def _bokeh_score(bgr: "np.ndarray") -> float:
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype("float32") / 255.0
-        gs = _downscale(gray, 512)
-        lap = cv2.Laplacian(gs, cv2.CV_32F)
-        sharp = cv2.GaussianBlur(lap * lap, (0, 0), 1.0)
-        h, w = sharp.shape
-        tiles = 6
-        th, tw = h // tiles, w // tiles
-        vals = []
-        for i in range(tiles):
-            for j in range(tiles):
-                patch = sharp[i*th:(i+1)*th, j*tw:(j+1)*tw]
-                if patch.size > 0:
-                    vals.append(float(patch.mean()))
-        vals = np.array(vals, dtype="float32")
-        if vals.size < 4:
-            return 0.0
-        v = float(np.std(vals))
-        return float(np.clip(v * 10.0, 0.0, 1.5))
+    # Bokeh (variance across tiles)
+    gs2 = _downscale(gray_f, 512)
+    lap2 = cv2.Laplacian(gs2, cv2.CV_32F)
+    sharp = cv2.GaussianBlur(lap2 * lap2, (0, 0), 1.0)
+    H3, W3 = sharp.shape
+    tiles = 6
+    th, tw = H3 // tiles, W3 // tiles
+    vals = []
+    for i in range(tiles):
+        for j in range(tiles):
+            patch = sharp[i*th:(i+1)*th, j*tw:(j+1)*tw]
+            if patch.size:
+                vals.append(float(patch.mean()))
+    import numpy as np  # type: ignore
+    v = float(np.std(np.array(vals, dtype="float32"))) if vals else 0.0
+    bokeh_score = float(max(0.0, min(1.5, v * 10.0)))
 
-    bgr = _load_bgr(image_path)
-
-    ed, ecoh, th = _edge_metrics(bgr)
-    s_mean, s_std, k, sil = _color_metrics(bgr)
-    contr = _contrast_metric(bgr)
-    gray_ratio = _grayscale_ratio(bgr)
-    grain, hf_ratio = _grain_and_hf(bgr)
-    dots = _dot_pattern_score(bgr)
-    straight_score = _straight_line_score(bgr)
-    brush_score = _brush_texture_score(bgr)
-    bokeh = _bokeh_score(bgr)
-
-    # Score classes (condensed; behavior closely mirrors provided version)
+    # Scoring simple heuristic classes (photo/comic/...); condensed
     photo = 0.0
-    if hf_ratio > 1.15:
-        photo += 0.55
-    if bokeh > 0.26:
-        photo += 0.30
-    if s_mean > 0.20 and s_std > 0.09:
-        photo += 0.18
-    if k >= 7:
-        photo += 0.12
-    if sil < 0.05:
-        photo += 0.08
-    if (hf_ratio > 1.15) and (bokeh > 0.26):
-        photo += 0.12
-    if contr > 0.17:
-        photo += 0.07
-    if grain > 80.0:
-        photo += 0.05
-    photo_like_gate = (
-        (1.07 <= hf_ratio <= 1.15) and
-        (bokeh >= 0.18 or contr >= 0.15) and
-        ((k >= 6) or (sil <= 0.08)) and
-        (straight_score < 0.18) and
-        not (ecoh > 0.28 and 0.012 < th < 0.060) and
-        (dots < 0.8)
-    )
-    if photo_like_gate:
-        photo += 0.20
-    photo_like_gate_relaxed = (
-        (hf_ratio < 1.00) and
-        (bokeh < 0.12) and
-        (k <= 4) and (sil >= 0.45) and
-        (s_mean >= 0.32) and (s_std >= 0.18) and
-        (straight_score < 0.12) and
-        (ecoh <= 0.06) and
-        (th >= 0.10) and
-        (dots < 0.6)
-    )
-    if photo_like_gate_relaxed:
-        photo += 0.32
-    if ecoh > 0.32 and 0.012 < th < 0.050 and bokeh < 0.22 and hf_ratio < 1.14:
-        photo -= 0.35
-    if (ecoh <= 0.06 and th >= 0.10 and hf_ratio < 0.95 and k <= 4 and sil >= 0.45):
-        photo -= 0.05
-    if dots > 1.1 and gray_ratio > 0.45:
-        photo -= 0.20
+    if hf_ratio > 1.15: photo += 0.55
+    if bokeh_score > 0.26: photo += 0.30
+    if s_mean > 0.20 and s_std > 0.09: photo += 0.18
+    if contrast > 0.17: photo += 0.07
     photo = max(0.0, photo)
 
     comic = 0.0
-    if ecoh >= 0.20 and 0.012 < th < 0.060 and hf_ratio < 1.12:
-        comic += 0.50
-    if bokeh < 0.22:
-        comic += 0.12
-    if k <= 7 and sil > 0.06:
-        comic += 0.10
-    if ed > 0.040:
-        comic += 0.06
-    if dots > 0.9:
-        comic += 0.08
-    if (ecoh <= 0.05 and k <= 4 and sil >= 0.45 and th >= 0.10 and hf_ratio < 0.95):
-        comic -= 0.16
-    if (hf_ratio > 1.15 and bokeh > 0.26) or (s_mean > 0.22 and s_std > 0.10 and k >= 7):
-        comic -= 0.08
-    if s_mean > 0.28 and s_std > 0.12 and k >= 7:
-        comic -= 0.10
-    if (0.16 <= s_mean <= 0.42) and (0.12 <= s_std <= 0.35) and (4 <= k <= 7) \
-       and (th >= 0.10) and (ecoh <= 0.10) and (bokeh < 0.24) and (hf_ratio < 1.10) \
-       and (straight_score < 0.10) and (dots < 1.1):
-        comic += 0.24
+    if edge_coherence >= 0.20 and 0.012 < edge_thickness_score < 0.060 and hf_ratio < 1.12: comic += 0.50
+    if bokeh_score < 0.22: comic += 0.12
+    if edge_density > 0.040: comic += 0.06
+    if dot_pattern_score > 0.9: comic += 0.08
     comic = max(0.0, comic)
 
     manga = 0.0
-    if gray_ratio > 0.60 and ed > 0.032 and ecoh > 0.24 and hf_ratio < 1.08:
-        manga += 0.60
-    if dots > 1.0:
-        manga += 0.15
-    if s_mean > 0.15:
-        manga -= 0.10
+    if grayscale_ratio > 0.60 and edge_density > 0.032 and edge_coherence > 0.24 and hf_ratio < 1.08: manga += 0.60
+    if dot_pattern_score > 1.0: manga += 0.15
     manga = max(0.0, manga)
 
-    child_sketch = 0.0
-    if s_mean < 0.16:
-        child_sketch += 0.20
-    else:
-        child_sketch -= 0.15
-    if k <= 4:
-        child_sketch += 0.15
-    else:
-        child_sketch -= 0.10
-    if hf_ratio < 1.06:
-        child_sketch += 0.15
-    else:
-        child_sketch -= 0.15
-    if th < 0.016:
-        child_sketch += 0.15
-    else:
-        child_sketch -= 0.10
-    if ed > 0.030 and ecoh < 0.18:
-        child_sketch += 0.20
-    else:
-        child_sketch -= 0.10
-    if bokeh > 0.22 or (s_mean > 0.18 and s_std > 0.08):
-        child_sketch -= 0.25
-    child_sketch = max(0.0, child_sketch)
-
-    oil = 0.0
-    if brush_score > 0.46:
-        oil += 0.30
-    if hf_ratio < 1.26 and s_std > 0.06:
-        oil += 0.18
-    if contr > 0.12:
-        oil += 0.10
-    if sil < 0.07 and k >= 5:
-        oil += 0.12
-    if hf_ratio > 1.18:
-        oil -= 0.14
-    if bokeh > 0.30:
-        oil -= 0.12
-    if s_mean > 0.20 and s_std > 0.09:
-        oil -= 0.08
-    if k >= 7:
-        oil -= 0.08
-    oil = max(0.0, oil)
-
-    sci_infog = 0.0
-    if ecoh > 0.36:
-        sci_infog += 0.30
-    if sil > 0.12 and k <= 6:
-        sci_infog += 0.20
-    if straight_score > 0.28:
-        sci_infog += 0.35
-    if s_std < 0.09:
-        sci_infog += 0.15
-    poster_like = (
-        (ecoh <= 0.06) and
-        (th >= 0.10) and
-        (hf_ratio < 0.90) and
-        (k <= 4) and
-        (sil >= 0.45) and
-        (s_mean >= 0.32) and
-        (s_std >= 0.18) and
-        (straight_score < 0.12) and
-        (dots < 0.6)
-    )
-    if poster_like:
-        sci_infog += 0.28
-        comic = max(0.0, comic - 0.12)
-    sci_infog = max(0.0, sci_infog)
-
-    watercolor = 0.0
-    if s_mean < 0.22 and s_std < 0.07:
-        watercolor += 0.30
-    if th < 0.018 and ed < 0.04:
-        watercolor += 0.25
-    if hf_ratio < 1.12:
-        watercolor += 0.20
-    if sil < 0.08 and k <= 6:
-        watercolor += 0.25
-    watercolor = max(0.0, watercolor)
-
-    technical = 0.0
-    if straight_score > 0.32:
-        technical += 0.45
-    if ecoh > 0.32:
-        technical += 0.25
-    if (gray_ratio > 0.45) or (s_std < 0.06):
-        technical += 0.20
-    if ed > 0.028 and th < 0.02:
-        technical += 0.10
-    technical = max(0.0, technical)
-
-    scribble = 0.0
-    if s_mean < 0.14 and s_std < 0.055 and k <= 4:
-        scribble += 0.22
-    if ed > 0.052 and ecoh < 0.18 and th < 0.018:
-        scribble += 0.20
-    if hf_ratio < 1.06:
-        scribble += 0.15
-    if bokeh < 0.16:
-        scribble += 0.08
-
-    photo_like = int(hf_ratio > 1.15) + int(bokeh > 0.26) + int(s_mean > 0.20 and s_std > 0.09) + int(k >= 7)
-    comic_like = int(ecoh >= 0.20) + int(0.012 < th < 0.060) + int(hf_ratio < 1.12) + int(bokeh < 0.22)
-    if photo_like >= 2:
-        scribble -= 0.30
-    if comic_like >= 3 and s_mean >= 0.16:
-        scribble -= 0.25
-    scribble = max(0.0, scribble)
+    child_sketch = max(0.0, (0.2 if s_mean < 0.16 else 0.0) + (0.15 if hf_ratio < 1.06 else 0.0))
 
     scores = {
+        "photo": float(min(1.0, photo)),
         "comic": float(min(1.0, comic)),
         "manga": float(min(1.0, manga)),
-        "photo": float(min(1.0, photo)),
-        "science illustration/infographic": float(min(1.0, sci_infog)),
-        "classical oil painting": float(min(1.0, oil)),
-        "watercolor": float(min(1.0, watercolor)),
         "children sketches": float(min(1.0, child_sketch)),
-        "technical drawing/technical sketch": float(min(1.0, technical)),
-        "scribble/sketches": float(min(1.0, scribble)),
     }
     primary = max(scores, key=scores.get)
-
     return _StyleAnalysis(
-        edge_density=ed,
-        edge_coherence=ecoh,
-        edge_thickness_score=th,
+        edge_density=edge_density,
+        edge_coherence=edge_coherence,
+        edge_thickness_score=edge_thickness_score,
         saturation_mean=s_mean,
         saturation_std=s_std,
-        color_clusters=k,
-        color_silhouette=sil,
-        contrast=contr,
-        grayscale_ratio=gray_ratio,
+        color_clusters=best_k,
+        color_silhouette=best_sil,
+        contrast=contrast,
+        grayscale_ratio=grayscale_ratio,
         grain_score=grain,
         hf_ratio=hf_ratio,
-        dot_pattern_score=dots,
-        straight_line_score=straight_score,
-        brush_texture_score=brush_score,
-        bokeh_score=bokeh,
+        dot_pattern_score=dot_pattern_score,
+        straight_line_score=straight_line_score,
+        brush_texture_score=brush_texture_score,
+        bokeh_score=bokeh_score,
         class_scores=scores,
         primary_class=primary,
     )
+
+def _base_descriptors_for_class(a: _StyleAnalysis) -> List[str]:
+    c = a.primary_class
+    out: List[str] = []
+    if c == "photo":
+        out += ["natural lighting", "smooth gradients"]
+        if a.hf_ratio > 1.20: out.append("fine detail")
+        if a.bokeh_score > 0.30: out.append("shallow depth of field")
+        if a.saturation_std > 0.1: out.append("rich colors")
+    elif c == "comic":
+        out += ["bold outlines" if a.edge_thickness_score >= 0.03 else "clear line art"]
+        out.append("flat colors" if a.saturation_mean < 0.18 and a.saturation_std < 0.06 and a.color_clusters <= 5 else "balanced palette")
+        if a.contrast > 0.16: out.append("high contrast")
+        if a.dot_pattern_score > 0.9: out.append("screen-tone dots")
+    elif c == "manga":
+        out += ["monochrome", "clear line art"]
+        if a.dot_pattern_score > 0.8: out.append("halftone shading")
+        if a.contrast > 0.15: out.append("high contrast")
+    elif c == "children sketches":
+        out += ["simple shapes", "thin uneven lines", "playful composition"]
+    else:
+        out += ["clean finish"]
+    # deduplicate with order
+    dedup: List[str] = []
+    seen: set[str] = set()
+    for t in out:
+        tl = t.lower()
+        if tl not in seen:
+            seen.add(tl)
+            dedup.append(t)
+    return dedup[:6]
 
 async def _extract_style_descriptors_async(image_path: Path, debug: bool = False) -> List[str]:
     def _work() -> List[str]:
@@ -4497,11 +3982,9 @@ VISION_SYS_PROMPT = (
 )
 
 def _validate_vision_policy(url: str) -> None:
-    # Default policy: force localhost unless explicitly allowed
     if APP_ALLOW_REMOTE_VISION:
-        # Optional subnet checks would be implemented in the caller-side host controls.
         return
-    # Enforce localhost access only
+    # Enforce localhost if remote vision not allowed
     if not (url.startswith("http://127.0.0.1:") or url.startswith("http://localhost:")):
         raise PermissionError("Remote Ollama vision access is disabled by policy (APP_ALLOW_REMOTE_VISION=0).")
 
@@ -4509,21 +3992,27 @@ def _b64_from_file(path: Path) -> str:
     data = path.read_bytes()
     return base64.b64encode(data).decode("ascii")
 
-async def _ollama_vision_describe(path: Path) -> str:
-    """
-    Call Ollama /api/generate with 'images' containing the base64 image.
-    Returns a concise comma-separated style description.
-    """
-    model = OLLAMA_VISION_MODEL
-    url = f"{OLLAMA_VISION_URL.rstrip('/')}/api/generate"
-    _validate_vision_policy(url)
+def _tokenize(text: str) -> List[str]:
+    parts = [t.strip(" ,.;-") for t in (text or "").split(",")]
+    return [t for t in parts if t]
 
+def _retokenize_limit(text: str, limit: int) -> str:
+    toks = _tokenize(text)
+    return ", ".join(toks[:max(0, limit)])
+
+async def _ollama_vision_describe(path: Path, mode_url: Optional[str] = None) -> str:
+    """
+    Use Ollama /api/generate with 'images' to extract compact comma-separated style tags.
+    mode_url can override default OLLAMA_VISION_URL (app may pass via request).
+    """
+    url_base = (mode_url or OLLAMA_VISION_URL).rstrip("/")
+    _validate_vision_policy(url_base)
+    url = f"{url_base}/api/generate"
     img_b64 = await asyncio.to_thread(_b64_from_file, path)
-    prompt = "Describe the visual style of this image in compact, comma-separated tags."
 
     body = {
-        "model": model,
-        "prompt": prompt,
+        "model": OLLAMA_VISION_MODEL,
+        "prompt": "Describe the visual style of this image in compact, comma-separated tags.",
         "images": [img_b64],
         "options": {
             "temperature": OLLAMA_VISION_TEMPERATURE,
@@ -4538,59 +4027,58 @@ async def _ollama_vision_describe(path: Path) -> str:
     }
 
     async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_generic(), follow_redirects=True, http2=True) as client:
-        resp = await _post_json_with_retries(client, url, json=body)
-        if resp.status_code >= 400:
-            raise RuntimeError(f"Ollama vision error {resp.status_code}: {resp.text[:512]}")
-        js = resp.json()
-        # Ollama /api/generate returns {"response": "...", "done": true, ...}
+        r = await _post_json_with_retries(client, url, json=body)
+        js = r.json()
         text = (js.get("response") or "").strip()
-        # Normalize: keep only compact comma-separated tags
         text = re.sub(r"\s+", " ", text)
-        # Split by commas, trim and deduplicate
         tags = [t.strip(" ,.;-") for t in text.split(",") if t.strip(" ,.;-")]
         out: List[str] = []
-        seen = set()
+        seen: set[str] = set()
         for t in tags:
             tl = t.lower()
             if tl not in seen:
-                out.append(t)
                 seen.add(tl)
-        return ", ".join(out[:20])
+                out.append(t)
+        return ", ".join(out[:MAX_TOKENS_VISION])
 
 
 # =========================
 # Style fusion helpers
 # =========================
 
-def _dedup_join(parts: List[str]) -> str:
+def _dedup_ordered_tokens(parts: List[str]) -> List[str]:
+    """
+    Split by commas, trim and deduplicate preserving order across multiple inputs.
+    """
     out: List[str] = []
     seen: set[str] = set()
     for p in parts:
-        pp = (p or "").strip().strip(",;.")
-        if not pp:
+        if not p:
             continue
-        # Split by commas to normalize granular tags
-        tokens = [t.strip() for t in re.split(r"[;,]", pp) if t.strip()]
+        tokens = [t.strip() for t in re.split(r",", p) if t.strip()]
         for t in tokens:
             tl = t.lower()
             if tl not in seen:
                 seen.add(tl)
                 out.append(t)
-    # Keep concise
-    return ", ".join(out[:40])
+    return out
+
+def _limit_join(tokens: List[str], limit: int) -> str:
+    return ", ".join(tokens[:max(0, limit)])
 
 def _sanitize_style_text(text: str) -> str:
     t = (text or "").strip()
-    # Avoid prefixes or meta sentences; keep tags concise
     t = re.sub(r"\s+", " ", t)
-    return t
+    # Remove leading phrases like "style:" or similar
+    t = re.sub(r"^(style|stil)[:\s-]+", "", t, flags=re.I)
+    # Cap tokens to avoid dominance
+    return _retokenize_limit(t, MAX_TOKENS_STYLE_TEXT)
 
 def _apply_deactivate_all_styles(resp: StyleEngineResponse) -> None:
     resp.style_positive = ""
     resp.descriptors_used = []
     resp.vision_text_used = ""
-    resp.notes.append("All style inputs deactivated by user.")
-    # Keep passthrough fields for transparency
+    resp.notes.append("All style inputs deactivated (reset).")
 
 
 # =========================
@@ -4599,15 +4087,28 @@ def _apply_deactivate_all_styles(resp: StyleEngineResponse) -> None:
 
 async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEFAULT_REFS_DIR) -> StyleEngineResponse:
     """
-    Build additive style text (style_positive) and metadata from:
-    - free-form style_text_prompt
-    - optional reference image (local file or URL)
-    - optional local style analysis (OpenCV/skimage)
-    - optional Ollama Vision summary
+    Build additive style text from:
+      1) User style text (priority source)
+      2) Ollama Vision tags (if enabled and reference provided)
+      3) Local descriptors from image analysis (if enabled and reference provided)
 
-    This function DOES NOT generate images. It prepares style inputs for image_backend.py,
-    which remains responsible for final prompt synthesis (including negative prompts).
+    Merge policy:
+      - Order-preserving deduplication across sources
+      - Per-source token caps: style_text (40), vision (24), descriptors (12)
+      - Final cap MAX_TOKENS_FINAL (40)
+      - No synthetic fallback: if inputs are empty or disabled, result can be empty
+
+    Reset policy (deactivate_all_styles):
+      - If deactivate_all_styles==True AND no new inputs (no style text, no usable reference) in this request:
+          -> clear styles (reset) and return empty style_positive
+      - If deactivate_all_styles==True BUT new inputs are present in this request:
+          -> ignore reset and apply new inputs (auto-reactivate)
+
+    Remote vision policy:
+      - If APP_ALLOW_REMOTE_VISION=0, only localhost URLs are permitted
+      - Otherwise, remote/cloud URLs are allowed
     """
+    ensure_dirs()
     resp = StyleEngineResponse(
         content_positive=(req.content_positive or "").strip(),
         style_text_prompt_raw=(req.style_text_prompt or "").strip(),
@@ -4616,63 +4117,135 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
     # Resolve reference (if any)
     resolved_path: Optional[Path] = None
     if req.reference_source == "local_file":
-        # Expect reference_id provided (previously saved via save_reference_file)
         if req.reference_id:
             try:
                 store = ReferenceStore(refs_dir)
-                resolved_path = store.get_path(req.reference_id)
+                p = store.get_path(req.reference_id)
+                resolved_path = p
                 resp.reference_id = req.reference_id
-                resp.reference_file_saved = str(resolved_path)
+                resp.reference_file_saved = str(p)
             except Exception as e:
                 resp.warnings.append(f"local reference not found: {e}")
         else:
             resp.warnings.append("reference_id missing for local_file source")
-
     elif req.reference_source == "url":
         if req.reference_url:
             try:
-                rid, rpath = await save_reference_from_url(req.reference_url, refs_dir=refs_dir)
-                resolved_path = rpath
-                resp.reference_id = rid
-                resp.reference_file_saved = str(rpath)
+                saved = await save_reference_from_url(req.reference_url, filename_hint=None)
+                resp.reference_id = saved.get("reference_id")
+                spath = saved.get("path")
+                if spath:
+                    resolved_path = Path(spath)
+                resp.reference_file_saved = spath
             except Exception as e:
                 resp.warnings.append(f"download failed: {e}")
         else:
             resp.warnings.append("reference_url missing for url source")
+    else:
+        resp.notes.append("No reference image provided.")
 
-    # Collect style parts
-    style_parts: List[str] = []
-    if req.style_text_prompt:
-        style_parts.append(_sanitize_style_text(req.style_text_prompt))
+    # Determine whether this request carries new inputs
+    has_new_style_text = bool((req.style_text_prompt or "").strip())
+    has_new_reference = resolved_path is not None
+    has_new_inputs = has_new_style_text or has_new_reference
 
-    # Optional: local style analysis
-    if req.use_local_style_features and resolved_path is not None:
-        try:
-            descriptors = await _extract_style_descriptors_async(resolved_path, debug=False)
-            if descriptors:
-                resp.descriptors_used = descriptors
-                style_parts.append(", ".join(descriptors))
-        except Exception as e:
-            resp.warnings.append(f"local style analysis failed: {e}")
-
-    # Optional: Ollama vision
-    if req.use_ollama_vision and resolved_path is not None:
-        try:
-            vision_text = await _ollama_vision_describe(resolved_path)
-            if vision_text:
-                resp.vision_text_used = vision_text
-                style_parts.append(vision_text)
-        except PermissionError as pe:
-            resp.warnings.append(str(pe))
-        except Exception as e:
-            resp.warnings.append(f"ollama vision failed: {e}")
-
-    # Deduplicate and finalize style_positive
-    resp.style_positive = _dedup_join(style_parts)
-
-    # Deactivate all styles (kill-switch)
-    if req.deactivate_all_styles:
+    # If deactivate requested and NO new inputs in this very request -> perform reset and return early
+    if req.deactivate_all_styles and not has_new_inputs:
         _apply_deactivate_all_styles(resp)
+        resp.notes.append("Deactivate applied (no new inputs in request).")
+        return resp
+    elif req.deactivate_all_styles and has_new_inputs:
+        resp.notes.append("Deactivate requested but new inputs detected; applying new styles (auto-reactivate).")
+
+    # Collect style parts in priority order
+    style_parts_in_order: List[str] = []
+
+    # 1) User style text
+    if has_new_style_text:
+        st = _sanitize_style_text(req.style_text_prompt)
+        if st:
+            style_parts_in_order.append(st)
+            resp.notes.append(f"Applied style_text_prompt (up to {MAX_TOKENS_STYLE_TEXT} tokens).")
+    else:
+        resp.notes.append("No style_text_prompt provided.")
+
+    # 2) Ollama vision (only if reference is available)
+    if req.use_ollama_vision:
+        if resolved_path is None:
+            resp.notes.append("Ollama vision requested but no reference image resolved.")
+        else:
+            # Decide URL based on hints; app supplies via request for "remote" or "cloud"
+            ov_mode_url = None
+            mode = (req.ollama_vision_mode or "local").lower()
+            if mode in {"remote", "cloud"}:
+                ov_mode_url = (req.ollama_vision_remote_url or req.ollama_vision_cloud_url or req.ollama_vision_local_url or OLLAMA_VISION_URL)
+            else:
+                ov_mode_url = (req.ollama_vision_local_url or OLLAMA_VISION_URL)
+            try:
+                txt = await _ollama_vision_describe(resolved_path, mode_url=ov_mode_url)
+                if txt:
+                    resp.vision_text_used = _retokenize_limit(txt, MAX_TOKENS_VISION)
+                    style_parts_in_order.append(resp.vision_text_used)
+                    resp.notes.append(f"Ollama vision used via {ov_mode_url} (mode={mode}, max {MAX_TOKENS_VISION} tokens).")
+                else:
+                    resp.notes.append("Ollama vision returned empty text.")
+            except PermissionError as pe:
+                resp.warnings.append(str(pe))
+            except Exception as e:
+                resp.warnings.append(f"ollama vision failed: {e}")
+    else:
+        resp.notes.append("Ollama vision disabled by request.")
+
+    # 3) Local descriptors (only if reference is available)
+    if req.use_local_style_features:
+        if resolved_path is None:
+            resp.notes.append("Local style features requested but no reference image resolved.")
+        else:
+            try:
+                desc = await _extract_style_descriptors_async(resolved_path, debug=False)
+                # Keep only up to MAX_TOKENS_DESCRIPTORS descriptor tokens
+                if desc:
+                    dedup_desc: List[str] = []
+                    seen: set[str] = set()
+                    for d in desc:
+                        dl = d.lower().strip()
+                        if dl and dl not in seen:
+                            seen.add(dl)
+                            dedup_desc.append(d.strip())
+                        if len(dedup_desc) >= MAX_TOKENS_DESCRIPTORS:
+                            break
+                    resp.descriptors_used = dedup_desc
+                    if dedup_desc:
+                        style_parts_in_order.append(", ".join(dedup_desc))
+                        resp.notes.append(f"Local descriptors used (max {MAX_TOKENS_DESCRIPTORS} tokens).")
+                else:
+                    resp.notes.append("Local analysis produced no descriptors.")
+            except Exception as e:
+                resp.warnings.append(f"local style analysis failed: {e}")
+    else:
+        resp.notes.append("Local style features disabled by request.")
+
+    # Finalize style: deduplicate tokens across sources (order-preserving: style_text, vision, descriptors)
+    tokens = _dedup_ordered_tokens(style_parts_in_order)
+    if tokens:
+        resp.style_positive = _limit_join(tokens, MAX_TOKENS_FINAL)
+        resp.notes.append(f"Final style merged with cap {MAX_TOKENS_FINAL} tokens.")
+    else:
+        # Explain why empty
+        reasons: List[str] = []
+        if not has_new_style_text:
+            reasons.append("no style_text_prompt")
+        if resolved_path is None:
+            reasons.append("no reference image")
+        if not req.use_local_style_features:
+            reasons.append("local_features_disabled")
+        if not req.use_ollama_vision:
+            reasons.append("vision_disabled")
+        if reasons:
+            resp.warnings.append("style_positive is empty: " + ", ".join(reasons))
+
+    # Do NOT apply deactivate here anymore (it was already handled):
+    # The reset has priority only when no new inputs are supplied in the same request.
 
     return resp
 
@@ -4691,6 +4264,7 @@ def _log_style_env() -> None:
         f"size_default={APP_IMAGE_WIDTH}x{APP_IMAGE_HEIGHT}",
         f"timeout={HTTP_TIMEOUT_SEC}s",
         f"retries={HTTP_MAX_RETRIES}",
+        f"caps(style={MAX_TOKENS_STYLE_TEXT}, vision={MAX_TOKENS_VISION}, desc={MAX_TOKENS_DESCRIPTORS}, final={MAX_TOKENS_FINAL})",
     )
 
 with contextlib.suppress(Exception):
@@ -4703,26 +4277,37 @@ with contextlib.suppress(Exception):
 
 if __name__ == "__main__":
     async def _quick_test():
-        # This quick test only builds styles; it does not generate images.
-        req = StyleEngineRequest(
-            content_positive="A cozy reading nook with plants.",
-            style_text_prompt="soft natural light, warm tones, minimalist, Scandinavian, matte finish",
+        ensure_dirs()
+
+        # Case A: pure reset (no new inputs) -> empty
+        req_reset = StyleEngineRequest(
+            content_positive="",
+            style_text_prompt="",
             reference_source="none",
             use_local_style_features=False,
             use_ollama_vision=False,
-            deactivate_all_styles=False,
+            deactivate_all_styles=True,
             target_backend_name="comfyui",
         )
-        out = await build_styles(req)
-        print("style_positive:", out.style_positive)
-        print("warnings:", out.warnings)
-        print("notes:", out.notes)
+        out_reset = await build_styles(req_reset)
+        print("A reset style_positive:", out_reset.style_positive, "| notes:", out_reset.notes)
+
+        # Case B: reset + new style text -> should apply style (ignore reset)
+        req_apply = StyleEngineRequest(
+            content_positive="",
+            style_text_prompt="Comic",
+            reference_source="none",
+            use_local_style_features=False,
+            use_ollama_vision=False,
+            deactivate_all_styles=True,  # request reset, but new input present
+            target_backend_name="comfyui",
+        )
+        out_apply = await build_styles(req_apply)
+        print("B apply style_positive:", out_apply.style_positive, "| notes:", out_apply.notes)
 
     asyncio.run(_quick_test())
 
 
-
-#index.html / UI
 
 <!DOCTYPE html>
 <html lang="de">
@@ -4804,11 +4389,11 @@ if __name__ == "__main__":
     #image-viewer:fullscreen { background: #000; }
     #image-viewer:fullscreen #current-image { max-width: 100vw; max-height: 100vh; cursor: zoom-out; }
     .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    input[type="text"], input[type="number"], textarea, select {
+    input[type="text"], input[type="number"], textarea, select, input[type="url"], input[type="file"] {
       background: #0e1118; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
       outline: none;
     }
-    input[type="text"], textarea { width: 100%; }
+    input[type="text"], input[type="url"], textarea { width: 100%; }
     input[type="number"] { width: 110px; }
     textarea { min-height: 80px; resize: vertical; }
     .log {
@@ -4827,6 +4412,8 @@ if __name__ == "__main__":
     }
     .warn { color: #ffd966; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 11px; }
+
+    .subtle { color: var(--muted); font-size: 12px; }
 
     /* Footer: bottom-left support/contact links */
     .footer-hud {
@@ -4847,13 +4434,11 @@ if __name__ == "__main__":
       pointer-events: auto;
     }
     .footer-hud a {
-      color: #9ecbff; /* leichtes Blau für Links */
+      color: #9ecbff;
       text-decoration: none;
     }
     .footer-hud a:hover {
       text-decoration: underline;
-    }
-
     }
   </style>
 </head>
@@ -4909,7 +4494,7 @@ if __name__ == "__main__":
             <span id="backend-warn" class="warn" style="display:none;"></span>
           </div>
 
-          <!-- Workflow switcher (wrapped to toggle visibility when backend is ComfyUI only) -->
+          <!-- Workflow switcher (only visible when ComfyUI backend is active) -->
           <div id="workflow-block" style="display:none;">
             <div class="row" style="margin-bottom:8px;">
               <label for="workflow-select" style="min-width:120px;" id="label-workflow">Workflow</label>
@@ -4934,7 +4519,42 @@ if __name__ == "__main__":
             <button id="btn-apply-size" title="Größe übernehmen">Übernehmen</button>
           </div>
 
+          <!-- Style Engine controls -->
+          <div id="style-block" style="margin-bottom:10px; border-top:1px dashed var(--border); padding-top:10px;">
+            <div class="row" style="margin-bottom:6px;">
+              <strong id="style-title">Style Controls</strong>
+              <span class="subtle">·</span>
+              <button id="btn-style-deactivate" title="Deactivate all styles"><span id="style-deactivate-label">Deactivate all styles</span></button>
+            </div>
+
+            <div class="inline-input-line" style="margin-bottom:8px;">
+              <input id="style-text" type="text" placeholder="Style prompt (e.g., cinematic lighting, watercolor, matte, 35mm, pastel colors)" />
+              <button id="btn-apply-style-text" title="Apply style text"><span id="style-apply-label">Übernehmen</span></button>
+            </div>
+
+            <div class="row" style="margin-bottom:8px;">
+              <label style="min-width:120px;" id="style-ref-label">Reference</label>
+              <input id="ref-file" type="file" accept="image/*" />
+            </div>
+            <div class="inline-input-line" style="margin-bottom:8px;">
+              <input id="ref-url" type="url" placeholder="https://example.com/your-image.jpg (optional alternative to file upload)" />
+              <button id="btn-load-url" title="Load URL as reference"><span id="style-load-url-label">Laden</span></button>
+            </div>
+
+            <div class="row" style="margin-bottom:8px;">
+              <label><input id="toggle-local-style" type="checkbox" /> <span id="style-toggle-local">Local style analysis</span></label>
+              <label><input id="toggle-vision" type="checkbox" /> <span id="style-toggle-vision">Use Ollama vision</span></label>
+            </div>
+
+            <div class="log mono" id="style-log" style="max-height:120px;"></div>
+          </div>
+          <!-- END Style Engine controls -->
+
           <!-- Prompt input -->
+          <div class="row" style="margin-bottom:6px;">
+              <strong id="prompt_ui_title">Bild Prompt</strong>
+              </div>
+
           <div class="inline-input-line" style="margin-bottom:8px;">
             <input id="plan-input" type="text" placeholder="Text prompt to generate an image" />
             <button id="btn-direct">Direct Generate</button>
@@ -4974,8 +4594,6 @@ if __name__ == "__main__":
 
 
   <script>
-    // --- All comments strictly in English ---
-
     // ---------- i18n dictionary ----------
     const I18N = {
       de: {
@@ -5003,6 +4621,7 @@ if __name__ == "__main__":
         label_width: "Breite",
         label_height: "Höhe",
         label_workflow: "Workflow",
+        prompt_ui_title: "Bild Prompt",
         ph_plan: "Text eingeben → Prompt erzeugen und Bild generieren",
         ph_neg: "Negative Prompt (z.B. low quality, blurry, extra fingers)",
         label_last_prompt: "Letzter Prompt",
@@ -5038,6 +4657,28 @@ if __name__ == "__main__":
         wf_applied_ok: "Workflow übernommen.",
         wf_applied_fail: "Workflow-Übernahme fehlgeschlagen。",
         wf_list_fail: "Workflows konnten nicht geladen werden。",
+        // New (style engine) - UI labels
+        style_ui_title: "Stil-Steuerung",
+        style_ui_deactivate: "Alle Stile deaktivieren",
+        style_ui_deactivate_title: "Alle Stile deaktivieren",
+        style_ui_text_ph: "Stil-Text (z. B. filmische Beleuchtung, Aquarell, matt, 35mm, Pastellfarben)",
+        style_ui_apply: "Übernehmen",
+        style_ui_apply_title: "Stil-Text anwenden",
+        style_ui_ref_label: "Referenz",
+        style_ui_ref_url_ph: "https://example.com/dein-bild.jpg (Alternative zum Datei-Upload)",
+        style_ui_load_url: "Laden",
+        style_ui_load_url_title: "URL als Referenz laden",
+        style_ui_toggle_local: "Lokale Stil-Analyse",
+        style_ui_toggle_vision: "Ollama Vision verwenden",
+        // Existing (style engine) - logs/status
+        style_deactivate: "Alle Styles deaktiviert.",
+        style_applied: "Style-Text übernommen.",
+        style_file_ok: "Referenzbild hochgeladen.",
+        style_file_fail: "Upload fehlgeschlagen.",
+        style_url_ok: "Referenzbild geladen.",
+        style_url_fail: "URL-Laden fehlgeschlagen.",
+        style_build_ok: "Style-Bausteine aktualisiert.",
+        style_build_fail: "Style-Build fehlgeschlagen。",
       },
       en: {
         brand: "slAIdshow | Local Speech-to-Image Pipeline",
@@ -5064,6 +4705,7 @@ if __name__ == "__main__":
         label_width: "Width",
         label_height: "Height",
         label_workflow: "Workflow",
+        prompt_ui_title: "Image prompt",
         ph_plan: "Enter text → create prompt and generate image",
         ph_neg: "Negative prompt (e.g., low quality, blurry, extra fingers)",
         label_last_prompt: "Last Prompt",
@@ -5099,6 +4741,28 @@ if __name__ == "__main__":
         wf_applied_ok: "Workflow applied.",
         wf_applied_fail: "Failed to apply workflow。",
         wf_list_fail: "Failed to load workflows。",
+        // New (style engine) - UI labels
+        style_ui_title: "Style Controls",
+        style_ui_deactivate: "Deactivate all styles",
+        style_ui_deactivate_title: "Deactivate all styles",
+        style_ui_text_ph: "Style prompt (e.g., cinematic lighting, watercolor, matte, 35mm, pastel colors)",
+        style_ui_apply: "Apply",
+        style_ui_apply_title: "Apply style text",
+        style_ui_ref_label: "Reference",
+        style_ui_ref_url_ph: "https://example.com/your-image.jpg (optional alternative to file upload)",
+        style_ui_load_url: "Load",
+        style_ui_load_url_title: "Load URL as reference",
+        style_ui_toggle_local: "Local style analysis",
+        style_ui_toggle_vision: "Use Ollama vision",
+        // Existing (style engine) - logs/status
+        style_deactivate: "All styles deactivated.",
+        style_applied: "Style text applied.",
+        style_file_ok: "Reference image uploaded.",
+        style_file_fail: "Upload failed.",
+        style_url_ok: "Reference image loaded.",
+        style_url_fail: "URL load failed.",
+        style_build_ok: "Style components updated.",
+        style_build_fail: "Style build failed。",
       }
     };
 
@@ -5106,6 +4770,8 @@ if __name__ == "__main__":
     const langSelect = document.getElementById('lang-select');
     let LANG = localStorage.getItem('ui_lang') || 'de';
     langSelect.value = LANG;
+    document.documentElement.lang = LANG; // keep <html lang> in sync
+
     function t(key) { return I18N[LANG][key] || key; }
 
     function applyI18N() {
@@ -5123,7 +4789,6 @@ if __name__ == "__main__":
       document.getElementById('btn-apply-backend').textContent = t('btn_apply_backend');
       document.getElementById('btn-apply-size').textContent = t('btn_apply_size');
       document.getElementById('btn-apply-neg').textContent = t('btn_apply_neg');
-      // Ensure workflow button is localized as well
       const wfBtn = document.getElementById('btn-apply-workflow');
       if (wfBtn) wfBtn.textContent = t('btn_apply_workflow');
 
@@ -5135,11 +4800,38 @@ if __name__ == "__main__":
       document.getElementById('label-height').textContent = t('label_height');
       document.getElementById('label-workflow').textContent = t('label_workflow');
 
-      // Placeholder updates
       document.getElementById('plan-input').placeholder = t('ph_plan');
       document.getElementById('neg-input').placeholder = t('ph_neg');
 
-      // Shutdown/Reconnect button text
+      // Style Engine UI: apply translations
+      const styleTitle = document.getElementById('style-title');
+      if (styleTitle) styleTitle.textContent = t('style_ui_title');
+      const styleDeactivate = document.getElementById('style-deactivate-label');
+      if (styleDeactivate) styleDeactivate.textContent = t('style_ui_deactivate');
+      const btnStyleDeactivate = document.getElementById('btn-style-deactivate');
+      if (btnStyleDeactivate) btnStyleDeactivate.title = t('style_ui_deactivate_title');
+
+      const styleText = document.getElementById('style-text');
+      if (styleText) styleText.placeholder = t('style_ui_text_ph');
+      const styleApplyLabel = document.getElementById('style-apply-label');
+      if (styleApplyLabel) styleApplyLabel.textContent = t('style_ui_apply');
+      const btnApplyStyleText = document.getElementById('btn-apply-style-text');
+      if (btnApplyStyleText) btnApplyStyleText.title = t('style_ui_apply_title');
+
+      const styleRefLabel = document.getElementById('style-ref-label');
+      if (styleRefLabel) styleRefLabel.textContent = t('style_ui_ref_label');
+      const refUrl = document.getElementById('ref-url');
+      if (refUrl) refUrl.placeholder = t('style_ui_ref_url_ph');
+      const styleLoadUrlLabel = document.getElementById('style-load-url-label');
+      if (styleLoadUrlLabel) styleLoadUrlLabel.textContent = t('style_ui_load_url');
+      const btnLoadUrl = document.getElementById('btn-load-url');
+      if (btnLoadUrl) btnLoadUrl.title = t('style_ui_load_url_title');
+
+      const styleToggleLocal = document.getElementById('style-toggle-local');
+      if (styleToggleLocal) styleToggleLocal.textContent = t('style_ui_toggle_local');
+      const styleToggleVision = document.getElementById('style-toggle-vision');
+      if (styleToggleVision) styleToggleVision.textContent = t('style_ui_toggle_vision');
+
       const btnShutdown = document.getElementById('btn-shutdown');
       if (btnShutdown.dataset.mode === 'reconnect') {
         btnShutdown.textContent = t('reconnect');
@@ -5151,7 +4843,6 @@ if __name__ == "__main__":
         btnShutdown.classList.add('btn-danger');
       }
 
-      // Header status if in connecting state
       const statusEl = document.getElementById('status');
       if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
     }
@@ -5159,6 +4850,7 @@ if __name__ == "__main__":
     langSelect.addEventListener('change', () => {
       LANG = langSelect.value;
       localStorage.setItem('ui_lang', LANG);
+      document.documentElement.lang = LANG; // sync <html lang> on change
       applyI18N();
     });
 
@@ -5168,6 +4860,7 @@ if __name__ == "__main__":
     const promptLog = $('#prompt-log');
     const transcriptLog = $('#transcript-log');
     const statusLog = $('#status-log');
+    const styleLog = $('#style-log');
     const img = $('#current-image');
     const caption = $('#img-caption');
     const viewer = $('#image-viewer');
@@ -5176,7 +4869,7 @@ if __name__ == "__main__":
     const backendWarn = $('#backend-warn');
     const btnApplyBackend = $('#btn-apply-backend');
 
-    const workflowBlock = document.getElementById('workflow-block'); // container to toggle visibility
+    const workflowBlock = document.getElementById('workflow-block');
     const workflowSelect = $('#workflow-select');
     const workflowPreview = $('#workflow-preview');
     const wfWarn = $('#wf-warn');
@@ -5186,6 +4879,19 @@ if __name__ == "__main__":
     const heightInput = $('#height-input');
     const btnApplySize = $('#btn-apply-size');
     const sizePill = $('#size-pill');
+
+    // Style controls
+    const styleTextInput = $('#style-text');
+    const btnApplyStyleText = $('#btn-apply-style-text');
+    const btnStyleDeactivate = $('#btn-style-deactivate');
+    const refFileInput = $('#ref-file');
+    const refUrlInput = $('#ref-url');
+    const btnLoadUrl = $('#btn-load-url');
+    const toggleLocalStyle = $('#toggle-local-style');
+    const toggleVision = $('#toggle-vision');
+
+    // Holds the most recent style_positive string returned by the server
+    let LAST_STYLE_POSITIVE = null;
 
     function log(el, msg) {
       const ts = new Date().toLocaleTimeString();
@@ -5207,7 +4913,6 @@ if __name__ == "__main__":
 
     img.addEventListener('load', () => img.classList.add('loaded'));
     function setImage(filenameRel, captionText) {
-      // Always serve from local static folder
       const url = filenameRel.startsWith('/static/') ? filenameRel : `/static/${filenameRel.replace(/^\/+/, '')}`;
       img.classList.remove('loaded');
       img.src = url;
@@ -5296,7 +5001,7 @@ if __name__ == "__main__":
       log(statusLog, t('sse_connecting'));
       console.debug('[SSE] connecting to /events');
 
-    try { sse = new EventSource('/events'); }
+      try { sse = new EventSource('/events'); }
       catch (e) { console.debug('[SSE] EventSource ctor error:', e); connecting = false; scheduleReconnect(); return; }
 
       sse.onopen = () => {
@@ -5429,7 +5134,6 @@ if __name__ == "__main__":
 
     // ---------- Start/Stop ----------
     $('#btn-start').addEventListener('click', async () => {
-      // Ensure server knows current size before starting
       try {
         const size = currentSizePayload();
         await fetch('/api/settings/image_size', {
@@ -5474,6 +5178,208 @@ if __name__ == "__main__":
       return { width: w, height: h };
     }
 
+    // ---------- Style Engine: local state and helpers ----------
+    // Note: endpoints used here must already exist server-side.
+    const STYLE_STATE = {
+      reference_source: 'none',      // 'none' | 'local_file' | 'url'
+      reference_id: null,
+      reference_url: '',
+      style_text_prompt: '',
+      use_local_style_features: true,
+      use_ollama_vision: false,
+      deactivate_all_styles: false,
+    };
+
+    function loadStyleState() {
+      try {
+        const raw = localStorage.getItem('style_state_v1');
+        if (!raw) return;
+        const s = JSON.parse(raw);
+        Object.assign(STYLE_STATE, s || {});
+      } catch {}
+      // Reflect into UI
+      if (STYLE_STATE.style_text_prompt) styleTextInput.value = STYLE_STATE.style_text_prompt;
+      if (STYLE_STATE.reference_source === 'url' && STYLE_STATE.reference_url) {
+        refUrlInput.value = STYLE_STATE.reference_url;
+      }
+      toggleLocalStyle.checked = !!STYLE_STATE.use_local_style_features;
+      toggleVision.checked = !!STYLE_STATE.use_ollama_vision;
+    }
+
+    function saveStyleState() {
+      const s = Object.assign({}, STYLE_STATE);
+      localStorage.setItem('style_state_v1', JSON.stringify(s));
+    }
+
+    async function styleBuild(contentPositiveForNow = null) {
+      const payload = {
+        content_positive: contentPositiveForNow || '',
+        style_text_prompt: STYLE_STATE.style_text_prompt || '',
+        reference_source: STYLE_STATE.reference_source || 'none',
+        reference_id: STYLE_STATE.reference_id || null,
+        reference_url: STYLE_STATE.reference_url || null,
+        use_local_style_features: !!STYLE_STATE.use_local_style_features,
+        use_ollama_vision: !!STYLE_STATE.use_ollama_vision,
+        deactivate_all_styles: !!STYLE_STATE.deactivate_all_styles,
+      };
+
+      try {
+        const r = await fetch('/api/style/build', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j) throw new Error(`${r.status}`);
+        // Update client-side current style string to be passed forward
+        LAST_STYLE_POSITIVE = (j.style_positive || '').trim() || null;
+
+        if (j.warnings && Array.isArray(j.warnings) && j.warnings.length) {
+          for (const w of j.warnings) log(styleLog, `warn: ${w}`);
+        }
+        log(styleLog, `${t('style_build_ok')} style_positive="${(j.style_positive||'').slice(0,200)}"`);
+        if (j.descriptors_used && j.descriptors_used.length) {
+          log(styleLog, `descriptors: ${j.descriptors_used.join(', ')}`);
+        }
+        if (j.vision_text_used) {
+          log(styleLog, `vision: ${j.vision_text_used}`);
+        }
+        if (j.reference_id) {
+          STYLE_STATE.reference_id = j.reference_id;
+          STYLE_STATE.reference_source = 'local_file';
+          saveStyleState();
+        }
+        return j;
+      } catch (e) {
+        log(styleLog, `${t('style_build_fail')}: ${e}`);
+        // Keep LAST_STYLE_POSITIVE unchanged on failure
+        return null;
+      }
+    }
+
+    async function uploadReferenceFile(file) {
+      const fd = new FormData();
+      fd.append('file', file, file.name || 'reference.png');
+      try {
+        const r = await fetch('/api/style/upload', { method: 'POST', body: fd });
+        const j = await r.json().catch(()=> ({}));
+        if (r.ok && j?.reference_id) {
+          STYLE_STATE.reference_id = j.reference_id;
+          STYLE_STATE.reference_source = 'local_file';
+          saveStyleState();
+          log(styleLog, `${t('style_file_ok')} (${j.reference_id})`);
+          return j;
+        }
+        throw new Error(j?.detail || j?.error || `HTTP ${r.status}`);
+      } catch (e) {
+        log(styleLog, `${t('style_file_fail')}: ${e}`);
+        return null;
+      }
+    }
+
+    async function saveReferenceFromUrl(url) {
+      try {
+        const r = await fetch('/api/style/save_url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
+        });
+        const j = await r.json().catch(()=> ({}));
+        if (r.ok && j?.reference_id) {
+          STYLE_STATE.reference_id = j.reference_id;
+          STYLE_STATE.reference_source = 'local_file';
+          STYLE_STATE.reference_url = url;
+          saveStyleState();
+          log(styleLog, `${t('style_url_ok')} (${j.reference_id})`);
+          return j;
+        }
+        throw new Error(j?.detail || j?.error || `HTTP ${r.status}`);
+      } catch (e) {
+        log(styleLog, `${t('style_url_fail')}: ${e}`);
+        return null;
+      }
+    }
+
+    async function resetAllStylesServer() {
+      try {
+        const r = await fetch('/api/style/reset', { method: 'POST' });
+        const ok = r.ok;
+        if (!ok) throw new Error(`HTTP ${r.status}`);
+      } catch (e) {
+        log(styleLog, `reset(server) failed: ${e}`);
+      }
+    }
+
+    // Hook style text apply
+    btnApplyStyleText.addEventListener('click', async () => {
+      STYLE_STATE.style_text_prompt = styleTextInput.value.trim();
+      saveStyleState();
+      log(styleLog, t('style_applied'));
+      await styleBuild($('#plan-input').value.trim() || '');
+    });
+
+    // Hook file upload
+    refFileInput.addEventListener('change', async (ev) => {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      const up = await uploadReferenceFile(f);
+      if (up) {
+        await styleBuild($('#plan-input').value.trim() || '');
+      }
+    });
+
+    // Hook URL load
+    btnLoadUrl.addEventListener('click', async () => {
+      const url = (refUrlInput.value || '').trim();
+      if (!url) return;
+      STYLE_STATE.reference_source = 'url';
+      STYLE_STATE.reference_url = url;
+      saveStyleState();
+      const saved = await saveReferenceFromUrl(url);
+      if (saved) {
+        await styleBuild($('#plan-input').value.trim() || '');
+      }
+    });
+
+    // Toggle local style analysis
+    toggleLocalStyle.addEventListener('change', async () => {
+      STYLE_STATE.use_local_style_features = !!toggleLocalStyle.checked;
+      saveStyleState();
+      await styleBuild($('#plan-input').value.trim() || '');
+    });
+
+    // Toggle vision
+    toggleVision.addEventListener('change', async () => {
+      STYLE_STATE.use_ollama_vision = !!toggleVision.checked;
+      saveStyleState();
+      await styleBuild($('#plan-input').value.trim() || '');
+    });
+
+    // Deactivate all styles
+    btnStyleDeactivate.addEventListener('click', async () => {
+      STYLE_STATE.deactivate_all_styles = false;
+      STYLE_STATE.style_text_prompt = '';
+      STYLE_STATE.reference_source = 'none';
+      STYLE_STATE.reference_id = null;
+      STYLE_STATE.reference_url = '';
+      STYLE_STATE.use_local_style_features = false;
+      STYLE_STATE.use_ollama_vision = false;
+      saveStyleState();
+
+      log(styleLog, t('style_deactivate'));
+
+      styleTextInput.value = '';
+      refUrlInput.value = '';
+      if (refFileInput) refFileInput.value = '';
+      toggleLocalStyle.checked = false;
+      toggleVision.checked = false;
+
+      await resetAllStylesServer();
+      await styleBuild($('#plan-input').value.trim() || '');
+
+      log(styleLog, t('style_deactivate'));
+    });
+
     // ---------- Plan ----------
     $('#btn-plan').addEventListener('click', async () => {
       const text = $('#plan-input').value.trim();
@@ -5481,11 +5387,25 @@ if __name__ == "__main__":
       const btn = $('#btn-plan');
       btn.disabled = true;
       try {
+        // Build or refresh current style first
+        const sb = await styleBuild(text);
+        if (sb && typeof sb.style_positive === 'string') {
+          LAST_STYLE_POSITIVE = sb.style_positive.trim() || null;
+        }
+
         const size = currentSizePayload();
+        const body = {
+          text,
+          tags: [],
+          width: size.width,
+          height: size.height,
+          // Pass the freshest style string to the server for deterministic behavior
+          style_positive: LAST_STYLE_POSITIVE
+        };
         const r = await fetch('/api/plan', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, tags: [], width: size.width, height: size.height })
+          body: JSON.stringify(body)
         });
         const j = await r.json().catch(() => ({}));
         if (r.ok && j.prompt) { log(promptLog, j.prompt); statusEl.textContent = t('prompt_created'); }
@@ -5504,6 +5424,12 @@ if __name__ == "__main__":
       btn.disabled = true;
       const size = currentSizePayload();
       try {
+        // Build or refresh current style first
+        const sb = await styleBuild(prompt);
+        if (sb && typeof sb.style_positive === 'string') {
+          LAST_STYLE_POSITIVE = sb.style_positive.trim() || null;
+        }
+
         const r = await fetch('/api/image/direct', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -5511,7 +5437,9 @@ if __name__ == "__main__":
             prompt,
             negative_prompt: negative || null,
             width: size.width,
-            height: size.height
+            height: size.height,
+            // Include style_positive explicitly for robustness against races
+            style_positive: LAST_STYLE_POSITIVE
           })
         });
         const j = await r.json().catch(() => ({}));
@@ -5555,7 +5483,7 @@ if __name__ == "__main__":
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ allow: true })
         });
-        return r.ok;
+      return r.ok;
       } catch { return false; }
     }
 
@@ -5577,9 +5505,7 @@ if __name__ == "__main__":
         const j = await r.json().catch(() => ({}));
         if (r.ok && j.ok) {
           log(statusLog, t('backend_switched_ok'));
-          // Pull fresh config (server decides show_workflow_selector)
           await refreshConfig();
-          // Only refresh workflows if the UI block is visible, otherwise clear stale UI
           if (workflowBlock.style.display !== 'none') {
             await refreshWorkflowList();
           } else {
@@ -5628,13 +5554,7 @@ if __name__ == "__main__":
     });
 
     // ---------- Workflow switching ----------
-    // This expects:
-    // - Static files under /workflows/*.json
-    // - Optional server endpoints:
-    //   GET /api/workflows -> { items: [{name, filename}] }
-    //   POST /api/settings/workflow { filename } -> apply on server
     async function listWorkflowsFromServer() {
-      // Preferred: server provides list (allows server-side validation/ordering)
       try {
         const r = await fetch('/api/workflows', { cache: 'no-store' });
         if (r.ok) {
@@ -5645,7 +5565,6 @@ if __name__ == "__main__":
       return null;
     }
     async function listWorkflowsByIndexJson() {
-      // Fallback: try to load a local index.json that enumerates available workflows
       try {
         const r = await fetch('/workflows/index.json', { cache: 'no-store' });
         if (!r.ok) return [];
@@ -5659,7 +5578,6 @@ if __name__ == "__main__":
       return [];
     }
     async function refreshWorkflowList() {
-      // Do not attempt to list workflows when the UI block is hidden
       if (workflowBlock.style.display === 'none') {
         workflowSelect.innerHTML = '';
         workflowPreview.textContent = '';
@@ -5671,7 +5589,6 @@ if __name__ == "__main__":
       let items = await listWorkflowsFromServer();
       if (!items) items = await listWorkflowsByIndexJson();
 
-      // If still empty, show warning
       if (!items || items.length === 0) {
         wfWarn.textContent = t('wf_list_fail');
         wfWarn.style.display = '';
@@ -5680,7 +5597,6 @@ if __name__ == "__main__":
         return;
       }
 
-      // Populate select safely (no path traversal, only base filenames ending in .json)
       workflowSelect.innerHTML = '';
       const stored = localStorage.getItem('active_workflow') || '';
       let foundStored = false;
@@ -5695,23 +5611,19 @@ if __name__ == "__main__":
         workflowSelect.appendChild(opt);
       }
       if (!foundStored && workflowSelect.options.length > 0) {
-        // Select first by default
         workflowSelect.selectedIndex = 0;
       }
-      // Load preview for selected
       const cur = workflowSelect.value;
       if (cur) await loadWorkflowPreview(cur);
     }
 
     async function loadWorkflowPreview(filename) {
-      // Preview JSON for user confirmation; does not execute anything
       workflowPreview.textContent = '';
       if (!filename || !/^[A-Za-z0-9._-]+$/.test(filename) || !filename.endsWith('.json')) return;
       try {
         const r = await fetch(`/workflows/${filename}`, { cache: 'no-store' });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const txt = await r.text();
-        // Try to pretty-print JSON
         try {
           const obj = JSON.parse(txt);
           workflowPreview.textContent = JSON.stringify(obj, null, 2);
@@ -5734,7 +5646,6 @@ if __name__ == "__main__":
       if (!filename) return;
       btnApplyWorkflow.disabled = true;
       try {
-        // Inform server about desired workflow
         const r = await fetch('/api/settings/workflow', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -5764,7 +5675,6 @@ if __name__ == "__main__":
         const r = await fetch('/open_dir_hint');
         if (!r.ok) return;
         const j = await r.json();
-        // In a browser we cannot open file system paths directly; we can open static URL instead
         window.open(j?.static_url || '/static/', '_blank');
       } catch {}
     });
@@ -5780,27 +5690,21 @@ if __name__ == "__main__":
         $('#poll-pill').textContent = `Images: ${j?.image?.backend || '?'}`;
         $('#sr-pill').textContent = `SR: ${j?.audio?.sample_rate || '?'}`;
 
-        // Image backend select
         const current = (j?.image?.backend || 'comfyui').toLowerCase();
         backendSelect.value = current === 'pollinations' ? 'pollinations' : 'comfyui';
 
-        // Size fields
         const w = Number(j?.image?.current_width ?? j?.image?.width_default ?? 512);
         const h = Number(j?.image?.current_height ?? j?.image?.height_default ?? 512);
         widthInput.value = w;
         heightInput.value = h;
         updateSizePill();
 
-        // Negative prompt (if server exposes)
         const neg = (j?.image?.negative_prompt || '').trim();
         if (neg) document.getElementById('neg-input').value = neg;
 
-        // Toggle visibility of workflow block based on server flag
-        // Server should set image.show_workflow_selector=true only when ComfyUI backend is active
         const showWF = !!(j?.image?.show_workflow_selector);
         workflowBlock.style.display = showWF ? '' : 'none';
 
-        // Sync active workflow when visible; clear stale UI when hidden
         if (showWF) {
           const activeWF = j?.image?.active_workflow || localStorage.getItem('active_workflow') || '';
           if (activeWF) {
@@ -5814,6 +5718,11 @@ if __name__ == "__main__":
           wfWarn.style.display = 'none';
         }
 
+        if (j?.style) {
+          if (typeof j.style.use_local_style_features === 'boolean') toggleLocalStyle.checked = j.style.use_local_style_features;
+          if (typeof j.style.use_ollama_vision === 'boolean') toggleVision.checked = j.style.use_ollama_vision;
+        }
+
         if (statusEl.dataset.state !== 'connected') statusEl.textContent = t('status_ready');
       } catch (e) {
         log(statusLog, `config error: ${e}`);
@@ -5823,11 +5732,11 @@ if __name__ == "__main__":
 
     (async function init() {
       applyI18N();
+      loadStyleState();
       await refreshConfig();
       function onSizeInputChange() { updateSizePill(); scheduleSizeSync(); }
       widthInput.addEventListener('input', onSizeInputChange);
       heightInput.addEventListener('input', onSizeInputChange);
-      // Only load workflows when block is visible (ComfyUI)
       if (document.getElementById('workflow-block').style.display !== 'none') {
         await refreshWorkflowList();
       }
@@ -5842,6 +5751,7 @@ if __name__ == "__main__":
 
 </body>
 </html>
+
 
 Aktuelle .env für diesen Stand:
 
@@ -5988,6 +5898,18 @@ APP_COMFY_HEIGHT=
 # App HTTP server bind (optional: expose this app to LAN; keep Private network only)
 APP_BIND_HOST=127.0.0.1                  # 127.0.0.1 = local only; 0.0.0.0 = all interfaces (LAN)
 APP_BIND_PORT=8080
+
+APP_COMFY_NODE_STYLE_POS=8
+APP_COMFY_NODE_COND_COMBINE=9
+APP_COMFY_STYLE_WEIGHT=1.8
+
+# =========================
+# Outputs
+# =========================
+APP_COMFY_OUTPUT_DIR=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/output/  # Set here the /path to your local ComfyUI/outputs folder if used on the same machine, an not over local network (default)
+# Outputs
+APP_OUTPUT_DIR=./outputs/images        # Folder where images are saved/exposed via /static
+
 
 
 # =========================

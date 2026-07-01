@@ -1,8 +1,6 @@
 # image_backend.py
 # -*- coding: utf-8 -*-
 # Production-ready image backend adapters for ComfyUI (local/LAN/remote) and Pollinations (cloud)
-# This version adds style-aware mapping for ComfyUI workflows that separate content and style CLIP encodes
-# and (optionally) a ConditioningCombine node with a tunable style weight.
 
 from __future__ import annotations
 
