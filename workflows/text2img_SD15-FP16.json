@@ -1,107 +1,62 @@
 {
   "1": {
-    "inputs": {
-        "ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors"
-    },
+    "inputs": { "ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors" },
     "class_type": "CheckpointLoaderSimple",
-    "_meta": {
-      "title": "Load Checkpoint"
-    }
+    "_meta": { "title": "Load Checkpoint (SD1.5 FP16)" }
   },
   "2": {
     "inputs": {
       "text": "Kinder spielen in einem Schwimmbad an der Küste. Felsen glitzern im Sonnenlicht.",
-      "clip": [
-        "1",
-        1
-      ]
+      "clip": ["1", 1]
     },
     "class_type": "CLIPTextEncode",
-    "_meta": {
-      "title": "CLIP Text Encode (Prompt)"
-    }
+    "_meta": { "title": "CLIP Text Encode (Content)" }
+  },
+  "8": {
+    "inputs": {
+      "text": "(Manga:1.6), (Wasserfarben:1.6), watercolor, ink outlines, cel shading, flat colors, paper texture, comic panel style",
+      "clip": ["1", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "CLIP Text Encode (Style - standalone)" }
   },
   "3": {
     "inputs": {
-      "text": "text, watermark, logo, low quality, blurry, bad anatomy, close-up, headshot, portrait, face, facial features, eyes, mouth, nose, selfie, tight crop, centered head, bokeh portrait",
-      "clip": [
-        "1",
-        1
-      ]
+      "text": "text, watermark, logo, low quality, blurry, bad anatomy, photorealistic, oil painting, glossy, 3d render, sharp photographic detail, realistic skin, close-up, headshot, portrait, face, facial features, eyes, mouth, nose, selfie, tight crop, centered head, bokeh portrait",
+      "clip": ["1", 1]
     },
     "class_type": "CLIPTextEncode",
-    "_meta": {
-      "title": "CLIP Text Encode (Prompt)"
-    }
+    "_meta": { "title": "CLIP Text Encode (Negative)" }
   },
   "4": {
-    "inputs": {
-      "width": 128,
-      "height": 128,
-      "batch_size": 1
-    },
+    "inputs": { "width": 160, "height": 90, "batch_size": 1 },
     "class_type": "EmptyLatentImage",
-    "_meta": {
-      "title": "Empty Latent Image"
-    }
+    "_meta": { "title": "Empty Latent Image (160x90 latent ≈ 1280x720)" }
   },
   "5": {
     "inputs": {
       "seed": 19127555788607,
-      "steps": 20,
-      "cfg": 8,
-      "sampler_name": "euler",
-      "scheduler": "simple",
-      "denoise": 1,
-      "model": [
-        "1",
-        0
-      ],
-      "positive": [
-        "2",
-        0
-      ],
-      "negative": [
-        "3",
-        0
-      ],
-      "latent_image": [
-        "4",
-        0
-      ]
+      "steps": 32,
+      "cfg": 8.5,
+      "sampler_name": "dpmpp_2m_karras",
+      "scheduler": "karras",
+      "denoise": 1.0,
+      "model": ["1", 0],
+      "positive": ["2", 0],
+      "negative": ["3", 0],
+      "latent_image": ["4", 0]
     },
     "class_type": "KSampler",
-    "_meta": {
-      "title": "KSampler"
-    }
+    "_meta": { "title": "KSampler" }
   },
   "6": {
-    "inputs": {
-      "samples": [
-        "5",
-        0
-      ],
-      "vae": [
-        "1",
-        2
-      ]
-    },
+    "inputs": { "samples": ["5", 0], "vae": ["1", 2] },
     "class_type": "VAEDecode",
-    "_meta": {
-      "title": "VAE Decode"
-    }
+    "_meta": { "title": "VAE Decode" }
   },
   "7": {
-    "inputs": {
-      "filename_prefix": "ComfyUI",
-      "images": [
-        "6",
-        0
-      ]
-    },
+    "inputs": { "filename_prefix": "slAIdshow_sd15_fp16_style_standalone", "images": ["6", 0] },
     "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Image"
-    }
+    "_meta": { "title": "Save Image" }
   }
 }

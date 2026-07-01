@@ -1,23 +1,27 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# Production-ready FastAPI app for slAIdshow:
+# - Real-time audio → Whisper.cpp (pywhispercpp) → Ollama prompt → Image backend (ComfyUI or Pollinations)
+# - Style pipeline integrated: style_engine builds style_positive (and reference_text) used in generation
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import os
 import re
 import time
+import traceback
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Set
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
 import httpx
 import numpy as np
 import sounddevice as sd
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File, Body
 from fastapi.responses import (
     JSONResponse,
     PlainTextResponse,
@@ -25,15 +29,23 @@ from fastapi.responses import (
     RedirectResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, HttpUrl
 
-# Image backend factory and interface (from your project)
+# Image backend factory and interface
 from image_backend import build_image_backend, ImageBackend
+from image_backend import merge_style_prompt  # helper
 
 try:
     from image_backend import LocalComfyBackend  # type: ignore
 except Exception:
     LocalComfyBackend = None  # type: ignore
+
+# style_engine is optional and versioned; functions may be missing
+try:
+    import style_engine  # may expose: ensure_dirs, save_reference_from_bytes, save_reference_from_url, build_styles, StyleEngineRequest
+except Exception as e:
+    style_engine = None  # We'll error lazily when required
+    print(f"[STYLE] style_engine not available: {e}")
 
 # ---------- ENV helpers ----------
 
@@ -60,8 +72,8 @@ def _env_bool01(k: str, d: int = 0) -> bool:
 def _backend_default_size(backend_name: str) -> tuple[int, int]:
     """
     Backend-specific default sizes from .env:
-    - comfyui: APP_COMFY_WIDTH/HEIGHT, fallback 128×128
     - pollinations: POLLINATIONS_WIDTH/HEIGHT, fallback 1024×1024
+    - otherwise (comfy): APP_COMFY_WIDTH/HEIGHT, fallback 128×128
     """
     b = (backend_name or "comfyui").lower()
     if b == "pollinations":
@@ -230,10 +242,29 @@ _assert_image_backend_host()
 
 WARMUP_ENABLE = _env_bool01("APP_OLLAMA_WARMUP_ENABLE", 1)
 WARMUP_PROMPT = _env_str("APP_OLLAMA_WARMUP_PROMPT", "Sag Hallo auf Deutsch.")
-WARMUP_TIMEOUT_SEC = _env_float("APP_OLLAMA_WARMUP_TIMEOUT_SEC", 45.0)
+WARMUP_TIMEOUT_SEC = _env_float("APP_OLLAMA_TIMEOUT_SEC", 45.0)
 WARMUP_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 3)
 WARMUP_RETRY_DELAY = _env_float("APP_OLLAMA_RETRY_DELAY", 1.2)
 WARMUP_GRACE_SEC = _env_float("APP_OLLAMA_GRACE_SEC", 10.0)
+
+# ---------- Ollama Vision settings (for style_engine to consume) ----------
+
+class OllamaVisionSettings(BaseModel):
+    enabled: bool = True
+    mode: Literal["local", "remote", "cloud"] = "local"
+    local_url: str = "http://127.0.0.1:11434"
+    remote_url: str = ""
+    cloud_url: str = ""
+
+@dataclass
+class OllamaVisionState:
+    enabled: bool = True
+    mode: str = "local"
+    local_url: str = "http://127.0.0.1:11434"
+    remote_url: str = ""
+    cloud_url: str = ""
+
+VISION = OllamaVisionState()
 
 # ---------- Pydantic payloads ----------
 
@@ -261,6 +292,7 @@ class PlanRequest(BaseModel):
     tags: List[str] = Field(default_factory=list)
     width: Optional[int] = None
     height: Optional[int] = None
+    style_positive: Optional[str] = None
 
 class HealthReport(BaseModel):
     ollama_ok: bool
@@ -284,6 +316,7 @@ class ImageRequest(BaseModel):
     width: int | None = Field(default=None)
     height: int | None = Field(default=None)
     negative_prompt: Optional[str] = None
+    style_positive: Optional[str] = None
 
     @field_validator("width", "height")
     @classmethod
@@ -305,6 +338,7 @@ class DirectImageRequest(BaseModel):
     width: int | None = None
     height: int | None = None
     negative_prompt: Optional[str] = None
+    style_positive: Optional[str] = None
 
 class ImageResponse(BaseModel):
     filename: str
@@ -319,6 +353,9 @@ class ImageSizeSettings(BaseModel):
 
 class NegativePromptSettings(BaseModel):
     negative_prompt: str = Field(default="", max_length=4000)
+
+class StylePromptSettings(BaseModel):
+    style_positive: str = Field(default="", max_length=4000)
 
 # Workflows API payloads
 class WorkflowItem(BaseModel):
@@ -338,7 +375,7 @@ class WorkflowSelect(BaseModel):
             raise ValueError("Invalid filename")
         if not v.endswith(".json"):
             raise ValueError("Must end with .json")
-        if not re.fullmatch(r"[A-Za-z0-9._\-]+", v):
+        if not re.fullmatch(r"[A-Za-z0-9._\\-]+", v):
             raise ValueError("Illegal characters in filename")
         return v
 
@@ -607,6 +644,9 @@ class PipelineState:
     active_workflow: Optional[str] = None
     audio_stream: Any = None
     audio_stopped_broadcasted: bool = False
+    style_positive: Optional[str] = None
+    # New: store human-readable reference/vision descriptor text to append as "Ref: ..."
+    reference_text: Optional[str] = None
 
 STATE = PipelineState()
 STOP_DEBOUNCE_SEC = float(os.getenv("APP_STOP_DEBOUNCE_SEC", "2.0") or "2.0")
@@ -684,6 +724,8 @@ def _log_effective_config() -> None:
         f"backend={STATE.image_backend_name} allow_cloud={STATE.allow_cloud} out={OUTPUT_DIR} default={APP_IMAGE_WIDTH}x{APP_IMAGE_HEIGHT}",
         "| sse:",
         f"tick={APP_SSE_TICK_SEC}s",
+        "| vision:",
+        f"enabled={VISION.enabled} mode={VISION.mode} local={VISION.local_url} remote={VISION.remote_url} cloud={VISION.cloud_url}",
     )
 
 # ---------- Runtime-aware backend wrapper ----------
@@ -888,6 +930,22 @@ async def audio_transcription_loop() -> None:
     finally:
         await safe_stop_audio_stream()
 
+# ---------- Prompt post-processing helpers ----------
+
+def _append_reference_block(prompt: str, reference_text: Optional[str]) -> str:
+    """
+    Transparently append a reference descriptor block to the prompt if present.
+    We keep it short and postfix-only to not disturb primary instruction order.
+    """
+    p = (prompt or "").strip()
+    r = (reference_text or "").strip()
+    if not r:
+        return p
+    # Avoid duplicate "Ref:" if already appended
+    if " Ref:" in p or p.endswith("Ref:"):
+        return p
+    return f"{p} Ref: {r}"
+
 # ---------- LLM + Image ----------
 
 async def run_llm_and_image(text: str) -> None:
@@ -906,15 +964,24 @@ async def run_llm_and_image(text: str) -> None:
                 STATE.last_llm_error = "llm_empty_response"
                 await broadcast("status", "llm_empty_response")
                 return
-            STATE.last_prompt = img_prompt
-            await broadcast("llm_prompt", img_prompt)
+
+            # Merge style (only if non-empty); style_text_prompt has already been resolved into STATE.style_positive.
+            eff_prompt = merge_style_prompt(img_prompt, getattr(STATE, "style_positive", None))
+            # Append transparent reference block if we have vision/reference descriptors
+            eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
+
+            # DEBUG: Log full, final prompt (not truncated)
+            print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
+
+            STATE.last_prompt = eff_prompt
+            await broadcast("llm_prompt", eff_prompt)
             await broadcast("status", "llm_ok")
             try:
                 if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
                     if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
                         setattr(BACKEND.cfg, "negative", STATE.negative_prompt or "")
                 path = await _generate_with_negative_support(
-                    prompt=img_prompt,
+                    prompt=eff_prompt,
                     width=STATE.image_width,
                     height=STATE.image_height,
                     negative=STATE.negative_prompt,
@@ -923,17 +990,18 @@ async def run_llm_and_image(text: str) -> None:
                 rel = rel_for_ui_path(path)
                 await broadcast("image", rel)
             except Exception as e:
+                tb = traceback.format_exc()
+                print(f"[IMAGE] generation error: {e}\n{tb}")
                 await broadcast("status", f"image_error:{e}")
         except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[PIPELINE] llm/image pipeline error: {e}\n{tb}")
             STATE.last_llm_error = f"pipeline_error:{e}"
             await broadcast("status", f"pipeline_error:{e}")
 
 # ---------- Helpers: negative prompt passing ----------
 
 def _merge_negative_into_prompt(prompt: str, negative: str) -> str:
-    """
-    Legacy/basic inline merge used as a generic fallback if a backend lacks native support.
-    """
     p = (prompt or "").strip()
     n = (negative or "").strip()
     if not n:
@@ -941,32 +1009,21 @@ def _merge_negative_into_prompt(prompt: str, negative: str) -> str:
     return f"{p}\n-- negative: {n}"
 
 def _inline_negative_phrases(positive: str, negative: str) -> str:
-    """
-    Build robust inline negative phrasing inside the positive prompt.
-    Strategy:
-    - Split negative terms by comma/semicolon/newline.
-    - Normalize and deduplicate.
-    - Create concise English exclusion phrases plus soft German equivalents.
-    - Append as a short clause to the positive prompt for stronger guidance.
-    """
     base = (positive or "").strip()
     neg = (negative or "").strip()
     if not base or not neg:
         return base
 
-    # Split into items
     parts_raw = re.split(r"[,\n;]+", neg)
     items = []
     for it in parts_raw:
         t = it.strip()
         if not t:
             continue
-        # Strip leading "no"/"kein"/"keine"/"without" etc. to avoid duplication
         t = re.sub(r"^(no|kein(?:e|en|er)?|keine|without|exclude|vermeide|ohne)\s+", "", t, flags=re.I).strip()
         if t:
             items.append(t)
 
-    # Deduplicate while preserving order
     seen: Set[str] = set()
     uniq: List[str] = []
     for it in items:
@@ -978,38 +1035,21 @@ def _inline_negative_phrases(positive: str, negative: str) -> str:
     if not uniq:
         return base
 
-    # Build phrases; keep it compact to avoid overpowering the base prompt
-    # Example: "without yellow flowers; avoid yellow blooms; no yellow petals"
     en_parts = [f"without {it}" for it in uniq]
-    en_parts += [f"avoid {it}" for it in uniq[:2]]  # limit duplicates
+    en_parts += [f"avoid {it}" for it in uniq[:2]]
     en_parts += [f"no {it}" for it in uniq[:2]]
-
-    # German soft hints (very compact)
     de_parts = [f"ohne {it}" for it in uniq[:2]]
 
-    # Join segments; prefer one compact sentence
     inline_clause = "; ".join(en_parts + de_parts)
-
-    # Final merged prompt: add as a parenthetical or trailing constraint
-    # Use a marker unlikely to confuse style: "Constraints:"
     merged = f"{base}\nConstraints: {inline_clause}."
     return merged
 
-# ENV switch for Pollinations inline negative (default ON)
 POLLINATIONS_INLINE_NEG = _env_bool01("POLLINATIONS_INLINE_NEG", 1)
 
 async def _generate_with_negative_support(prompt: str, width: int, height: int, negative: str) -> Path:
-    """
-    Call backend.generate. For Pollinations:
-    - Optionally inline inject negatives into positive prompt (POLLINATIONS_INLINE_NEG=1).
-    - Still pass native 'negative' field for forward/model-specific support.
-    For other backends:
-    - Pass 'negative' normally; on TypeError fallback to legacy inline merge.
-    """
     if BACKEND is None:
         raise RuntimeError("image_backend_not_initialized")
 
-    # Ensure active workflow is applied for LocalComfyBackend
     try:
         _apply_active_workflow_if_local()
     except Exception as e:
@@ -1032,12 +1072,14 @@ async def _generate_with_negative_support(prompt: str, width: int, height: int, 
     )
 
     try:
-        # Always pass the 'negative' param if backend supports it
         return await BACKEND.generate(eff_prompt, negative=(neg_txt or ""), **kwargs)  # type: ignore[arg-type]
     except TypeError:
-        # Backend does not accept 'negative' → fallback: inline basic merge (non-Pollinations or old impl)
         merged = _merge_negative_into_prompt(eff_prompt, neg_txt)
         return await BACKEND.generate(merged, **kwargs)
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[IMAGE] backend.generate failed: {e}\n{tb}")
+        raise
 
 # ---------- FastAPI app & lifespan ----------
 
@@ -1049,6 +1091,17 @@ async def lifespan(app: FastAPI):
     _log_effective_config()
     init_whisper_model()
 
+    # Verify REFS_DIR early
+    try:
+        REFS_DIR.mkdir(parents=True, exist_ok=True)
+        tfile = REFS_DIR / ".__writetest.tmp"
+        tfile.write_text("ok", encoding="utf-8")
+        tfile.unlink(missing_ok=True)
+        print(f"[STYLE] refs_dir ready: {REFS_DIR}")
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[STYLE] refs_dir not writable: {REFS_DIR}, err={e}\n{tb}")
+
     global BACKEND
     try:
         _assert_image_backend_host()
@@ -1056,7 +1109,8 @@ async def lifespan(app: FastAPI):
         print(f"[BACKEND] initialized: {type(BACKEND).__name__}")
     except Exception as e:
         BACKEND = None
-        print(f"[BACKEND] initialization failed: {e}")
+        tb = traceback.format_exc()
+        print(f"[BACKEND] initialization failed: {e}\n{tb}")
 
     try:
         dw, dh = _backend_default_size(STATE.image_backend_name)
@@ -1067,6 +1121,18 @@ async def lifespan(app: FastAPI):
         STATE.image_height = APP_IMAGE_HEIGHT
 
     STATE.ollama_ready_at = time.time() + (WARMUP_GRACE_SEC if WARMUP_ENABLE else 0.0)
+
+    # Optional style_engine ensure_dirs()
+    if style_engine is not None:
+        try:
+            if hasattr(style_engine, "ensure_dirs"):
+                style_engine.ensure_dirs()
+                print("[STYLE] style_engine.ensure_dirs() ok")
+            else:
+                print("[STYLE] style_engine.ensure_dirs() not present; skipping")
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[STYLE] ensure_dirs failed: {e}\n{tb}")
 
     warmup_task: Optional[asyncio.Task] = None
     if WARMUP_ENABLE:
@@ -1159,6 +1225,7 @@ async def get_config():
     is_comfy = backend_lower == "comfyui"
     app_disable_comfy_env = os.getenv("APP_DISABLE_COMFYUI", "1").strip().lower()
     comfy_disabled = app_disable_comfy_env in {"1", "true", "yes", "on"}
+
     show_workflow_selector = bool(is_comfy and not comfy_disabled)
 
     return {
@@ -1179,6 +1246,7 @@ async def get_config():
             "current_width": STATE.image_width,
             "current_height": STATE.image_height,
             "negative_prompt": STATE.negative_prompt,
+            "style_positive": STATE.style_positive,
             "active_workflow": STATE.active_workflow,
             "show_workflow_selector": show_workflow_selector,
             "comfy": {
@@ -1187,6 +1255,13 @@ async def get_config():
             }
         },
         "sse": {"tick_sec": APP_SSE_TICK_SEC},
+        "vision": {
+            "enabled": VISION.enabled,
+            "mode": VISION.mode,
+            "local_url": VISION.local_url,
+            "remote_url": VISION.remote_url,
+            "cloud_url": VISION.cloud_url,
+        },
     }
 
 # ---------- Workflows API ----------
@@ -1257,6 +1332,8 @@ def audio_devices():
         ]
         return {"input_devices": ins}
     except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[AUDIO] devices error: {e}\n{tb}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/audio/probe")
@@ -1276,6 +1353,8 @@ def audio_probe():
         rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
         return {"device_index": idx, "sample_rate": sr, "frames": int(mono.size), "peak": round(peak, 4), "rms": round(rms, 4)}
     except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[AUDIO] probe error: {e}\n{tb}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 # ---------- Control routes ----------
@@ -1345,6 +1424,8 @@ async def api_ollama_generate(req: OllamaGenerateRequest):
             data = await _post_with_retries(client, _ollama_url("/api/generate"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
             return {"response": data.get("response", "")}
         except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[OLLAMA] /generate error: {e}\n{tb}")
             return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/api/ollama/chat")
@@ -1358,6 +1439,8 @@ async def api_ollama_chat(req: OllamaChatRequest):
             msg = (data.get("message") or {}).get("content", "") if isinstance(data, dict) else ""
             return {"response": msg}
         except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[OLLAMA] /chat error: {e}\n{tb}")
             return JSONResponse({"error": str(e)}, status_code=500)
 
 # ---------- Plan → Prompt ----------
@@ -1379,8 +1462,16 @@ async def api_plan(req: PlanRequest):
             data = await _post_with_retries(client, _ollama_url("/api/generate"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
             out = (data.get("response") or "").strip()
             if out:
-                STATE.last_prompt = out
-                await broadcast("llm_prompt", out)
+                # Merge style preference
+                eff_prompt = merge_style_prompt(out, req.style_positive or getattr(STATE, "style_positive", None))
+                # Append optional transparent reference descriptors
+                eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
+
+                # DEBUG: Log full, final prompt (not truncated)
+                print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
+
+                STATE.last_prompt = eff_prompt
+                await broadcast("llm_prompt", eff_prompt)
                 if BACKEND is not None:
                     try:
                         if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
@@ -1388,14 +1479,18 @@ async def api_plan(req: PlanRequest):
                                 setattr(BACKEND.cfg, "negative", STATE.negative_prompt or "")
                         w = req.width if (req.width and req.width > 0) else STATE.image_width
                         h = req.height if (req.height and req.height > 0) else STATE.image_height
-                        path = await _generate_with_negative_support(out, width=w, height=h, negative=STATE.negative_prompt)
+                        path = await _generate_with_negative_support(eff_prompt, width=w, height=h, negative=STATE.negative_prompt)
                         path = ensure_in_output_dir(path)
                         rel = rel_for_ui_path(path)
                         await broadcast("image", rel)
                     except Exception as e:
+                        tb = traceback.format_exc()
+                        print(f"[IMAGE] /api/plan generation error: {e}\n{tb}")
                         await broadcast("status", f"image_error:{e}")
             return {"prompt": out}
         except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[OLLAMA] /api/plan error: {e}\n{tb}")
             return JSONResponse({"error": str(e)}, status_code=500)
 
 # ---------- Image: Direct (ComfyUI und Pollinations) ----------
@@ -1409,10 +1504,18 @@ async def api_image_direct(req: DirectImageRequest):
         if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
             if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
                 setattr(BACKEND.cfg, "negative", neg)
+        style_src = req.style_positive if (req.style_positive and req.style_positive.strip()) else getattr(STATE, "style_positive", None)
+        base_prompt = req.prompt.strip()
+        eff_prompt = merge_style_prompt(base_prompt, style_src)
+        eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
+
+        # DEBUG: Log full, final prompt (not truncated)
+        print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
+
         w = req.width if (req.width and req.width > 0) else STATE.image_width
         h = req.height if (req.height and req.height > 0) else STATE.image_height
         path = await _generate_with_negative_support(
-            prompt=req.prompt.strip(),
+            prompt=eff_prompt,
             width=w,
             height=h,
             negative=neg,
@@ -1424,6 +1527,8 @@ async def api_image_direct(req: DirectImageRequest):
     except PermissionError as e:
         return JSONResponse({"error": f"{e}"}, status_code=403)
     except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[IMAGE] /api/image/direct error: {e}\n{tb}")
         return JSONResponse({"error": f"{e}"}, status_code=502)
 
 # ---------- Image test endpoint ----------
@@ -1438,14 +1543,23 @@ async def api_image_test(req: ImageRequest):
         if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
             if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
                 setattr(BACKEND.cfg, "negative", neg)
+        style_src = req.style_positive if (req.style_positive and req.style_positive.strip()) else getattr(STATE, "style_positive", None)
+        eff_prompt = merge_style_prompt(prompt, style_src)
+        eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
+
+        # DEBUG: Log full, final prompt (not truncated)
+        print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
+
         w = req.width if (req.width and req.width > 0) else STATE.image_width
         h = req.height if (req.height and req.height > 0) else STATE.image_height
-        path = await _generate_with_negative_support(prompt, width=w, height=h, negative=neg)
+        path = await _generate_with_negative_support(eff_prompt, width=w, height=h, negative=neg)
         path = ensure_in_output_dir(path)
         rel = rel_for_ui_path(path)
         await broadcast("image", rel)
         return ImageResponse(filename=path.name, relpath=rel, rel=rel, width=w, height=h)
     except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[IMAGE] /api/image/test error: {e}\n{tb}")
         return JSONResponse({"error": f"{e}"}, status_code=502)
 
 # ---------- Image backend switching & cloud toggle ----------
@@ -1478,6 +1592,8 @@ async def api_image_allow_cloud(req: ImageAllowCloudReq):
             print(f"[WF] apply after allow_cloud switch failed: {e}")
         return {"ok": True, "allow_cloud": STATE.allow_cloud, "backend": STATE.image_backend_name}
     except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[BACKEND] allow_cloud switch error: {e}\n{tb}")
         return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
 
 @app.post("/api/settings/image_backend")
@@ -1510,16 +1626,22 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
         await broadcast("status", f"image_backend:{target}")
         return {"ok": True, "backend": target, "width": STATE.image_width, "height": STATE.image_height, "reset": bool(req.reset)}
     except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[BACKEND] switch error: {e}\n{tb}")
         return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
 
-# ---------- Image size & negative prompt settings ----------
+# ---------- Image size, negative prompt & style prompt settings ----------
 
 @app.get("/api/settings/image_size")
 async def get_image_size():
     return {"width": STATE.image_width, "height": STATE.image_height}
 
+class ImageSizeSettingsIn(BaseModel):
+    width: int = Field(ge=_MIN_SIZE, le=_MAX_SIZE)
+    height: int = Field(ge=_MIN_SIZE, le=_MAX_SIZE)
+
 @app.post("/api/settings/image_size")
-async def set_image_size(s: ImageSizeSettings):
+async def set_image_size(s: ImageSizeSettingsIn):
     STATE.image_width = int(s.width)
     STATE.image_height = int(s.height)
     await broadcast("status", f"image_size:{STATE.image_width}x{STATE.image_height}")
@@ -1540,7 +1662,496 @@ async def set_negative_prompt(s: NegativePromptSettings):
     await broadcast("status", "negative_prompt:updated")
     return {"ok": True, "negative_prompt": STATE.negative_prompt}
 
-# ---------- Utility: Open-dir hint (UI can open /static) ----------
+@app.get("/api/settings/style_positive")
+async def get_style_positive():
+    return {"style_positive": STATE.style_positive or ""}
+
+@app.post("/api/settings/style_positive")
+async def set_style_positive(s: StylePromptSettings):
+    txt = (s.style_positive or "").strip()
+    STATE.style_positive = txt or None
+    await broadcast("status", "style_positive:updated")
+    return {"ok": True, "style_positive": STATE.style_positive or ""}
+
+# ---------- Ollama Vision settings routes ----------
+
+@app.get("/api/settings/ollama_vision", response_model=OllamaVisionSettings)
+async def get_ollama_vision():
+    return OllamaVisionSettings(
+        enabled=VISION.enabled,
+        mode=VISION.mode if VISION.mode in {"local", "remote", "cloud"} else "local",
+        local_url=VISION.local_url,
+        remote_url=VISION.remote_url,
+        cloud_url=VISION.cloud_url,
+    )
+
+@app.post("/api/settings/ollama_vision", response_model=OllamaVisionSettings)
+async def set_ollama_vision(cfg: OllamaVisionSettings):
+    VISION.enabled = bool(cfg.enabled)
+    VISION.mode = cfg.mode if cfg.mode in {"local", "remote", "cloud"} else "local"
+    VISION.local_url = (cfg.local_url or "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434"
+    VISION.remote_url = (cfg.remote_url or "").strip()
+    VISION.cloud_url = (cfg.cloud_url or "").strip()
+    await broadcast("status", "ollama_vision:updated")
+    return await get_ollama_vision()
+
+# ---------- Style API (upload/save_url/build/reset) with no fallback ----------
+
+def detect_image_format(data: bytes) -> Optional[str]:
+    """
+    Detect image format safely.
+    Returns lowercase format name among {'jpeg','png','webp','bmp'} or None.
+    """
+    if not data or len(data) < 4:
+        return None
+    try:
+        from PIL import Image
+        from io import BytesIO
+        with Image.open(BytesIO(data)) as im:
+            fmt = (im.format or "").lower()
+            if fmt in {"jpeg", "png", "webp", "bmp"}:
+                return fmt
+            if fmt == "jpg":
+                return "jpeg"
+    except Exception:
+        pass
+    b = data
+    if len(b) >= 2 and b[0:2] == b"\xFF\xD8":
+        return "jpeg"
+    if len(b) >= 8 and b[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if len(b) >= 12 and b[:4] == b"RIFF" and b[8:12] == b"WEBP":
+        return "webp"
+    if len(b) >= 2 and b[:2] == b"BM":
+        return "bmp"
+    return None
+
+REFS_DIR = Path("outputs/images/refs").resolve()
+REFS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _sanitize_filename(name: str) -> str:
+    name = (name or "").strip()
+    base = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.path.splitext(name)[0]).strip("_") or f"ref_{int(time.time()*1000)}"
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+        ext = ".png"
+    return base + ext
+
+async def _maybe_await(fn, *args, **kwargs):
+    # Await coroutine objects or callables that return coroutines
+    if asyncio.iscoroutinefunction(fn):
+        return await fn(*args, **kwargs)
+    # If fn is a normal function but returns a coroutine, await it
+    res = fn(*args, **kwargs)
+    if asyncio.iscoroutine(res):
+        return await res
+    # Offload sync CPU-bound work
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: res)
+
+class SaveUrlRequest(BaseModel):
+    url: HttpUrl
+    filename_hint: Optional[str] = None
+
+class UploadResponse(BaseModel):
+    reference_id: str
+    path: str
+    url_path: str
+
+class SaveUrlResponse(UploadResponse):
+    pass
+
+class StyleBuildRequest(BaseModel):
+    content_positive: Optional[str] = None
+    style_text_prompt: Optional[str] = None
+    reference_source: Optional[str] = Field(default=None, description="local_file|url_file|none|url")
+    reference_id: Optional[str] = None
+    use_local_style_features: bool = True
+    use_ollama_vision: bool = False
+    deactivate_all_styles: bool = False
+    target_backend_name: Optional[str] = Field(default=None, description="comfy_local|comfy_remote|comfy_cloud|pollinations")
+    ollama_vision_mode: Optional[str] = Field(default="local", description="local|remote|cloud")
+    # Additional URLs passed through to style_engine (if it supports them)
+    ollama_vision_local_url: Optional[str] = None
+    ollama_vision_remote_url: Optional[str] = None
+    ollama_vision_cloud_url: Optional[str] = None
+    # Optional convenience field some UIs might send (not required):
+    reference_url: Optional[str] = None
+
+class StyleBuildResponse(BaseModel):
+    style_positive: str
+    style_components: Dict[str, Any] = Field(default_factory=dict)
+    merged_prompt_preview: Optional[str] = None
+    reference_used: Optional[str] = None
+    info: Optional[Dict[str, Any]] = None
+
+def _log_style_engine_fn(fn_name: str) -> None:
+    try:
+        if style_engine is None:
+            print(f"[STYLE] style_engine is None (fn={fn_name})")
+            return
+        fn = getattr(style_engine, fn_name, None)
+        if fn is None:
+            print(f"[STYLE] style_engine.{fn_name} not present")
+            return
+        sig = None
+        try:
+            sig = inspect.signature(fn)
+        except Exception:
+            pass
+        print(f"[STYLE] found style_engine.{fn_name} sig={sig!s}")
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[STYLE] inspection error for {fn_name}: {e}\n{tb}")
+
+def _local_save_reference(safe_name: str, raw: bytes) -> UploadResponse:
+    REFS_DIR.mkdir(parents=True, exist_ok=True)
+    out = REFS_DIR / safe_name
+    out.write_bytes(raw)
+    return UploadResponse(
+        reference_id=safe_name,
+        path=str(out),
+        url_path=f"/static/{Path(out).name}",
+    )
+
+@app.post("/api/style/upload", response_model=UploadResponse)
+async def api_style_upload(file: UploadFile = File(...)):
+    if not file:
+        return JSONResponse({"error": "no_file"}, status_code=400)
+    try:
+        raw = await file.read()
+        print(f"[STYLE] upload received: name={file.filename!r} size={len(raw)}B")
+        if len(raw) > 25 * 1024 * 1024:
+            return JSONResponse({"error": "file_too_large"}, status_code=413)
+        fmt = detect_image_format(raw)
+        print(f"[STYLE] detect_image_format={fmt}")
+        if fmt not in {"jpeg", "png", "webp", "bmp"}:
+            return JSONResponse({"error": "not_an_image"}, status_code=400)
+        safe_name = _sanitize_filename(file.filename or f"ref_{int(time.time()*1000)}.png")
+        print(f"[STYLE] saving reference: safe_name={safe_name} refs_dir={REFS_DIR}")
+        if style_engine is not None and hasattr(style_engine, "save_reference_from_bytes"):
+            _log_style_engine_fn("save_reference_from_bytes")
+            try:
+                saved = await _maybe_await(style_engine.save_reference_from_bytes, safe_name, raw)
+                if isinstance(saved, dict) and {"reference_id", "path", "url_path"} <= set(saved.keys()):
+                    print(f"[STYLE] saved via engine: {saved}")
+                    return UploadResponse(**saved)
+                else:
+                    print(f"[STYLE] engine returned unexpected structure; falling back to local save. got={saved}")
+            except Exception as e:
+                tb = traceback.format_exc()
+                print(f"[STYLE] save_reference_from_bytes failed: {e}\n{tb}")
+        # Fallback: local save
+        saved_local = _local_save_reference(safe_name, raw)
+        print(f"[STYLE] saved locally: {saved_local}")
+        return saved_local
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[STYLE] upload route exception: {e}\n{tb}")
+        return JSONResponse({"error": "internal_error", "reason": f"{e}"}, status_code=500)
+
+@app.post("/api/style/save_url", response_model=SaveUrlResponse)
+async def api_style_save_url(req: SaveUrlRequest):
+    if style_engine is None or not hasattr(style_engine, "save_reference_from_url"):
+        return JSONResponse({"error": "style_engine_unavailable_or_missing_save_url"}, status_code=500)
+    try:
+        hint = _sanitize_filename(req.filename_hint) if req.filename_hint else None
+        print(f"[STYLE] save_url: url={req.url} hint={hint} refs_dir={REFS_DIR}")
+        _log_style_engine_fn("save_reference_from_url")
+        saved = await _maybe_await(style_engine.save_reference_from_url, str(req.url), hint)
+        print(f"[STYLE] saved (url): {saved}")
+        if not isinstance(saved, dict) or not {"reference_id", "path", "url_path"} <= set(saved.keys()):
+            print(f"[STYLE] unexpected return from save_reference_from_url: {saved}")
+        return SaveUrlResponse(**saved)
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[STYLE] save_url exception: {e}\n{tb}")
+        return JSONResponse({"error": "download_or_save_failed", "reason": f"{e}"}, status_code=502)
+
+def _infer_target_backend_name() -> str:
+    b = (STATE.image_backend_name or "").strip().lower()
+    if b == "pollinations":
+        return "pollinations"
+    return "comfy_local"
+
+def _sanitize_for_style_engine(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ensure compatibility with StyleEngineRequest:
+    - target_backend_name must be a non-empty string
+    - remove or map extra keys if the engine model forbids them
+    """
+    payload = dict(payload)
+    # Ensure target_backend_name
+    tbn = payload.get("target_backend_name")
+    if not isinstance(tbn, str) or not tbn.strip():
+        payload["target_backend_name"] = _infer_target_backend_name()
+
+    # Try to validate against engine's pydantic model if present
+    model = getattr(style_engine, "StyleEngineRequest", None) if style_engine else None
+    if model is None:
+        # Fallback: keep extra fields; some engines accept dict freestyle
+        return payload
+
+    valid_keys = set(getattr(model, "model_fields", {}).keys()) if hasattr(model, "model_fields") else None
+    if valid_keys:
+        # Pass through vision URLs if they exist in the model; else drop
+        for k in list(payload.keys()):
+            if k not in valid_keys:
+                payload.pop(k, None)
+
+        if "target_backend_name" not in payload or not payload["target_backend_name"]:
+            payload["target_backend_name"] = _infer_target_backend_name()
+    else:
+        # Unknown model field schema; keep as-is
+        pass
+
+    try:
+        model(**payload)
+    except Exception as e:
+        print(f"[STYLE] StyleEngineRequest validation failed (dict fallback): {e}")
+    return payload
+
+def _to_engine_req(req: StyleBuildRequest) -> Any:
+    # Inject current vision settings into the request so the engine can route properly
+    raw = {
+        "content_positive": req.content_positive,
+        "style_text_prompt": req.style_text_prompt,
+        "reference_source": req.reference_source,
+        "reference_id": req.reference_id,
+        "use_local_style_features": req.use_local_style_features,
+        "use_ollama_vision": req.use_ollama_vision and VISION.enabled,
+        "deactivate_all_styles": req.deactivate_all_styles,
+        "target_backend_name": req.target_backend_name or _infer_target_backend_name(),
+        "ollama_vision_mode": (req.ollama_vision_mode or VISION.mode or "local"),
+        # Provide URLs from global VISION unless explicitly overridden by payload
+        "ollama_vision_local_url": (req.ollama_vision_local_url or VISION.local_url),
+        "ollama_vision_remote_url": (req.ollama_vision_remote_url or VISION.remote_url),
+        "ollama_vision_cloud_url": (req.ollama_vision_cloud_url or VISION.cloud_url),
+        "reference_url": getattr(req, "reference_url", None),
+    }
+
+    payload = _sanitize_for_style_engine(raw)
+    model = getattr(style_engine, "StyleEngineRequest", None) if style_engine else None
+    if style_engine is None or model is None:
+        return payload
+    try:
+        return model(**payload)
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[STYLE] StyleEngineRequest init failed, using dict. err={e}\n{tb}")
+        return payload
+
+def _from_engine_result(res: Any) -> StyleBuildResponse:
+    try:
+        d = res.dict() if hasattr(res, "dict") else dict(res)
+    except Exception:
+        d = {}
+    # Normalize response fields against style_engine.StyleEngineResponse when possible
+    try:
+        style_positive = d.get("style_positive") or ""
+        reference_used = d.get("reference_id") or d.get("reference_used") or d.get("ref_used")
+        # Optional: include raw notes/warnings in style_components for transparency
+        style_components = {
+            "notes": d.get("notes") or [],
+            "warnings": d.get("warnings") or [],
+            "vision_text_used": d.get("vision_text_used") or "",
+            "descriptors_used": d.get("descriptors_used") or [],
+            "reference_file_saved": d.get("reference_file_saved"),
+            "content_positive": d.get("content_positive") or "",
+            "style_text_prompt_raw": d.get("style_text_prompt_raw") or "",
+        }
+        return StyleBuildResponse(
+            style_positive=(style_positive or "").strip(),
+            style_components=style_components,
+            merged_prompt_preview=None,
+            reference_used=reference_used,
+            info=None,
+        )
+    except Exception:
+        return StyleBuildResponse(
+            style_positive=d.get("style_positive") or "",
+            style_components=d.get("style_components") or {},
+            merged_prompt_preview=d.get("merged_prompt_preview"),
+            reference_used=d.get("reference_used") or d.get("ref_used"),
+            info=d.get("info"),
+        )
+
+def _extract_reference_text_from_engine_result(res: Any) -> Optional[str]:
+    """
+    Best-effort extraction of a human-readable descriptor for the reference image analysis.
+    We try common attributes used by style_engine:
+      - vision_text_used
+      - reference_text
+      - descriptors / keywords joined
+    """
+    try:
+        # Prefer exact attributes on object
+        for attr in ("vision_text_used", "reference_text"):
+            if hasattr(res, attr):
+                val = getattr(res, attr)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+        # If dict-like
+        if isinstance(res, dict):
+            for k in ("vision_text_used", "reference_text"):
+                val = res.get(k)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            # Join fallback lists if present
+            for k in ("descriptors_used", "descriptors", "keywords"):
+                arr = res.get(k)
+                if isinstance(arr, (list, tuple)):
+                    txt = ", ".join(str(x).strip() for x in arr if str(x).strip())
+                    if txt:
+                        return txt
+        # If pydantic-like
+        if hasattr(res, "model_dump"):
+            d = res.model_dump()
+            for k in ("vision_text_used", "reference_text"):
+                val = d.get(k)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            for k in ("descriptors_used", "descriptors", "keywords"):
+                arr = d.get(k)
+                if isinstance(arr, (list, tuple)):
+                    txt = ", ".join(str(x).strip() for x in arr if str(x).strip())
+                    if txt:
+                        return txt
+    except Exception:
+        pass
+    return None
+
+def _call_build_styles_compat(req_obj: Any) -> Any:
+    """
+    Call style_engine.build_styles with correct signature:
+      - build_styles(req)
+      - or build_styles(req, refs_dir)
+    """
+    if style_engine is None or not hasattr(style_engine, "build_styles"):
+        raise RuntimeError("style_engine.build_styles not available")
+    fn = style_engine.build_styles
+    try:
+        sig = inspect.signature(fn)
+        params = list(sig.parameters.values())
+    except Exception:
+        params = []
+    # Always return a coroutine to be awaited by caller
+    async def _call():
+        try:
+            if len(params) >= 2:
+                print(f"[STYLE] calling build_styles(req, refs_dir)")
+                return await fn(req_obj, REFS_DIR)  # type: ignore[misc]
+            else:
+                print(f"[STYLE] calling build_styles(req)")
+                return await fn(req_obj)  # type: ignore[misc]
+        except TypeError as e:
+            print(f"[STYLE] build_styles signature TypeError: {e}. Retrying with req only.")
+            return await fn(req_obj)  # type: ignore[misc]
+    return _call()
+
+@app.post("/api/style/build", response_model=StyleBuildResponse)
+async def api_style_build(req: StyleBuildRequest = Body(...)):
+    """
+    Build style string using the style_engine if available. No fallback is applied:
+    - If engine returns empty: we keep it empty.
+    - If engine returns non-empty: we store and use it as-is.
+    The global STATE.style_positive is updated accordingly (None when empty/whitespace).
+
+    Additional behavior enforced by style policy:
+    - If deactivate_all_styles=True, style_text_prompt and reference analysis are ignored.
+    - If deactivate_all_styles=False and style_text_prompt is non-empty, it has priority over reference-derived keywords.
+
+    New in this version (server-side safeguard):
+    - If deactivate_all_styles=True but new inputs are present in the request (style_text_prompt or reference),
+      we force deactivate_all_styles=False for this single request (auto-reactivation), so UX remains robust
+      even if the UI sends a stale deactivate flag.
+
+    New in this version (visibility tweak):
+    - We persist engine-provided reference descriptor text (if any) in STATE.reference_text and later
+      append it at the end of image prompts as "Ref: ...".
+    """
+    if style_engine is None:
+        return JSONResponse({"error": "style_engine_unavailable"}, status_code=500)
+    try:
+        req_dict = req.model_dump()
+        print(f"[STYLE] build request (raw): {req_dict}")
+
+        # Server-side safeguard: detect "new inputs"
+        has_new_style = bool((req.style_text_prompt or "").strip())
+        has_new_reference = (
+            (req.reference_source in {"local_file", "url", "url_file"}) and
+            (bool(req.reference_id) or bool(getattr(req, "reference_url", None)))
+        )
+
+        # Compute and potentially override deactivate for this request
+        effective_deactivate = bool(req.deactivate_all_styles)
+        if effective_deactivate and (has_new_style or has_new_reference):
+            # Honor the user's new inputs by auto-reactivating styles for this call.
+            req.deactivate_all_styles = False
+            effective_deactivate = False
+
+        # Add a soft info note when we auto-reactivated despite a 'deactivate' flag in the request
+        info_note: Dict[str, Any] = {}
+        if bool(req_dict.get("deactivate_all_styles")) and not effective_deactivate and (has_new_style or has_new_reference):
+            info_note["auto_reactivated"] = True
+            info_note["reason"] = "New style inputs detected while deactivate_all_styles=True; using inputs and enabling styles for this request."
+
+        # Build engine request after applying the safeguard
+        eng_req = _to_engine_req(req)
+        _log_style_engine_fn("build_styles")
+
+        try:
+            # IMPORTANT: await the async function (wrapped to always be a coroutine)
+            res = await _maybe_await(_call_build_styles_compat, eng_req)
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[STYLE] build_styles failed: {e}\n{tb}")
+            return JSONResponse({"error": "style_build_failed", "reason": f"{e}"}, status_code=502)
+
+        # Map to API result
+        api_res = _from_engine_result(res)
+
+        # No fallback: keep exactly what the engine produced (possibly empty)
+        normalized = (api_res.style_positive or "").strip()
+        api_res.style_positive = normalized  # reflect trimmed value in response
+        STATE.style_positive = normalized or None
+
+        # Extract human-readable vision/reference text (if present) for transparent "Ref: ..." appending later
+        try:
+            ref_text = _extract_reference_text_from_engine_result(res)
+            if ref_text:
+                STATE.reference_text = ref_text
+            else:
+                # If deactivate is true or no reference info, we reset reference_text to avoid stale appends
+                if effective_deactivate or not has_new_reference:
+                    STATE.reference_text = None
+        except Exception:
+            # Be safe: do not crash style build on extraction issues
+            pass
+
+        # Attach local info note if any
+        if info_note:
+            if api_res.info and isinstance(api_res.info, dict):
+                api_res.info.update(info_note)
+            else:
+                api_res.info = info_note
+
+        print(f"[STYLE] build result: len={len(normalized)} ref_used={api_res.reference_used} deactivate={effective_deactivate} ref_text_len={len((STATE.reference_text or ''))}")
+        await broadcast("status", "style_positive:updated")
+        return api_res
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[STYLE] build route exception: {e}\n{tb}")
+        return JSONResponse({"error": "internal_error", "reason": f"{e}"}, status_code=500)
+
+@app.post("/api/style/reset")
+async def api_style_reset():
+    STATE.style_positive = None
+    STATE.reference_text = None
+    await broadcast("status", "style_positive:updated")
+    return {"ok": True, "style_positive": ""}
+
+# ---------- Utility: Open-dir hint ----------
 
 @app.get("/open_dir_hint")
 async def open_dir_hint():
