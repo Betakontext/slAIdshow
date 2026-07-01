@@ -8,14 +8,6 @@ Key changes in this version:
 - Style handling: Removed any fallback style logic. If the style engine returns an empty style,
   we keep it empty. If it returns something (from local/vision interpretation or style text),
   we use it exactly as-is. merge_style_prompt keeps appending only when style_positive is non-empty.
-- Style priority: Manually entered style_text_prompt has priority over reference-derived style.
-- Style format: Styles are expected as comma-separated English keywords (produced by style_engine).
-- DEBUG logging: Always log the final, complete used_prompt (not truncated) before generation.
-- Ollama Vision endpoints: Settings endpoints added to define local/remote/cloud URLs and active mode.
-- New (server-side safeguard): If new style inputs arrive while deactivate_all_styles=True, we force
-  deactivation off for this request (auto-reactivation), and log effective_deactivate accordingly.
-- New (visibility tweak): Store engine-provided reference/vision descriptor text into STATE.reference_text
-  and append it as a transparent "Ref: ..." suffix to the final image prompt (if present).
 """
 
 from __future__ import annotations
@@ -261,25 +253,6 @@ WARMUP_TIMEOUT_SEC = _env_float("APP_OLLAMA_TIMEOUT_SEC", 45.0)
 WARMUP_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 3)
 WARMUP_RETRY_DELAY = _env_float("APP_OLLAMA_RETRY_DELAY", 1.2)
 WARMUP_GRACE_SEC = _env_float("APP_OLLAMA_GRACE_SEC", 10.0)
-
-# ---------- Ollama Vision settings (for style_engine to consume) ----------
-
-class OllamaVisionSettings(BaseModel):
-    enabled: bool = True
-    mode: Literal["local", "remote", "cloud"] = "local"
-    local_url: str = "http://127.0.0.1:11434"
-    remote_url: str = ""
-    cloud_url: str = ""
-
-@dataclass
-class OllamaVisionState:
-    enabled: bool = True
-    mode: str = "local"
-    local_url: str = "http://127.0.0.1:11434"
-    remote_url: str = ""
-    cloud_url: str = ""
-
-VISION = OllamaVisionState()
 
 # ---------- Pydantic payloads ----------
 
@@ -660,8 +633,6 @@ class PipelineState:
     audio_stream: Any = None
     audio_stopped_broadcasted: bool = False
     style_positive: Optional[str] = None
-    # New: store human-readable reference/vision descriptor text to append as "Ref: ..."
-    reference_text: Optional[str] = None
 
 STATE = PipelineState()
 STOP_DEBOUNCE_SEC = float(os.getenv("APP_STOP_DEBOUNCE_SEC", "2.0") or "2.0")
@@ -739,8 +710,6 @@ def _log_effective_config() -> None:
         f"backend={STATE.image_backend_name} allow_cloud={STATE.allow_cloud} out={OUTPUT_DIR} default={APP_IMAGE_WIDTH}x{APP_IMAGE_HEIGHT}",
         "| sse:",
         f"tick={APP_SSE_TICK_SEC}s",
-        "| vision:",
-        f"enabled={VISION.enabled} mode={VISION.mode} local={VISION.local_url} remote={VISION.remote_url} cloud={VISION.cloud_url}",
     )
 
 # ---------- Runtime-aware backend wrapper ----------
@@ -945,22 +914,6 @@ async def audio_transcription_loop() -> None:
     finally:
         await safe_stop_audio_stream()
 
-# ---------- Prompt post-processing helpers ----------
-
-def _append_reference_block(prompt: str, reference_text: Optional[str]) -> str:
-    """
-    Transparently append a reference descriptor block to the prompt if present.
-    We keep it short and postfix-only to not disturb primary instruction order.
-    """
-    p = (prompt or "").strip()
-    r = (reference_text or "").strip()
-    if not r:
-        return p
-    # Avoid duplicate "Ref:" if already appended
-    if " Ref:" in p or p.endswith("Ref:"):
-        return p
-    return f"{p} Ref: {r}"
-
 # ---------- LLM + Image ----------
 
 async def run_llm_and_image(text: str) -> None:
@@ -979,14 +932,7 @@ async def run_llm_and_image(text: str) -> None:
                 STATE.last_llm_error = "llm_empty_response"
                 await broadcast("status", "llm_empty_response")
                 return
-
-            # Merge style (only if non-empty); style_text_prompt has already been resolved into STATE.style_positive.
             eff_prompt = merge_style_prompt(img_prompt, getattr(STATE, "style_positive", None))
-            # Append transparent reference block if we have vision/reference descriptors
-            eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
-
-            # DEBUG: Log full, final prompt (not truncated)
-            print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
 
             STATE.last_prompt = eff_prompt
             await broadcast("llm_prompt", eff_prompt)
@@ -1270,13 +1216,6 @@ async def get_config():
             }
         },
         "sse": {"tick_sec": APP_SSE_TICK_SEC},
-        "vision": {
-            "enabled": VISION.enabled,
-            "mode": VISION.mode,
-            "local_url": VISION.local_url,
-            "remote_url": VISION.remote_url,
-            "cloud_url": VISION.cloud_url,
-        },
     }
 
 # ---------- Workflows API ----------
@@ -1477,14 +1416,7 @@ async def api_plan(req: PlanRequest):
             data = await _post_with_retries(client, _ollama_url("/api/generate"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
             out = (data.get("response") or "").strip()
             if out:
-                # Merge style preference
                 eff_prompt = merge_style_prompt(out, req.style_positive or getattr(STATE, "style_positive", None))
-                # Append optional transparent reference descriptors
-                eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
-
-                # DEBUG: Log full, final prompt (not truncated)
-                print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
-
                 STATE.last_prompt = eff_prompt
                 await broadcast("llm_prompt", eff_prompt)
                 if BACKEND is not None:
@@ -1522,10 +1454,6 @@ async def api_image_direct(req: DirectImageRequest):
         style_src = req.style_positive if (req.style_positive and req.style_positive.strip()) else getattr(STATE, "style_positive", None)
         base_prompt = req.prompt.strip()
         eff_prompt = merge_style_prompt(base_prompt, style_src)
-        eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
-
-        # DEBUG: Log full, final prompt (not truncated)
-        print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
 
         w = req.width if (req.width and req.width > 0) else STATE.image_width
         h = req.height if (req.height and req.height > 0) else STATE.image_height
@@ -1560,10 +1488,6 @@ async def api_image_test(req: ImageRequest):
                 setattr(BACKEND.cfg, "negative", neg)
         style_src = req.style_positive if (req.style_positive and req.style_positive.strip()) else getattr(STATE, "style_positive", None)
         eff_prompt = merge_style_prompt(prompt, style_src)
-        eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
-
-        # DEBUG: Log full, final prompt (not truncated)
-        print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
 
         w = req.width if (req.width and req.width > 0) else STATE.image_width
         h = req.height if (req.height and req.height > 0) else STATE.image_height
@@ -1651,12 +1575,8 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
 async def get_image_size():
     return {"width": STATE.image_width, "height": STATE.image_height}
 
-class ImageSizeSettingsIn(BaseModel):
-    width: int = Field(ge=_MIN_SIZE, le=_MAX_SIZE)
-    height: int = Field(ge=_MIN_SIZE, le=_MAX_SIZE)
-
 @app.post("/api/settings/image_size")
-async def set_image_size(s: ImageSizeSettingsIn):
+async def set_image_size(s: ImageSizeSettings):
     STATE.image_width = int(s.width)
     STATE.image_height = int(s.height)
     await broadcast("status", f"image_size:{STATE.image_width}x{STATE.image_height}")
@@ -1687,28 +1607,6 @@ async def set_style_positive(s: StylePromptSettings):
     STATE.style_positive = txt or None
     await broadcast("status", "style_positive:updated")
     return {"ok": True, "style_positive": STATE.style_positive or ""}
-
-# ---------- Ollama Vision settings routes ----------
-
-@app.get("/api/settings/ollama_vision", response_model=OllamaVisionSettings)
-async def get_ollama_vision():
-    return OllamaVisionSettings(
-        enabled=VISION.enabled,
-        mode=VISION.mode if VISION.mode in {"local", "remote", "cloud"} else "local",
-        local_url=VISION.local_url,
-        remote_url=VISION.remote_url,
-        cloud_url=VISION.cloud_url,
-    )
-
-@app.post("/api/settings/ollama_vision", response_model=OllamaVisionSettings)
-async def set_ollama_vision(cfg: OllamaVisionSettings):
-    VISION.enabled = bool(cfg.enabled)
-    VISION.mode = cfg.mode if cfg.mode in {"local", "remote", "cloud"} else "local"
-    VISION.local_url = (cfg.local_url or "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434"
-    VISION.remote_url = (cfg.remote_url or "").strip()
-    VISION.cloud_url = (cfg.cloud_url or "").strip()
-    await broadcast("status", "ollama_vision:updated")
-    return await get_ollama_vision()
 
 # ---------- Style API (upload/save_url/build/reset) with no fallback ----------
 
@@ -1753,16 +1651,10 @@ def _sanitize_filename(name: str) -> str:
     return base + ext
 
 async def _maybe_await(fn, *args, **kwargs):
-    # Await coroutine objects or callables that return coroutines
     if asyncio.iscoroutinefunction(fn):
         return await fn(*args, **kwargs)
-    # If fn is a normal function but returns a coroutine, await it
-    res = fn(*args, **kwargs)
-    if asyncio.iscoroutine(res):
-        return await res
-    # Offload sync CPU-bound work
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, lambda: res)
+    return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
 
 class SaveUrlRequest(BaseModel):
     url: HttpUrl
@@ -1779,19 +1671,13 @@ class SaveUrlResponse(UploadResponse):
 class StyleBuildRequest(BaseModel):
     content_positive: Optional[str] = None
     style_text_prompt: Optional[str] = None
-    reference_source: Optional[str] = Field(default=None, description="local_file|url_file|none|url")
+    reference_source: Optional[str] = Field(default=None, description="local_file|url_file|none")
     reference_id: Optional[str] = None
     use_local_style_features: bool = True
     use_ollama_vision: bool = False
     deactivate_all_styles: bool = False
     target_backend_name: Optional[str] = Field(default=None, description="comfy_local|comfy_remote|comfy_cloud|pollinations")
     ollama_vision_mode: Optional[str] = Field(default="local", description="local|remote|cloud")
-    # Additional URLs passed through to style_engine (if it supports them)
-    ollama_vision_local_url: Optional[str] = None
-    ollama_vision_remote_url: Optional[str] = None
-    ollama_vision_cloud_url: Optional[str] = None
-    # Optional convenience field some UIs might send (not required):
-    reference_url: Optional[str] = None
 
 class StyleBuildResponse(BaseModel):
     style_positive: str
@@ -1893,7 +1779,7 @@ def _sanitize_for_style_engine(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Ensure compatibility with StyleEngineRequest:
     - target_backend_name must be a non-empty string
-    - remove or map extra keys if the engine model forbids them
+    - remove ollama_vision_mode if the model forbids extras
     """
     payload = dict(payload)
     # Ensure target_backend_name
@@ -1901,24 +1787,20 @@ def _sanitize_for_style_engine(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(tbn, str) or not tbn.strip():
         payload["target_backend_name"] = _infer_target_backend_name()
 
-    # Try to validate against engine's pydantic model if present
     model = getattr(style_engine, "StyleEngineRequest", None) if style_engine else None
     if model is None:
-        # Fallback: keep extra fields; some engines accept dict freestyle
+        payload.pop("ollama_vision_mode", None)
         return payload
 
     valid_keys = set(getattr(model, "model_fields", {}).keys()) if hasattr(model, "model_fields") else None
     if valid_keys:
-        # Pass through vision URLs if they exist in the model; else drop
-        for k in list(payload.keys()):
-            if k not in valid_keys:
-                payload.pop(k, None)
-
+        to_drop = [k for k in payload.keys() if k not in valid_keys]
+        for k in to_drop:
+            payload.pop(k, None)
         if "target_backend_name" not in payload or not payload["target_backend_name"]:
             payload["target_backend_name"] = _infer_target_backend_name()
     else:
-        # Unknown model field schema; keep as-is
-        pass
+        payload.pop("ollama_vision_mode", None)
 
     try:
         model(**payload)
@@ -1927,24 +1809,17 @@ def _sanitize_for_style_engine(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 def _to_engine_req(req: StyleBuildRequest) -> Any:
-    # Inject current vision settings into the request so the engine can route properly
     raw = {
         "content_positive": req.content_positive,
         "style_text_prompt": req.style_text_prompt,
         "reference_source": req.reference_source,
         "reference_id": req.reference_id,
         "use_local_style_features": req.use_local_style_features,
-        "use_ollama_vision": req.use_ollama_vision and VISION.enabled,
+        "use_ollama_vision": req.use_ollama_vision,
         "deactivate_all_styles": req.deactivate_all_styles,
-        "target_backend_name": req.target_backend_name or _infer_target_backend_name(),
-        "ollama_vision_mode": (req.ollama_vision_mode or VISION.mode or "local"),
-        # Provide URLs from global VISION unless explicitly overridden by payload
-        "ollama_vision_local_url": (req.ollama_vision_local_url or VISION.local_url),
-        "ollama_vision_remote_url": (req.ollama_vision_remote_url or VISION.remote_url),
-        "ollama_vision_cloud_url": (req.ollama_vision_cloud_url or VISION.cloud_url),
-        "reference_url": getattr(req, "reference_url", None),
+        "target_backend_name": req.target_backend_name,
+        "ollama_vision_mode": (req.ollama_vision_mode or "local"),
     }
-
     payload = _sanitize_for_style_engine(raw)
     model = getattr(style_engine, "StyleEngineRequest", None) if style_engine else None
     if style_engine is None or model is None:
@@ -1961,80 +1836,13 @@ def _from_engine_result(res: Any) -> StyleBuildResponse:
         d = res.dict() if hasattr(res, "dict") else dict(res)
     except Exception:
         d = {}
-    # Normalize response fields against style_engine.StyleEngineResponse when possible
-    try:
-        style_positive = d.get("style_positive") or ""
-        reference_used = d.get("reference_id") or d.get("reference_used") or d.get("ref_used")
-        # Optional: include raw notes/warnings in style_components for transparency
-        style_components = {
-            "notes": d.get("notes") or [],
-            "warnings": d.get("warnings") or [],
-            "vision_text_used": d.get("vision_text_used") or "",
-            "descriptors_used": d.get("descriptors_used") or [],
-            "reference_file_saved": d.get("reference_file_saved"),
-            "content_positive": d.get("content_positive") or "",
-            "style_text_prompt_raw": d.get("style_text_prompt_raw") or "",
-        }
-        return StyleBuildResponse(
-            style_positive=(style_positive or "").strip(),
-            style_components=style_components,
-            merged_prompt_preview=None,
-            reference_used=reference_used,
-            info=None,
-        )
-    except Exception:
-        return StyleBuildResponse(
-            style_positive=d.get("style_positive") or "",
-            style_components=d.get("style_components") or {},
-            merged_prompt_preview=d.get("merged_prompt_preview"),
-            reference_used=d.get("reference_used") or d.get("ref_used"),
-            info=d.get("info"),
-        )
-
-def _extract_reference_text_from_engine_result(res: Any) -> Optional[str]:
-    """
-    Best-effort extraction of a human-readable descriptor for the reference image analysis.
-    We try common attributes used by style_engine:
-      - vision_text_used
-      - reference_text
-      - descriptors / keywords joined
-    """
-    try:
-        # Prefer exact attributes on object
-        for attr in ("vision_text_used", "reference_text"):
-            if hasattr(res, attr):
-                val = getattr(res, attr)
-                if isinstance(val, str) and val.strip():
-                    return val.strip()
-        # If dict-like
-        if isinstance(res, dict):
-            for k in ("vision_text_used", "reference_text"):
-                val = res.get(k)
-                if isinstance(val, str) and val.strip():
-                    return val.strip()
-            # Join fallback lists if present
-            for k in ("descriptors_used", "descriptors", "keywords"):
-                arr = res.get(k)
-                if isinstance(arr, (list, tuple)):
-                    txt = ", ".join(str(x).strip() for x in arr if str(x).strip())
-                    if txt:
-                        return txt
-        # If pydantic-like
-        if hasattr(res, "model_dump"):
-            d = res.model_dump()
-            for k in ("vision_text_used", "reference_text"):
-                val = d.get(k)
-                if isinstance(val, str) and val.strip():
-                    return val.strip()
-            for k in ("descriptors_used", "descriptors", "keywords"):
-                arr = d.get(k)
-                if isinstance(arr, (list, tuple)):
-                    txt = ", ".join(str(x).strip() for x in arr if str(x).strip())
-                    if txt:
-                        return txt
-    except Exception:
-        pass
-    return None
+    return StyleBuildResponse(
+        style_positive=d.get("style_positive") or "",
+        style_components=d.get("style_components") or {},
+        merged_prompt_preview=d.get("merged_prompt_preview"),
+        reference_used=d.get("reference_used") or d.get("ref_used"),
+        info=d.get("info"),
+    )
 
 def _call_build_styles_compat(req_obj: Any) -> Any:
     """
@@ -2050,19 +1858,16 @@ def _call_build_styles_compat(req_obj: Any) -> Any:
         params = list(sig.parameters.values())
     except Exception:
         params = []
-    # Always return a coroutine to be awaited by caller
-    async def _call():
-        try:
-            if len(params) >= 2:
-                print(f"[STYLE] calling build_styles(req, refs_dir)")
-                return await fn(req_obj, REFS_DIR)  # type: ignore[misc]
-            else:
-                print(f"[STYLE] calling build_styles(req)")
-                return await fn(req_obj)  # type: ignore[misc]
-        except TypeError as e:
-            print(f"[STYLE] build_styles signature TypeError: {e}. Retrying with req only.")
-            return await fn(req_obj)  # type: ignore[misc]
-    return _call()
+    try:
+        if len(params) >= 2:
+            print(f"[STYLE] calling build_styles(req, refs_dir)")
+            return fn(req_obj, REFS_DIR)
+        else:
+            print(f"[STYLE] calling build_styles(req)")
+            return fn(req_obj)
+    except TypeError as e:
+        print(f"[STYLE] build_styles signature TypeError: {e}. Retrying with req only.")
+        return fn(req_obj)
 
 @app.post("/api/style/build", response_model=StyleBuildResponse)
 async def api_style_build(req: StyleBuildRequest = Body(...)):
@@ -2071,59 +1876,21 @@ async def api_style_build(req: StyleBuildRequest = Body(...)):
     - If engine returns empty: we keep it empty.
     - If engine returns non-empty: we store and use it as-is.
     The global STATE.style_positive is updated accordingly (None when empty/whitespace).
-
-    Additional behavior enforced by style policy:
-    - If deactivate_all_styles=True, style_text_prompt and reference analysis are ignored.
-    - If deactivate_all_styles=False and style_text_prompt is non-empty, it has priority over reference-derived keywords.
-
-    New in this version (server-side safeguard):
-    - If deactivate_all_styles=True but new inputs are present in the request (style_text_prompt or reference),
-      we force deactivate_all_styles=False for this single request (auto-reactivation), so UX remains robust
-      even if the UI sends a stale deactivate flag.
-
-    New in this version (visibility tweak):
-    - We persist engine-provided reference descriptor text (if any) in STATE.reference_text and later
-      append it at the end of image prompts as "Ref: ...".
     """
     if style_engine is None:
         return JSONResponse({"error": "style_engine_unavailable"}, status_code=500)
     try:
-        req_dict = req.model_dump()
-        print(f"[STYLE] build request (raw): {req_dict}")
-
-        # Server-side safeguard: detect "new inputs"
-        has_new_style = bool((req.style_text_prompt or "").strip())
-        has_new_reference = (
-            (req.reference_source in {"local_file", "url", "url_file"}) and
-            (bool(req.reference_id) or bool(getattr(req, "reference_url", None)))
-        )
-
-        # Compute and potentially override deactivate for this request
-        effective_deactivate = bool(req.deactivate_all_styles)
-        if effective_deactivate and (has_new_style or has_new_reference):
-            # Honor the user's new inputs by auto-reactivating styles for this call.
-            req.deactivate_all_styles = False
-            effective_deactivate = False
-
-        # Add a soft info note when we auto-reactivated despite a 'deactivate' flag in the request
-        info_note: Dict[str, Any] = {}
-        if bool(req_dict.get("deactivate_all_styles")) and not effective_deactivate and (has_new_style or has_new_reference):
-            info_note["auto_reactivated"] = True
-            info_note["reason"] = "New style inputs detected while deactivate_all_styles=True; using inputs and enabling styles for this request."
-
-        # Build engine request after applying the safeguard
+        print(f"[STYLE] build request (raw): {req.model_dump()}")
         eng_req = _to_engine_req(req)
         _log_style_engine_fn("build_styles")
 
         try:
-            # IMPORTANT: await the async function (wrapped to always be a coroutine)
             res = await _maybe_await(_call_build_styles_compat, eng_req)
         except Exception as e:
             tb = traceback.format_exc()
             print(f"[STYLE] build_styles failed: {e}\n{tb}")
             return JSONResponse({"error": "style_build_failed", "reason": f"{e}"}, status_code=502)
 
-        # Map to API result
         api_res = _from_engine_result(res)
 
         # No fallback: keep exactly what the engine produced (possibly empty)
@@ -2131,27 +1898,7 @@ async def api_style_build(req: StyleBuildRequest = Body(...)):
         api_res.style_positive = normalized  # reflect trimmed value in response
         STATE.style_positive = normalized or None
 
-        # Extract human-readable vision/reference text (if present) for transparent "Ref: ..." appending later
-        try:
-            ref_text = _extract_reference_text_from_engine_result(res)
-            if ref_text:
-                STATE.reference_text = ref_text
-            else:
-                # If deactivate is true or no reference info, we reset reference_text to avoid stale appends
-                if effective_deactivate or not has_new_reference:
-                    STATE.reference_text = None
-        except Exception:
-            # Be safe: do not crash style build on extraction issues
-            pass
-
-        # Attach local info note if any
-        if info_note:
-            if api_res.info and isinstance(api_res.info, dict):
-                api_res.info.update(info_note)
-            else:
-                api_res.info = info_note
-
-        print(f"[STYLE] build result: len={len(normalized)} ref_used={api_res.reference_used} deactivate={effective_deactivate} ref_text_len={len((STATE.reference_text or ''))}")
+        print(f"[STYLE] build result: len={len(normalized)} ref_used={api_res.reference_used} deactivate={req.deactivate_all_styles}")
         await broadcast("status", "style_positive:updated")
         return api_res
     except Exception as e:
@@ -2162,7 +1909,6 @@ async def api_style_build(req: StyleBuildRequest = Body(...)):
 @app.post("/api/style/reset")
 async def api_style_reset():
     STATE.style_positive = None
-    STATE.reference_text = None
     await broadcast("status", "style_positive:updated")
     return {"ok": True, "style_positive": ""}
 

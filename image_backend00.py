@@ -1,8 +1,18 @@
 # image_backend.py
 # -*- coding: utf-8 -*-
 # Production-ready image backend adapters for ComfyUI (local/LAN/remote) and Pollinations (cloud)
-# This version adds style-aware mapping for ComfyUI workflows that separate content and style CLIP encodes
-# and (optionally) a ConditioningCombine node with a tunable style weight.
+#
+# This release keeps Pollinations fully decoupled and working as before, while adding
+# an opt-in, safe auto-discovery for ComfyUI that:
+#   - Prefers the configured APP_COMFY_HOST first (default 127.0.0.1)
+#   - Optionally tries APP_COMFY_FALLBACK_HOSTS and AUTO_DISCOVERY_SUBNETS if local is down
+#   - Enforces APP_ALLOW_REMOTE_BACKENDS and APP_ALLOWED_SUBNETS before connecting
+#   - Caches the first discovered host for the process lifetime (no repeated scans)
+#
+# IMPORTANT:
+# - Pollinations path never triggers ComfyUI discovery and is not affected by it.
+# - ComfyUI discovery only runs if IMAGE_BACKEND=comfyui and APP_DISABLE_COMFYUI=0.
+# - 0.0.0.0 is a bind address only; clients must use a real IP like 192.168.188.24.
 
 from __future__ import annotations
 
@@ -332,8 +342,8 @@ class PollinationsConfig(BaseModel):
     def require_cloud_enabled(self) -> None:
         if not self.allow_cloud:
             raise RuntimeError("Cloud image backend not allowed (set ALLOW_CLOUD_IMAGE_BACKEND=1 to enable)")
-        if not self.secret and self.use_v1:
-            raise RuntimeError("POLLINATIONS_SECRET missing in environment for v1 API")
+        if not self.secret:
+            raise RuntimeError("POLLINATIONS_SECRET missing in environment")
 
 def _size_from_wh(width: int, height: int) -> str:
     if width > 0 and height > 0:
@@ -507,7 +517,7 @@ class PollinationsBackend(ImageBackend):
 
 
 # ============================================================
-# ComfyUI (Local/LAN) with optional Auto-Discovery + Style Mapping
+# ComfyUI (Local/LAN) with optional Auto-Discovery
 # ============================================================
 
 class ComfyConfig(BaseModel):
@@ -524,16 +534,10 @@ class ComfyConfig(BaseModel):
     comfy_output_dir: Optional[Path] = Field(default_factory=lambda: (Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).resolve() if _env_str("APP_COMFY_OUTPUT_DIR", "") else None))
     negative: str = Field(default_factory=lambda: _env_str("APP_COMFY_NEGATIVE", "text, watermark, logo, low quality, blurry, bad anatomy"))
 
-    # Node IDs for default single-encode workflows
     node_id_positive: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_POS", "2"))
     node_id_negative: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_NEG", "3"))
     node_id_latent: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_LATENT", "4"))
     node_id_ksampler: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_KSAMPLER", "5"))
-
-    # Optional style-aware workflow IDs
-    node_id_style_positive: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_STYLE_POS", "8"))  # CLIPTextEncode (Style)
-    node_id_conditioning_combine: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_COND_COMBINE", "9"))  # ConditioningCombine
-    style_weight: float = Field(default_factory=lambda: _env_float("APP_COMFY_STYLE_WEIGHT", 1.8))
 
     # Discovery (opt-in, decoupled from Pollinations)
     auto_discovery_enable: bool = Field(default_factory=lambda: _env_bool01("AUTO_DISCOVERY_ENABLE", 1))
@@ -577,12 +581,6 @@ class LocalComfyBackend(ImageBackend):
         self._samplers_cache: Optional[Set[str]] = None
         self._active_host: Optional[str] = None
         self._discovery_done: bool = False
-
-        # Optional per-request overrides: can be set by caller before generate()
-        self.request_style_text: Optional[str] = None
-        self.request_style_weight: Optional[float] = None
-
-    # ----- Discovery / probing -----
 
     async def _probe_history(self, host: str, port: int, timeout: httpx.Timeout) -> bool:
         try:
@@ -748,8 +746,6 @@ class LocalComfyBackend(ImageBackend):
             return "euler_ancestral"
         return n
 
-    # ----- Workflow parsing/mutation helpers -----
-
     def _load_prompt_file(self) -> dict:
         data = json.loads(self.cfg.workflow_path.read_text(encoding="utf-8"))
         if "prompt" in data and isinstance(data["prompt"], dict):
@@ -764,10 +760,6 @@ class LocalComfyBackend(ImageBackend):
         return nodes
 
     def _override_text_nodes(self, prompt_dict: dict, positive: str, negative: str) -> tuple[bool, bool]:
-        """
-        Legacy single-encode mapping: set positive into node_id_positive and negative into node_id_negative;
-        fallback: first two CLIPTextEncode nodes if configured IDs are absent.
-        """
         pos_set = False
         neg_set = False
 
@@ -803,41 +795,6 @@ class LocalComfyBackend(ImageBackend):
 
         return pos_set, neg_set
 
-    def _override_style_nodes(self, prompt_dict: dict, style_text: Optional[str]) -> tuple[bool, Optional[str]]:
-        """
-        Style-aware mapping:
-        - If node_id_style_positive exists and is CLIPTextEncode: set its 'text' to style_text (if provided).
-        - If node_id_conditioning_combine exists and has 'strength', optionally set it to style_weight/request override.
-        Returns (style_set, info_message).
-        """
-        if not style_text:
-            return False, None
-
-        style_set = False
-        info = None
-
-        node_style = prompt_dict.get(self.cfg.node_id_style_positive)
-        if isinstance(node_style, dict) and node_style.get("class_type") == "CLIPTextEncode":
-            inputs = node_style.get("inputs")
-            if isinstance(inputs, dict) and "text" in inputs:
-                inputs["text"] = style_text
-                style_set = True
-        else:
-            return False, "style_node_missing"
-
-        # Optional ConditioningCombine weight
-        node_combine = prompt_dict.get(self.cfg.node_id_conditioning_combine)
-        if isinstance(node_combine, dict) and (node_combine.get("class_type") or "").lower().startswith("conditioning"):
-            combine_inputs = node_combine.get("inputs", {})
-            if isinstance(combine_inputs, dict) and "strength" in combine_inputs:
-                wt = self.request_style_weight if (self.request_style_weight is not None) else self.cfg.style_weight
-                try:
-                    combine_inputs["strength"] = float(wt)
-                    info = f"style_weight_set:{wt}"
-                except Exception:
-                    info = "style_weight_invalid"
-        return style_set, info
-
     def _override_dimensions_in_prompt(self, prompt_dict: dict, width: int, height: int) -> None:
         node_latent = prompt_dict.get(self.cfg.node_id_latent)
         if isinstance(node_latent, dict):
@@ -870,28 +827,6 @@ class LocalComfyBackend(ImageBackend):
                     if "height" in inputs:
                         inputs["height"] = height
 
-    def _override_sampling_params(self, prompt_dict: dict, steps: Optional[int], cfg: Optional[float], sampler_name: Optional[str]) -> None:
-        """
-        Best-effort override of KSampler inputs if present in workflow.
-        """
-        for node in prompt_dict.values():
-            if not isinstance(node, dict):
-                continue
-            cls = str(node.get("class_type") or node.get("class", "")).strip().lower()
-            if "ksampler" in cls:
-                inputs = node.get("inputs", {})
-                if not isinstance(inputs, dict):
-                    continue
-                if steps is not None and "steps" in inputs:
-                    inputs["steps"] = int(steps)
-                if cfg is not None and "cfg" in inputs:
-                    try:
-                        inputs["cfg"] = float(cfg)
-                    except Exception:
-                        pass
-                if sampler_name and "sampler_name" in inputs:
-                    inputs["sampler_name"] = sampler_name
-
     def _copy_latest_from_comfy(self, since_ts: float) -> Optional[Path]:
         src_dir = self.cfg.comfy_output_dir
         if not src_dir or not src_dir.exists():
@@ -914,32 +849,11 @@ class LocalComfyBackend(ImageBackend):
         except Exception:
             return None
 
-    # ----- Public API -----
-
-    async def generate(
-        self,
-        prompt: str,
-        width: int | None = None,
-        height: int | None = None,
-        negative: str | None = None,
-        style_text: Optional[str] = None,
-        style_weight: Optional[float] = None
-    ) -> Path:
-        """
-        Generate via ComfyUI.
-        - prompt: content prompt (required)
-        - negative: negative prompt (optional; env fallback exists)
-        - style_text: optional separate style prompt to inject into a dedicated CLIPTextEncode (Style) node, if present
-        - style_weight: optional override for ConditioningCombine.strength
-        """
+    async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative: str | None = None) -> Path:
         if self.cfg.disabled:
             raise RuntimeError("ComfyUI disabled (APP_DISABLE_COMFYUI=1)")
         if not self.cfg.workflow_path.exists():
             raise RuntimeError(f"workflow_not_found: {self.cfg.workflow_path}")
-
-        # Allow per-request style overrides
-        self.request_style_text = (style_text or self.request_style_text)
-        self.request_style_weight = (style_weight if style_weight is not None else self.request_style_weight)
 
         await self._ensure_host()
         host = self._active_host or self.cfg.host
@@ -962,55 +876,19 @@ class LocalComfyBackend(ImageBackend):
 
         prompt_dict = self._load_prompt_file()
         clip_nodes_before = self._find_clip_nodes(prompt_dict)
-
-        # Dimensions and sampling params
         self._override_dimensions_in_prompt(prompt_dict, width=w, height=h)
-        self._override_sampling_params(prompt_dict, steps=self.cfg.steps, cfg=self.cfg.cfg, sampler_name=sampler)
 
         pos_text = (prompt or "").strip()
         neg_text = (negative or self.cfg.negative or "").strip()
 
-        # Legacy mapping (content + negative)
         pos_set, neg_set = self._override_text_nodes(prompt_dict, positive=pos_text, negative=neg_text)
 
-        # Style mapping (if style node exists)
-        style_info_log = ""
-        style_set = False
-        if self.request_style_text:
-            style_set, style_info = self._override_style_nodes(prompt_dict, style_text=self.request_style_text)
-            if style_info:
-                style_info_log = style_info
-
-        # Fallback: if no style node, append style to positive prompt (to not lose user intent)
-        if self.request_style_text and not style_set:
-            # Inject only if not already included
-            if self.request_style_text.lower() not in pos_text.lower():
-                # Try to locate the actual positive node used and append; else just update node_id_positive
-                node_pos = prompt_dict.get(self.cfg.node_id_positive)
-                style_suffix = f" Style: {self.request_style_text}"
-                if isinstance(node_pos, dict) and node_pos.get("class_type") == "CLIPTextEncode":
-                    inputs = node_pos.get("inputs", {})
-                    if isinstance(inputs, dict) and "text" in inputs and isinstance(inputs["text"], str):
-                        inputs["text"] = (inputs["text"] or "") + style_suffix
-                        pos_set = True
-                else:
-                    # as last resort, scan first CLIP
-                    clip_nodes = self._find_clip_nodes(prompt_dict)
-                    if clip_nodes:
-                        inputs = clip_nodes[0].get("inputs", {})
-                        if isinstance(inputs, dict) and "text" in inputs and isinstance(inputs["text"], str):
-                            inputs["text"] = (inputs["text"] or "") + style_suffix
-                            pos_set = True
-            style_info_log = style_info_log or "style_appended_to_positive"
-
         clip_count = len(clip_nodes_before)
-        print(f"[COMFY WORKFLOW] host={host} pos_set={pos_set} neg_set={neg_set} style_set={style_set} "
-              f"clip_nodes={clip_count} size={w}x{h} sampler={sampler} "
-              f"pos_sample='{pos_text[:96]}' style_text='{(self.request_style_text or '')[:72]}' "
-              f"neg_sample='{neg_text[:96]}' style_info='{style_info_log or ''}'")
+        print(f"[COMFY WORKFLOW] host={host} pos_set={pos_set} neg_set={neg_set} clip_nodes={clip_count} "
+              f"size={w}x{h} sampler={sampler} pos_sample='{pos_text[:96]}' neg_sample='{neg_text[:96]}'")
 
         if clip_count == 0:
-            raise RuntimeError("workflow_missing_CLIPTextEncode_nodes: no CLIPTextEncode nodes found; cannot set positive/negative/style text")
+            raise RuntimeError("workflow_missing_CLIPTextEncode_nodes: no CLIPTextEncode nodes found; cannot set positive/negative text")
         if not neg_set:
             print("[WARN] Negative prompt node not matched by configured IDs; used fallback if possible. "
                   "Verify APP_COMFY_NODE_NEG or workflow structure.")
@@ -1020,13 +898,13 @@ class LocalComfyBackend(ImageBackend):
         images = await generate_from_prompt_dict(
             prompt_dict=prompt_dict,
             out_dir=self.out_dir,
-            positive_text=None,   # already injected into nodes
-            negative_text=None,   # already injected into nodes
-            width=None,           # already set on latent nodes
-            height=None,          # already set on latent nodes
-            steps=None,           # already overridden in graph if possible
-            cfg=None,             # already overridden in graph if possible
-            sampler_name=None,    # already overridden in graph if possible
+            positive_text=None,
+            negative_text=None,
+            width=None,
+            height=None,
+            steps=self.cfg.steps,
+            cfg=self.cfg.cfg,
+            sampler_name=sampler,
             scheduler=None,
             denoise=None,
             seed=None,
@@ -1074,7 +952,6 @@ def build_image_backend() -> ImageBackend:
 # ---------------------------
 # Optional helper for controllers (post-LLM guard)
 # ---------------------------
-
 def merge_style_prompt(content_prompt: str, style_positive: Optional[str]) -> str:
     """
     Merge content prompt with optional style-positive.
@@ -1090,13 +967,10 @@ def merge_style_prompt(content_prompt: str, style_positive: Optional[str]) -> st
     if style.lower() in content.lower():
         return content
     sep = " "
+    # Prefer a readable tag to help both backends/LLMs
     return f"{content}{sep}Style: {style}".strip()
 
 def inject_negatives_for_final_prompt(prompt: str, negative: str | None) -> str:
-    """
-    Optional helper to inline negative constraints into a text-only backend prompt.
-    Reuses the Pollinations keyword injection logic to keep consistent behavior.
-    """
     negative = (negative or "").strip()
     if not negative:
         return prompt

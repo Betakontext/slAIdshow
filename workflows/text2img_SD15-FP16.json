@@ -1,64 +1,113 @@
 {
   "1": {
     "inputs": {
-        "ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors"
+      "ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors"
     },
     "class_type": "CheckpointLoaderSimple",
     "_meta": {
       "title": "Load Checkpoint"
     }
   },
+  "10": {
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "clip": [
+        "1",
+        1
+      ],
+      "lora_name": "",
+      "strength_model": 0.0,
+      "strength_clip": 0.0
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "LoRA Loader (optional)"
+    }
+  },
   "2": {
     "inputs": {
       "text": "Kinder spielen in einem Schwimmbad an der Küste. Felsen glitzern im Sonnenlicht.",
       "clip": [
-        "1",
+        "10",
         1
       ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
-      "title": "CLIP Text Encode (Prompt)"
+      "title": "CLIP Text Encode (Content)"
+    }
+  },
+  "8": {
+    "inputs": {
+      "text": "(Manga:1.6), (Wasserfarben:1.6), watercolor, ink outlines, cel shading, flat colors, paper texture, comic panel style",
+      "clip": [
+        "10",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Style)"
+    }
+  },
+  "9": {
+    "inputs": {
+      "conditioning_to": [
+        "2",
+        0
+      ],
+      "conditioning_from": [
+        "8",
+        0
+      ],
+      "strength": 1.8
+    },
+    "class_type": "ConditioningCombine",
+    "_meta": {
+      "title": "Combine Conditioning (Content + Style, weight=style)"
     }
   },
   "3": {
     "inputs": {
-      "text": "text, watermark, logo, low quality, blurry, bad anatomy, close-up, headshot, portrait, face, facial features, eyes, mouth, nose, selfie, tight crop, centered head, bokeh portrait",
+      "text": "text, watermark, logo, low quality, blurry, bad anatomy, photorealistic, oil painting, glossy, 3d render, sharp photographic detail, realistic skin, close-up, headshot, portrait, face, facial features, eyes, mouth, nose, selfie, tight crop, centered head, bokeh portrait",
       "clip": [
-        "1",
+        "10",
         1
       ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
-      "title": "CLIP Text Encode (Prompt)"
+      "title": "CLIP Text Encode (Negative)"
     }
   },
   "4": {
     "inputs": {
-      "width": 128,
-      "height": 128,
+      "width": 160,
+      "height": 90,
       "batch_size": 1
     },
     "class_type": "EmptyLatentImage",
     "_meta": {
-      "title": "Empty Latent Image"
+      "title": "Empty Latent Image (160x90 latent ≈ 1280x720)"
     }
   },
   "5": {
     "inputs": {
       "seed": 19127555788607,
-      "steps": 20,
-      "cfg": 8,
-      "sampler_name": "euler",
-      "scheduler": "simple",
-      "denoise": 1,
+      "steps": 32,
+      "cfg": 8.5,
+      "sampler_name": "dpmpp_2m_karras",
+      "scheduler": "karras",
+      "denoise": 1.0,
       "model": [
-        "1",
+        "10",
         0
       ],
       "positive": [
-        "2",
+        "9",
         0
       ],
       "negative": [
@@ -72,7 +121,7 @@
     },
     "class_type": "KSampler",
     "_meta": {
-      "title": "KSampler"
+      "title": "KSampler (style-locked)"
     }
   },
   "6": {

@@ -904,7 +904,13 @@
         use_local_style_features: !!STYLE_STATE.use_local_style_features,
         use_ollama_vision: !!STYLE_STATE.use_ollama_vision,
         deactivate_all_styles: !!STYLE_STATE.deactivate_all_styles,
+        // NEW (if you have these settings somewhere in UI or server-provided config):
+        // ollama_vision_mode: 'local' | 'remote' | 'cloud',
+        // ollama_vision_local_url: 'http://127.0.0.1:11434',
+        // ollama_vision_remote_url: 'http://<lan-ip>:11434',
+        // ollama_vision_cloud_url: 'https://<your-cloud-endpoint>'
       };
+
       try {
         const r = await fetch('/api/style/build', {
           method: 'POST',
@@ -1035,7 +1041,7 @@
 
     // Deactivate all styles
     btnStyleDeactivate.addEventListener('click', async () => {
-      STYLE_STATE.deactivate_all_styles = true;
+      STYLE_STATE.deactivate_all_styles = false;
       STYLE_STATE.style_text_prompt = '';
       STYLE_STATE.reference_source = 'none';
       STYLE_STATE.reference_id = null;
@@ -1043,6 +1049,8 @@
       STYLE_STATE.use_local_style_features = false;
       STYLE_STATE.use_ollama_vision = false;
       saveStyleState();
+
+      log(styleLog, t('style_deactivate'));
 
       styleTextInput.value = '';
       refUrlInput.value = '';
