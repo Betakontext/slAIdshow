@@ -1,22 +1,10 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-slAIdshow FastAPI app
-
-Key changes in this version:
-- Style handling: Removed any fallback style logic. If the style engine returns an empty style,
-  we keep it empty. If it returns something (from local/vision interpretation or style text),
-  we use it exactly as-is. merge_style_prompt keeps appending only when style_positive is non-empty.
-- Style priority: Manually entered style_text_prompt has priority over reference-derived style.
-- Style format: Styles are expected as comma-separated English keywords (produced by style_engine).
-- DEBUG logging: Always log the final, complete used_prompt (not truncated) before generation.
-- Ollama Vision endpoints: Settings endpoints added to define local/remote/cloud URLs and active mode.
-- New (server-side safeguard): If new style inputs arrive while deactivate_all_styles=True, we force
-  deactivation off for this request (auto-reactivation), and log effective_deactivate accordingly.
-- New (visibility tweak): Store engine-provided reference/vision descriptor text into STATE.reference_text
-  and append it as a transparent "Ref: ..." suffix to the final image prompt (if present).
-"""
+# Production-ready FastAPI app for slAIdshow:
+# - Real-time audio → Whisper.cpp (pywhispercpp) → Ollama prompt → Image backend (ComfyUI or Pollinations)
+# - Style pipeline integrated: style_engine builds style_positive (and reference_text) used in generation
+# - Async throughout, with retries for Ollama calls
+# - Comfy local/LAN/remote via LocalComfyBackend (auto-discovery in backend), Pollinations always cloud-capable when enabled
+# - No hard guards: graceful fallbacks and logs instead of 4xx on style misconfig
 
 from __future__ import annotations
 
@@ -46,7 +34,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator, HttpUrl
 
-# Image backend factory and interface (from your project)
+# Image backend factory and interface
 from image_backend import build_image_backend, ImageBackend
 from image_backend import merge_style_prompt  # helper
 

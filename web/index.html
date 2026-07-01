@@ -208,7 +208,7 @@
             <button id="btn-apply-size" title="Größe übernehmen">Übernehmen</button>
           </div>
 
-          <!-- Style Engine controls (INSERTED HERE) -->
+          <!-- Style Engine controls -->
           <div id="style-block" style="margin-bottom:10px; border-top:1px dashed var(--border); padding-top:10px;">
             <div class="row" style="margin-bottom:6px;">
               <strong id="style-title">Style Controls</strong>
@@ -216,13 +216,11 @@
               <button id="btn-style-deactivate" title="Deactivate all styles"><span id="style-deactivate-label">Deactivate all styles</span></button>
             </div>
 
-            <!-- Free-form style prompt -->
             <div class="inline-input-line" style="margin-bottom:8px;">
               <input id="style-text" type="text" placeholder="Style prompt (e.g., cinematic lighting, watercolor, matte, 35mm, pastel colors)" />
               <button id="btn-apply-style-text" title="Apply style text"><span id="style-apply-label">Übernehmen</span></button>
             </div>
 
-            <!-- Reference image: local file or URL -->
             <div class="row" style="margin-bottom:8px;">
               <label style="min-width:120px;" id="style-ref-label">Reference</label>
               <input id="ref-file" type="file" accept="image/*" />
@@ -232,18 +230,20 @@
               <button id="btn-load-url" title="Load URL as reference"><span id="style-load-url-label">Laden</span></button>
             </div>
 
-            <!-- Toggles for analysis -->
             <div class="row" style="margin-bottom:8px;">
               <label><input id="toggle-local-style" type="checkbox" /> <span id="style-toggle-local">Local style analysis</span></label>
               <label><input id="toggle-vision" type="checkbox" /> <span id="style-toggle-vision">Use Ollama vision</span></label>
             </div>
 
-            <!-- Small status line for styles -->
             <div class="log mono" id="style-log" style="max-height:120px;"></div>
           </div>
           <!-- END Style Engine controls -->
 
           <!-- Prompt input -->
+          <div class="row" style="margin-bottom:6px;">
+              <strong id="prompt_ui_title">Bild Prompt</strong>
+              </div>
+
           <div class="inline-input-line" style="margin-bottom:8px;">
             <input id="plan-input" type="text" placeholder="Text prompt to generate an image" />
             <button id="btn-direct">Direct Generate</button>
@@ -283,8 +283,6 @@
 
 
   <script>
-    // --- All comments strictly in English ---
-
     // ---------- i18n dictionary ----------
     const I18N = {
       de: {
@@ -312,6 +310,7 @@
         label_width: "Breite",
         label_height: "Höhe",
         label_workflow: "Workflow",
+        prompt_ui_title: "Bild Prompt",
         ph_plan: "Text eingeben → Prompt erzeugen und Bild generieren",
         ph_neg: "Negative Prompt (z.B. low quality, blurry, extra fingers)",
         label_last_prompt: "Letzter Prompt",
@@ -395,6 +394,7 @@
         label_width: "Width",
         label_height: "Height",
         label_workflow: "Workflow",
+        prompt_ui_title: "Image prompt",
         ph_plan: "Enter text → create prompt and generate image",
         ph_neg: "Negative prompt (e.g., low quality, blurry, extra fingers)",
         label_last_prompt: "Last Prompt",
@@ -459,6 +459,8 @@
     const langSelect = document.getElementById('lang-select');
     let LANG = localStorage.getItem('ui_lang') || 'de';
     langSelect.value = LANG;
+    document.documentElement.lang = LANG; // keep <html lang> in sync
+
     function t(key) { return I18N[LANG][key] || key; }
 
     function applyI18N() {
@@ -537,6 +539,7 @@
     langSelect.addEventListener('change', () => {
       LANG = langSelect.value;
       localStorage.setItem('ui_lang', LANG);
+      document.documentElement.lang = LANG; // sync <html lang> on change
       applyI18N();
     });
 
@@ -575,6 +578,9 @@
     const btnLoadUrl = $('#btn-load-url');
     const toggleLocalStyle = $('#toggle-local-style');
     const toggleVision = $('#toggle-vision');
+
+    // Holds the most recent style_positive string returned by the server
+    let LAST_STYLE_POSITIVE = null;
 
     function log(el, msg) {
       const ts = new Date().toLocaleTimeString();
@@ -904,11 +910,6 @@
         use_local_style_features: !!STYLE_STATE.use_local_style_features,
         use_ollama_vision: !!STYLE_STATE.use_ollama_vision,
         deactivate_all_styles: !!STYLE_STATE.deactivate_all_styles,
-        // NEW (if you have these settings somewhere in UI or server-provided config):
-        // ollama_vision_mode: 'local' | 'remote' | 'cloud',
-        // ollama_vision_local_url: 'http://127.0.0.1:11434',
-        // ollama_vision_remote_url: 'http://<lan-ip>:11434',
-        // ollama_vision_cloud_url: 'https://<your-cloud-endpoint>'
       };
 
       try {
@@ -919,6 +920,9 @@
         });
         const j = await r.json().catch(() => ({}));
         if (!r.ok || !j) throw new Error(`${r.status}`);
+        // Update client-side current style string to be passed forward
+        LAST_STYLE_POSITIVE = (j.style_positive || '').trim() || null;
+
         if (j.warnings && Array.isArray(j.warnings) && j.warnings.length) {
           for (const w of j.warnings) log(styleLog, `warn: ${w}`);
         }
@@ -937,6 +941,7 @@
         return j;
       } catch (e) {
         log(styleLog, `${t('style_build_fail')}: ${e}`);
+        // Keep LAST_STYLE_POSITIVE unchanged on failure
         return null;
       }
     }
@@ -1071,13 +1076,25 @@
       const btn = $('#btn-plan');
       btn.disabled = true;
       try {
-        await styleBuild(text);
+        // Build or refresh current style first
+        const sb = await styleBuild(text);
+        if (sb && typeof sb.style_positive === 'string') {
+          LAST_STYLE_POSITIVE = sb.style_positive.trim() || null;
+        }
 
         const size = currentSizePayload();
+        const body = {
+          text,
+          tags: [],
+          width: size.width,
+          height: size.height,
+          // Pass the freshest style string to the server for deterministic behavior
+          style_positive: LAST_STYLE_POSITIVE
+        };
         const r = await fetch('/api/plan', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, tags: [], width: size.width, height: size.height })
+          body: JSON.stringify(body)
         });
         const j = await r.json().catch(() => ({}));
         if (r.ok && j.prompt) { log(promptLog, j.prompt); statusEl.textContent = t('prompt_created'); }
@@ -1096,7 +1113,11 @@
       btn.disabled = true;
       const size = currentSizePayload();
       try {
-        await styleBuild(prompt);
+        // Build or refresh current style first
+        const sb = await styleBuild(prompt);
+        if (sb && typeof sb.style_positive === 'string') {
+          LAST_STYLE_POSITIVE = sb.style_positive.trim() || null;
+        }
 
         const r = await fetch('/api/image/direct', {
           method: 'POST',
@@ -1105,7 +1126,9 @@
             prompt,
             negative_prompt: negative || null,
             width: size.width,
-            height: size.height
+            height: size.height,
+            // Include style_positive explicitly for robustness against races
+            style_positive: LAST_STYLE_POSITIVE
           })
         });
         const j = await r.json().catch(() => ({}));
