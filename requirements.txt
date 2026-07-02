@@ -3,7 +3,7 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 
 # HTTP client (async) + concurrency foundation
-httpx==0.27.2
+httpx[http2]==0.27.2
 anyio>=3.7.1
 
 # Data models / validation
@@ -11,7 +11,8 @@ pydantic>=2,<3
 typing-extensions>=4.9.0
 
 # Audio + DSP helpers
-numpy==2.0.1
+# Align with working local environment: numpy 2.5.0 confirmed OK with cv2 4.13.0 and skimage 0.26.0
+numpy==2.5.0
 sounddevice==0.4.7
 # Optional: Voice activity detection (falls genutzt)
 # webrtcvad==2.0.10
@@ -43,3 +44,12 @@ wheel>=0.41
 
 # Optional: Requests, falls externe Skripte/Libs es voraussetzen
 # requests>=2.32.0
+
+# Local image style analysis stack
+# Headless OpenCV build for servers (no GUI deps). If you need GUI windows, switch to opencv-python==4.13.0.0
+opencv-python-headless==4.13.0.0
+# Image processing utilities (Canny, color conversions, etc.)
+scikit-image==0.26.0
+# Clustering quality metric (silhouette_score) used by local style analysis
+scikit-learn==1.5.2
+# Note: numpy pinned above to 2.5.0 to match tested combo with cv2/skimage

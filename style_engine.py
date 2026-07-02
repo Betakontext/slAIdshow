@@ -76,7 +76,10 @@ ALLOWED_IMAGE_MIME = {
 
 # Feature toggles
 FEATURE_LOCAL_STYLE_ANALYSIS_DEFAULT = _env_bool01("FEATURE_LOCAL_STYLE_ANALYSIS_DEFAULT", 1)
-FEATURE_OLLAMA_VISION_DEFAULT = _env_bool01("FEATURE_OLLAMA_VISION_DEFAULT", 0)
+# Default Vision ON for better UX unless overridden in .env
+FEATURE_OLLAMA_VISION_DEFAULT = _env_bool01("FEATURE_OLLAMA_VISION_DEFAULT", 1)
+# Safety: force local analysis whenever a reference exists (ignores UI flag). Default OFF.
+FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON = _env_bool01("FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON", 0)
 
 # Token caps per source to keep prompt concise and user-prioritized
 MAX_TOKENS_STYLE_TEXT = _env_int("STYLE_ENGINE_MAX_TOKENS_STYLE_TEXT", 40)
@@ -798,7 +801,7 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
       - If deactivate_all_styles==True AND no new inputs (no style text, no usable reference) in this request:
           -> clear styles (reset) and return empty style_positive
       - If deactivate_all_styles==True BUT new inputs are present in this request:
-          -> ignore reset and apply new inputs (auto-reactivate)
+          -> ignore reset and apply the new inputs (auto-reactivate)
 
     Remote vision policy:
       - If APP_ALLOW_REMOTE_VISION=0, only localhost URLs are permitted
@@ -853,6 +856,17 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
     elif req.deactivate_all_styles and has_new_inputs:
         resp.notes.append("Deactivate requested but new inputs detected; applying new styles (auto-reactivate).")
 
+    # Safety nets and mode decisions
+    if has_new_reference:
+        # If force-on is set, always enable local features with a note
+        if FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON and not req.use_local_style_features:
+            req.use_local_style_features = True
+            resp.notes.append("Local style analysis forced on by env (FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON=1).")
+        # If Vision is disabled but reference exists, enable local analysis as a safety-net
+        if (not req.use_ollama_vision) and (not req.use_local_style_features):
+            req.use_local_style_features = True
+            resp.notes.append("Local style safety-net enabled: reference provided, vision disabled.")
+
     # Collect style parts in priority order
     style_parts_in_order: List[str] = []
 
@@ -878,7 +892,9 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
             else:
                 ov_mode_url = (req.ollama_vision_local_url or OLLAMA_VISION_URL)
             try:
+                print(f"[STYLE][vision] mode={mode} url={ov_mode_url} allow_remote={APP_ALLOW_REMOTE_VISION} ref={resolved_path}")
                 txt = await _ollama_vision_describe(resolved_path, mode_url=ov_mode_url)
+                print(f"[STYLE][vision] response_len={len(txt) if txt else 0} sample='{(txt or '')[:160]}'")
                 if txt:
                     resp.vision_text_used = _retokenize_limit(txt, MAX_TOKENS_VISION)
                     style_parts_in_order.append(resp.vision_text_used)
@@ -886,8 +902,10 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
                 else:
                     resp.notes.append("Ollama vision returned empty text.")
             except PermissionError as pe:
+                print(f"[STYLE][vision][policy] {pe}")
                 resp.warnings.append(str(pe))
             except Exception as e:
+                print(f"[STYLE][vision][error] {e}")
                 resp.warnings.append(f"ollama vision failed: {e}")
     else:
         resp.notes.append("Ollama vision disabled by request.")
@@ -898,7 +916,9 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
             resp.notes.append("Local style features requested but no reference image resolved.")
         else:
             try:
+                print(f"[STYLE][local] analyzing ref={resolved_path}")
                 desc = await _extract_style_descriptors_async(resolved_path, debug=False)
+                print(f"[STYLE][local] descriptors={desc}")
                 # Keep only up to MAX_TOKENS_DESCRIPTORS descriptor tokens
                 if desc:
                     dedup_desc: List[str] = []
@@ -917,6 +937,7 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
                 else:
                     resp.notes.append("Local analysis produced no descriptors.")
             except Exception as e:
+                print(f"[STYLE][local][error] {e}")
                 resp.warnings.append(f"local style analysis failed: {e}")
     else:
         resp.notes.append("Local style features disabled by request.")
@@ -940,9 +961,6 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
         if reasons:
             resp.warnings.append("style_positive is empty: " + ", ".join(reasons))
 
-    # Do NOT apply deactivate here anymore (it was already handled):
-    # The reset has priority only when no new inputs are supplied in the same request.
-
     return resp
 
 
@@ -961,6 +979,7 @@ def _log_style_env() -> None:
         f"timeout={HTTP_TIMEOUT_SEC}s",
         f"retries={HTTP_MAX_RETRIES}",
         f"caps(style={MAX_TOKENS_STYLE_TEXT}, vision={MAX_TOKENS_VISION}, desc={MAX_TOKENS_DESCRIPTORS}, final={MAX_TOKENS_FINAL})",
+        f"feature_defaults(local={FEATURE_LOCAL_STYLE_ANALYSIS_DEFAULT}, vision={FEATURE_OLLAMA_VISION_DEFAULT}, force_local={FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON})",
     )
 
 with contextlib.suppress(Exception):
@@ -986,7 +1005,7 @@ if __name__ == "__main__":
             target_backend_name="comfyui",
         )
         out_reset = await build_styles(req_reset)
-        print("A reset style_positive:", out_reset.style_positive, "| notes:", out_reset.notes)
+        print("A reset style_positive:", out_reset.style_positive, "| notes:", out_reset.notes, "| warnings:", out_reset.warnings)
 
         # Case B: reset + new style text -> should apply style (ignore reset)
         req_apply = StyleEngineRequest(
@@ -999,6 +1018,6 @@ if __name__ == "__main__":
             target_backend_name="comfyui",
         )
         out_apply = await build_styles(req_apply)
-        print("B apply style_positive:", out_apply.style_positive, "| notes:", out_apply.notes)
+        print("B apply style_positive:", out_apply.style_positive, "| notes:", out_apply.notes, "| warnings:", out_apply.warnings)
 
     asyncio.run(_quick_test())
