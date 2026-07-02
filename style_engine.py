@@ -1,4 +1,5 @@
 # style_engine.py
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
@@ -87,6 +88,9 @@ MAX_TOKENS_VISION = _env_int("STYLE_ENGINE_MAX_TOKENS_VISION", 24)
 MAX_TOKENS_DESCRIPTORS = _env_int("STYLE_ENGINE_MAX_TOKENS_DESCRIPTORS", 12)
 MAX_TOKENS_FINAL = _env_int("STYLE_ENGINE_MAX_TOKENS_FINAL", 40)
 
+# Local debug toggle controlling [style:debug] lines during local analysis
+STYLE_LOCAL_DEBUG = _env_bool01("STYLE_LOCAL_DEBUG", 1)
+
 
 # =========================
 # Pydantic data models
@@ -110,9 +114,7 @@ class StyleEngineRequest(BaseModel):
     use_local_style_features: bool = Field(default=FEATURE_LOCAL_STYLE_ANALYSIS_DEFAULT)
     use_ollama_vision: bool = Field(default=FEATURE_OLLAMA_VISION_DEFAULT)
 
-    # UI "Reset styles" control: if true AND no new inputs supplied, clear styles.
-    # If true BUT new inputs are present in this same request (style_text or usable reference),
-    # we IGNORE the reset and apply the new inputs (auto-reactivation).
+    # UI "Reset styles" control
     deactivate_all_styles: bool = Field(default=False)
 
     width: Optional[int] = Field(default=None)
@@ -121,7 +123,7 @@ class StyleEngineRequest(BaseModel):
 
     target_backend_name: str = Field(default="comfyui")
 
-    # Optional routing hints for Ollama Vision (provided by app; not strictly required)
+    # Optional routing hints for Ollama Vision
     ollama_vision_mode: Optional[str] = Field(default=None)  # "local" | "remote" | "cloud"
     ollama_vision_local_url: Optional[str] = Field(default=None)
     ollama_vision_remote_url: Optional[str] = Field(default=None)
@@ -131,7 +133,6 @@ class StyleEngineRequest(BaseModel):
     @classmethod
     def _validate_source(cls, v: str) -> str:
         vv = (v or "").strip().lower()
-        # Legacy "url_file" maps to "url" for compatibility
         if vv == "url_file":
             vv = "url"
         if vv not in {"none", "local_file", "url"}:
@@ -296,7 +297,6 @@ def validate_image_bytes_minimal(data: bytes) -> None:
             raise ValueError("invalid WEBP magic")
         return
     if not any(head.startswith(m) for m in MAGIC_HEADERS):
-        # Permit unknown but warn, to be robust with broader formats
         print("[STYLE] unknown image magic header; continuing")
 
 def sniff_mime_from_bytes(data: bytes, fallback: str = "application/octet-stream") -> str:
@@ -367,7 +367,6 @@ async def save_reference_from_url(url: str, filename_hint: Optional[str] = None)
 
     async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_generic(), follow_redirects=True, http2=True) as client:
         r = await _get_with_retries(client, url)
-        # Basic size & type checks
         cl = int(r.headers.get("Content-Length", "0") or "0")
         if cl and cl > MAX_DOWNLOAD_BYTES:
             raise ValueError(f"file too large: {cl} bytes")
@@ -389,11 +388,36 @@ async def save_reference_from_url(url: str, filename_hint: Optional[str] = None)
 
 
 # =========================
-# Local style features (OpenCV + skimage), lazy
+# Local style features (strict 1:1 integration)
 # =========================
 
+# We embed the exact logic from style_features.py so that metrics, gates,
+# class scoring, and descriptor mapping are identical and reproducible.
+
+try:
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+    from skimage.feature import canny  # type: ignore
+    from skimage.color import rgb2gray  # type: ignore
+    try:
+        from sklearn.metrics import silhouette_score  # type: ignore
+        _HAVE_SKLEARN = True
+    except Exception:
+        _HAVE_SKLEARN = False
+except Exception as _e:
+    # Defer errors until analysis is actually called to avoid import-time failures in environments without OpenCV.
+    cv2 = None  # type: ignore
+    np = None  # type: ignore
+    canny = None  # type: ignore
+    rgb2gray = None  # type: ignore
+    silhouette_score = None  # type: ignore
+    _HAVE_SKLEARN = False
+    _IMPORT_ERR = _e
+else:
+    _IMPORT_ERR = None
+
 @dataclass
-class _StyleAnalysis:
+class StyleAnalysis:
     edge_density: float
     edge_coherence: float
     edge_thickness_score: float
@@ -412,44 +436,37 @@ class _StyleAnalysis:
     class_scores: Dict[str, float]
     primary_class: str
 
-def _lazy_import_cv_stack():
-    import cv2  # type: ignore
-    import numpy as np  # type: ignore
-    from skimage.feature import canny  # type: ignore
-    from skimage.color import rgb2gray  # type: ignore
-    try:
-        from sklearn.metrics import silhouette_score  # type: ignore
-        _have_sklearn = True
-    except Exception:
-        silhouette_score = None  # type: ignore
-        _have_sklearn = False
-    return cv2, np, canny, rgb2gray, silhouette_score, _have_sklearn
+def _ensure_cv_stack_ready() -> None:
+    if _IMPORT_ERR is not None or cv2 is None or np is None or canny is None or rgb2gray is None:
+        raise RuntimeError(f"CV stack not available: {_IMPORT_ERR}")
 
-# Condensed analysis consistent with user's provided version
-def _analyze_style(image_path: Path, debug: bool = False) -> _StyleAnalysis:
-    cv2, np, canny, rgb2gray, silhouette_score, _HAVE_SKLEARN = _lazy_import_cv_stack()
+def _load_bgr(path: Path) -> "np.ndarray":
+    _ensure_cv_stack_ready()
+    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if img is None:
+        raise FileNotFoundError(f"cannot read image: {path}")
+    return img  # BGR
 
-    def _downscale(img, max_side=640):
-        h, w = img.shape[:2]
-        ms = max(h, w)
-        if ms <= max_side:
-            return img
-        s = max_side / ms
-        return cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+def _downscale(img: "np.ndarray", max_side: int = 640) -> "np.ndarray":
+    h, w = img.shape[:2]
+    ms = max(h, w)
+    if ms <= max_side:
+        return img
+    s = max_side / ms
+    return cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
 
-    bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-    if bgr is None:
-        raise FileNotFoundError(f"cannot read image: {image_path}")
-
-    # Edges
+def _edge_metrics(bgr: "np.ndarray") -> Tuple[float, float, float]:
+    # Kanten-Dichte, Orientierungs-Kohärenz (Proxy), und Kanten-"Dicke"
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    gray_s = _downscale(gray, 640)
-    edges = canny(gray_s.astype("float32") / 255.0, sigma=1.2)
+    gray = _downscale(gray, 640)
+    edges = canny(gray.astype(np.float32) / 255.0, sigma=1.2)
     edge_density = float(edges.mean())
-    gx = cv2.Sobel(gray_s, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(gray_s, cv2.CV_32F, 0, 1, ksize=3)
-    mag = (gx * gx + gy * gy) ** 0.5 + 1e-6
+
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.hypot(gx, gy) + 1e-6
     ori = np.arctan2(gy, gx)
+
     mask = (mag > (mag.mean() + mag.std()))
     if int(mask.sum()) > 100:
         ori_edges = ori[mask]
@@ -457,42 +474,83 @@ def _analyze_style(image_path: Path, debug: bool = False) -> _StyleAnalysis:
         edge_coherence = max(0.0, 1.0 - min(1.0, var_ori / 1.0))
     else:
         edge_coherence = 0.0
-    edges_u = (edges.astype("uint8") * 255)
-    dil = np.maximum(edges_u, cv2.dilate(edges_u, np.ones((3, 3), "uint8"), 1))
-    edge_thickness_score = float((dil > 0).mean() - edge_density)
 
-    # Color stats + kmeans
+    edges_u = (edges.astype(np.uint8) * 255)
+    dil = cv2.dilate(edges_u, np.ones((3, 3), np.uint8), 1)
+    thickness_score = float((dil > 0).mean() - edge_density)
+    return edge_density, edge_coherence, thickness_score
+
+def _estimate_silhouette_fallback(X: "np.ndarray", labels: "np.ndarray") -> float:
+    # Lightweight Silhouette-Approximation ohne sklearn
+    try:
+        labs = labels.reshape(-1)
+        ks = np.unique(labs)
+        if ks.size < 2:
+            return -0.05
+        cents = []
+        intras = []
+        for k in ks:
+            pts = X[labs == k]
+            if pts.size == 0:
+                continue
+            c = pts.mean(axis=0)
+            cents.append(c)
+            d = np.linalg.norm(pts - c, axis=1).mean()
+            intras.append(d if np.isfinite(d) else 0.0)
+        if len(cents) < 2:
+            return -0.03
+        cents = np.vstack(cents)
+        dsum = 0.0
+        cnt = 0
+        for i in range(len(cents)):
+            for j in range(i + 1, len(cents)):
+                dsum += float(np.linalg.norm(cents[i] - cents[j]))
+                cnt += 1
+        inter = (dsum / cnt) if cnt else 0.0
+        intra = float(np.mean(intras)) if intras else 0.0
+        if intra <= 1e-6:
+            return 0.2
+        ratio = inter / intra
+        val = (ratio - 1.0) * 0.15
+        return float(np.clip(val, -0.1, 0.5))
+    except Exception:
+        return -0.05
+
+def _color_metrics(bgr: "np.ndarray") -> Tuple[float, float, int, float]:
+    # Sättigungs-Statistik + einfache KMeans-Paletten-Clustering-Qualität
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    s = hsv[:, :, 1].astype("float32") / 255.0
+    s = hsv[:, :, 1].astype(np.float32) / 255.0
     s_mean = float(s.mean())
     s_std = float(s.std())
+
     sample = _downscale(bgr, 480)
-    flat = sample.reshape(-1, 3).astype("float32")
-    if flat.shape[0] > 30000:
-        idx = np.random.choice(flat.shape[0], 30000, replace=False)
+    flat = sample.reshape(-1, 3).astype(np.float32)
+    if flat.shape[0] > 40000:
+        idx = np.random.choice(flat.shape[0], 40000, replace=False)
         flat = flat[idx]
+
     best_k = 3
     best_sil = -1.0
     prev_compact = None
     for k in range(3, 9):
         criteria = (cv2.TERM_CRITERIA_MAX_ITER + cv2.TERM_CRITERIA_EPS, 20, 1.0)
-        compactness, labels, centers = cv2.kmeans(flat, k, None, criteria, 2, cv2.KMEANS_PP_CENTERS)
-        if silhouette_score is not None:
+        compactness, labels, _ = cv2.kmeans(flat, k, None, criteria, 2, cv2.KMEANS_PP_CENTERS)
+        if _HAVE_SKLEARN:
             try:
-                sub = flat
-                labs = labels.ravel()
                 if flat.shape[0] > 2000:
-                    ridx = np.random.choice(flat.shape[0], 2000, replace=False)
-                    sub = flat[ridx]
-                    labs = labs[ridx]
-                sil = float(silhouette_score(sub, labs, metric="euclidean"))  # type: ignore
+                    idx = np.random.choice(flat.shape[0], 2000, replace=False)
+                    sil = silhouette_score(flat[idx], labels[idx].ravel(), metric='euclidean')  # type: ignore
+                else:
+                    sil = silhouette_score(flat, labels.ravel(), metric='euclidean')  # type: ignore
             except Exception:
                 sil = -1.0
         else:
-            sil = -1.0
+            sil = _estimate_silhouette_fallback(flat, labels)
+
         if sil > best_sil:
             best_sil = sil
             best_k = k
+
         if prev_compact is None:
             prev_compact = compactness
         else:
@@ -500,62 +558,74 @@ def _analyze_style(image_path: Path, debug: bool = False) -> _StyleAnalysis:
                 break
             prev_compact = compactness
 
-    # Contrast
-    gray_f = gray.astype("float32") / 255.0
-    contrast = float(gray_f.std())
+    return s_mean, s_std, int(best_k), float(best_sil)
 
-    # Grayscale ratio
-    b, g, r = cv2.split(bgr.astype("float32"))
-    diff = (abs(r - g) + abs(g - b) + abs(r - b)) / (3.0 * 255.0)
-    grayscale_ratio = float((diff < 0.03).mean())
+def _contrast_metric(bgr: "np.ndarray") -> float:
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    return float(gray.std())
 
-    # Grain + HF ratio
-    gs = _downscale(gray_f, 512)
-    lap = cv2.Laplacian(gs, cv2.CV_32F)
+def _grayscale_ratio(bgr: "np.ndarray") -> float:
+    b, g, r = cv2.split(bgr.astype(np.float32))
+    diff = (np.abs(r - g) + np.abs(g - b) + np.abs(r - b)) / (3.0 * 255.0)
+    return float((diff < 0.03).mean())
+
+def _grain_and_hf(bgr: "np.ndarray") -> Tuple[float, float]:
+    # Korn/Noise via Laplacian-Varianz; HF/LF Spektrum via FFT-Ringe
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+
+    g_small = _downscale((gray * 255).astype(np.uint8), 512).astype(np.float32) / 255.0
+    lap = cv2.Laplacian(g_small, cv2.CV_32F)
     grain = float(lap.var())
-    F = np.fft.fftshift(np.fft.fft2(gs))
+
+    G = _downscale(gray, 512)
+    F = np.fft.fftshift(np.fft.fft2(G))
     mag = np.log1p(np.abs(F))
     H, W = mag.shape
     yy, xx = np.ogrid[:H, :W]
     cy, cx = H // 2, W // 2
-    r = ((yy - cy) ** 2 + (xx - cx) ** 2) ** 0.5
+    r = np.hypot(yy - cy, xx - cx)
     hf_mask = (r > min(H, W) * 0.22) & (r < min(H, W) * 0.48)
     lf_mask = (r < min(H, W) * 0.12)
     hf_ratio = float(mag[hf_mask].mean() / (mag[lf_mask].mean() + 1e-6))
+    return grain, hf_ratio
 
-    # Dot pattern
-    from skimage.color import rgb2gray as _rgb2gray  # type: ignore
-    gray_rgb = _rgb2gray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-    grs = _downscale((gray_rgb * 255).astype("uint8"), 512).astype("float32") / 255.0
-    F2 = np.fft.fftshift(np.fft.fft2(grs))
-    mag2 = np.log1p(np.abs(F2))
-    H2, W2 = mag2.shape
-    yy2, xx2 = np.ogrid[:H2, :W2]
-    cy2, cx2 = H2 // 2, W2 // 2
-    r2 = ((yy2 - cy2) ** 2 + (xx2 - cx2) ** 2) ** 0.5
-    ring = (r2 > 26) & (r2 < 46)
-    neigh = ((r2 > 18) & (r2 < 24)) | ((r2 > 48) & (r2 < 56))
-    ring_mean = float(mag2[ring].mean())
-    neigh_mean = float(mag2[neigh].mean() + 1e-6)
-    dot_pattern_score = float(max(0.0, (ring_mean - neigh_mean) / (neigh_mean + 1e-6) * 3.0))
+def _dot_pattern_score(bgr: "np.ndarray") -> float:
+    # Halftone-Ring-Detektor (Frequenzbereich)
+    gray = rgb2gray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    gray = _downscale((gray * 255).astype(np.uint8), 512).astype(np.float32) / 255.0
+    F = np.fft.fftshift(np.fft.fft2(gray))
+    mag = np.log1p(np.abs(F))
+    H, W = mag.shape
+    yy, xx = np.ogrid[:H, :W]
+    cy, cx = H // 2, W // 2
+    r = np.hypot(yy - cy, xx - cx)
+    ring = (r > 26) & (r < 46)
+    neigh = ((r > 18) & (r < 24)) | ((r > 48) & (r < 56))
+    ring_mean = float(mag[ring].mean())
+    neigh_mean = float(mag[neigh].mean() + 1e-6)
+    z = (ring_mean - neigh_mean) / (neigh_mean + 1e-6)
+    return float(max(0.0, z * 3.0))
 
-    # Straight line score
-    edges_c = cv2.Canny(_downscale(gray, 800), 80, 160, apertureSize=3, L2gradient=True)
-    lines = cv2.HoughLinesP(edges_c, 1, 3.14159 / 180.0, threshold=80, minLineLength=40, maxLineGap=3)
+def _straight_line_score(bgr: "np.ndarray") -> float:
+    # Hough-Linienlänge relativ zum Umfang
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    gray = _downscale(gray, 800)
+    edges = cv2.Canny(gray, 80, 160, apertureSize=3, L2gradient=True)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=80, minLineLength=40, maxLineGap=3)
     if lines is None or len(lines) == 0:
-        straight_line_score = 0.0
-    else:
-        h, w = edges_c.shape
-        per = float(h + w)
-        total = 0.0
-        for l in lines:
-            x1, y1, x2, y2 = l[0]
-            total += float(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5)
-        straight_line_score = float(min(1.0, total / (per * 15.0)))
+        return 0.0
+    h, w = gray.shape
+    per = float(h + w)
+    total_len = 0.0
+    for l in lines:
+        x1, y1, x2, y2 = l[0]
+        total_len += float(np.hypot(x2 - x1, y2 - y1))
+    return float(min(1.0, total_len / (per * 15.0)))
 
-    # Brush texture (DoG variance)
+def _brush_texture_score(bgr: "np.ndarray") -> float:
+    # DoG-Varianz als grober Pinseltextur-Hinweis
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
-    L = lab[:, :, 0].astype("float32") / 255.0
+    L = lab[:, :, 0].astype(np.float32) / 255.0
     Ls = _downscale(L, 512)
     g1 = cv2.GaussianBlur(Ls, (0, 0), 1.0)
     g2 = cv2.GaussianBlur(Ls, (0, 0), 3.0)
@@ -563,110 +633,410 @@ def _analyze_style(image_path: Path, debug: bool = False) -> _StyleAnalysis:
     mean = cv2.blur(dog, (9, 9))
     sq = cv2.blur(dog * dog, (9, 9))
     var = sq - mean * mean
-    brush_texture_score = float(max(0.0, min(1.0, var.mean() * 50.0)))
+    return float(np.clip(var.mean() * 50.0, 0.0, 1.0))
 
-    # Bokeh (variance across tiles)
-    gs2 = _downscale(gray_f, 512)
-    lap2 = cv2.Laplacian(gs2, cv2.CV_32F)
-    sharp = cv2.GaussianBlur(lap2 * lap2, (0, 0), 1.0)
-    H3, W3 = sharp.shape
+def _bokeh_score(bgr: "np.ndarray") -> float:
+    # Varianz lokaler Schärfe → Hinweis auf DoF/Bokeh
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    gs = _downscale(gray, 512)
+    lap = cv2.Laplacian(gs, cv2.CV_32F)
+    sharp = cv2.GaussianBlur(lap * lap, (0, 0), 1.0)
+    h, w = sharp.shape
     tiles = 6
-    th, tw = H3 // tiles, W3 // tiles
+    th, tw = h // tiles, w // tiles
     vals = []
     for i in range(tiles):
         for j in range(tiles):
             patch = sharp[i*th:(i+1)*th, j*tw:(j+1)*tw]
-            if patch.size:
+            if patch.size > 0:
                 vals.append(float(patch.mean()))
-    import numpy as np  # type: ignore
-    v = float(np.std(np.array(vals, dtype="float32"))) if vals else 0.0
-    bokeh_score = float(max(0.0, min(1.5, v * 10.0)))
+    vals = np.array(vals, dtype=np.float32)
+    if vals.size < 4:
+        return 0.0
+    v = float(np.std(vals))
+    return float(np.clip(v * 10.0, 0.0, 1.5))
 
-    # Scoring simple heuristic classes (photo/comic/...); condensed
+def analyze_style(path: Path) -> StyleAnalysis:
+    """
+    Full analysis strictly identical to style_features.py:
+    - Computes metrics
+    - Applies the same gates and class scoring
+    - Returns StyleAnalysis with class scores and primary_class
+    """
+    bgr = _load_bgr(path)
+
+    ed, ecoh, th = _edge_metrics(bgr)
+    s_mean, s_std, k, sil = _color_metrics(bgr)
+    contr = _contrast_metric(bgr)
+    gray_ratio = _grayscale_ratio(bgr)
+    grain, hf_ratio = _grain_and_hf(bgr)
+    dots = _dot_pattern_score(bgr)
+    straight_score = _straight_line_score(bgr)
+    brush_score = _brush_texture_score(bgr)
+    bokeh = _bokeh_score(bgr)
+
+    # Photo
     photo = 0.0
-    if hf_ratio > 1.15: photo += 0.55
-    if bokeh_score > 0.26: photo += 0.30
-    if s_mean > 0.20 and s_std > 0.09: photo += 0.18
-    if contrast > 0.17: photo += 0.07
+    if hf_ratio > 1.15:
+        photo += 0.55
+    if bokeh > 0.26:
+        photo += 0.30
+    if s_mean > 0.20 and s_std > 0.09:
+        photo += 0.18
+    if k >= 7:
+        photo += 0.12
+    if sil < 0.05:
+        photo += 0.08
+    if (hf_ratio > 1.15) and (bokeh > 0.26):
+        photo += 0.12
+    if contr > 0.17:
+        photo += 0.07
+    if grain > 80.0:
+        photo += 0.05
+
+    # Photo-like gate
+    photo_like_gate = (
+        (1.07 <= hf_ratio <= 1.15) and
+        (bokeh >= 0.18 or contr >= 0.15) and
+        ((k >= 6) or (sil <= 0.08)) and
+        (straight_score < 0.18) and
+        not (ecoh > 0.28 and 0.012 < th < 0.060) and
+        (dots < 0.8)
+    )
+    if photo_like_gate:
+        photo += 0.20
+
+    # Relaxed photo-like gate (Policy)
+    photo_like_gate_relaxed = (
+        (hf_ratio < 1.00) and
+        (bokeh < 0.12) and
+        (k <= 4) and (sil >= 0.45) and
+        (s_mean >= 0.32) and (s_std >= 0.18) and
+        (straight_score < 0.12) and
+        (ecoh <= 0.06) and
+        (th >= 0.10) and
+        (dots < 0.6)
+    )
+    if photo_like_gate_relaxed:
+        photo += 0.32
+
+    # Anti-photo Penalties
+    if ecoh > 0.32 and 0.012 < th < 0.050 and bokeh < 0.22 and hf_ratio < 1.14:
+        photo -= 0.35
+    if (ecoh <= 0.06 and th >= 0.10 and hf_ratio < 0.95 and k <= 4 and sil >= 0.45):
+        photo -= 0.05
+    if dots > 1.1 and gray_ratio > 0.45:
+        photo -= 0.20
+
     photo = max(0.0, photo)
 
+    # Comic (UNVERÄNDERT LASSEN)
     comic = 0.0
-    if edge_coherence >= 0.20 and 0.012 < edge_thickness_score < 0.060 and hf_ratio < 1.12: comic += 0.50
-    if bokeh_score < 0.22: comic += 0.12
-    if edge_density > 0.040: comic += 0.06
-    if dot_pattern_score > 0.9: comic += 0.08
+    if ecoh >= 0.20 and 0.012 < th < 0.060 and hf_ratio < 1.12:
+        comic += 0.50
+    if bokeh < 0.22:
+        comic += 0.12
+    if k <= 7 and sil > 0.06:
+        comic += 0.10
+    if ed > 0.040:
+        comic += 0.06
+    if dots > 0.9:
+        comic += 0.08
+    if (ecoh <= 0.05 and k <= 4 and sil >= 0.45 and th >= 0.10 and hf_ratio < 0.95):
+        comic -= 0.16
+    if (hf_ratio > 1.15 and bokeh > 0.26) or (s_mean > 0.22 and s_std > 0.10 and k >= 7):
+        comic -= 0.08
+    if s_mean > 0.28 and s_std > 0.12 and k >= 7:
+        comic -= 0.10
+    if (0.16 <= s_mean <= 0.42) and (0.12 <= s_std <= 0.35) and (4 <= k <= 7) \
+       and (th >= 0.10) and (ecoh <= 0.10) and (bokeh < 0.24) and (hf_ratio < 1.10) \
+       and (straight_score < 0.10) and (dots < 1.1):
+        comic += 0.24
     comic = max(0.0, comic)
 
+    # Colored cartoon guard (tightened)
+    if (0.16 <= s_mean <= 0.42) and (0.12 <= s_std <= 0.35) and (4 <= k <= 7) \
+       and (th >= 0.10) and (ecoh <= 0.10) and (bokeh < 0.24) and (hf_ratio < 1.10) \
+       and (straight_score < 0.10) and (dots < 1.1):
+        comic += 0.24
+
+    comic = max(0.0, comic)
+
+    # Manga
     manga = 0.0
-    if grayscale_ratio > 0.60 and edge_density > 0.032 and edge_coherence > 0.24 and hf_ratio < 1.08: manga += 0.60
-    if dot_pattern_score > 1.0: manga += 0.15
+    if gray_ratio > 0.60 and ed > 0.032 and ecoh > 0.24 and hf_ratio < 1.08:
+        manga += 0.60
+    if dots > 1.0:
+        manga += 0.15
+    if s_mean > 0.15:
+        manga -= 0.10
     manga = max(0.0, manga)
 
-    child_sketch = max(0.0, (0.2 if s_mean < 0.16 else 0.0) + (0.15 if hf_ratio < 1.06 else 0.0))
+    # Children sketches
+    child_sketch = 0.0
+    if s_mean < 0.16:
+        child_sketch += 0.20
+    else:
+        child_sketch -= 0.15
+    if k <= 4:
+        child_sketch += 0.15
+    else:
+        child_sketch -= 0.10
+    if hf_ratio < 1.06:
+        child_sketch += 0.15
+    else:
+        child_sketch -= 0.15
+    if th < 0.016:
+        child_sketch += 0.15
+    else:
+        child_sketch -= 0.10
+    if ed > 0.030 and ecoh < 0.18:
+        child_sketch += 0.20
+    else:
+        child_sketch -= 0.10
+    if bokeh > 0.22 or (s_mean > 0.18 and s_std > 0.08):
+        child_sketch -= 0.25
+    child_sketch = max(0.0, child_sketch)
+
+    # Classical oil painting
+    oil = 0.0
+    if brush_score > 0.46:
+        oil += 0.30
+    if hf_ratio < 1.26 and s_std > 0.06:
+        oil += 0.18
+    if contr > 0.12:
+        oil += 0.10
+    if sil < 0.07 and k >= 5:
+        oil += 0.12
+    if hf_ratio > 1.18:
+        oil -= 0.14
+    if bokeh > 0.30:
+        oil -= 0.12
+    if s_mean > 0.20 and s_std > 0.09:
+        oil -= 0.08
+    if k >= 7:
+        oil -= 0.08
+    oil = max(0.0, oil)
+
+    # Science infographic / poster-like graphics
+    sci_infog = 0.0
+    if ecoh > 0.36:
+        sci_infog += 0.30
+    if sil > 0.12 and k <= 6:
+        sci_infog += 0.20
+    if straight_score > 0.28:
+        sci_infog += 0.35
+    if s_std < 0.09:
+        sci_infog += 0.15
+
+    poster_like = (
+        (ecoh <= 0.06) and
+        (th >= 0.10) and
+        (hf_ratio < 0.90) and
+        (k <= 4) and
+        (sil >= 0.45) and
+        (s_mean >= 0.32) and
+        (s_std >= 0.18) and
+        (straight_score < 0.12) and
+        (dots < 0.6)
+    )
+    if poster_like:
+        sci_infog += 0.28
+        comic = max(0.0, comic - 0.12)
+
+    sci_infog = max(0.0, sci_infog)
+
+    # Watercolor
+    watercolor = 0.0
+    if s_mean < 0.22 and s_std < 0.07:
+        watercolor += 0.30
+    if th < 0.018 and ed < 0.04:
+        watercolor += 0.25
+    if hf_ratio < 1.12:
+        watercolor += 0.20
+    if sil < 0.08 and k <= 6:
+        watercolor += 0.25
+    watercolor = max(0.0, watercolor)
+
+    # Technical drawing
+    technical = 0.0
+    if straight_score > 0.32:
+        technical += 0.45
+    if ecoh > 0.32:
+        technical += 0.25
+    if gray_ratio > 0.45 or s_std < 0.06:
+        technical += 0.20
+    if ed > 0.028 and th < 0.02:
+        technical += 0.10
+    technical = max(0.0, technical)
+
+    # Scribble/sketches
+    scribble = 0.0
+    if s_mean < 0.14 and s_std < 0.055 and k <= 4:
+        scribble += 0.22
+    if ed > 0.052 and ecoh < 0.18 and th < 0.018:
+        scribble += 0.20
+    if hf_ratio < 1.06:
+        scribble += 0.15
+    if bokeh < 0.16:
+        scribble += 0.08
+
+    photo_like = int(hf_ratio > 1.15) + int(bokeh > 0.26) + int(s_mean > 0.20 and s_std > 0.09) + int(k >= 7)
+    comic_like = int(ecoh >= 0.20) + int(0.012 < th < 0.060) + int(hf_ratio < 1.12) + int(bokeh < 0.22)
+    if photo_like >= 2:
+        scribble -= 0.30
+    if comic_like >= 3 and s_mean >= 0.16:
+        scribble -= 0.25
+    scribble = max(0.0, scribble)
 
     scores = {
-        "photo": float(min(1.0, photo)),
         "comic": float(min(1.0, comic)),
         "manga": float(min(1.0, manga)),
+        "photo": float(min(1.0, photo)),
+        "science illustration/infographic": float(min(1.0, sci_infog)),
+        "classical oil painting": float(min(1.0, oil)),
+        "watercolor": float(min(1.0, watercolor)),
         "children sketches": float(min(1.0, child_sketch)),
+        "technical drawing/technical sketch": float(min(1.0, technical)),
+        "scribble/sketches": float(min(1.0, scribble)),
     }
     primary = max(scores, key=scores.get)
-    return _StyleAnalysis(
-        edge_density=edge_density,
-        edge_coherence=edge_coherence,
-        edge_thickness_score=edge_thickness_score,
+
+    return StyleAnalysis(
+        edge_density=ed,
+        edge_coherence=ecoh,
+        edge_thickness_score=th,
         saturation_mean=s_mean,
         saturation_std=s_std,
-        color_clusters=best_k,
-        color_silhouette=best_sil,
-        contrast=contrast,
-        grayscale_ratio=grayscale_ratio,
+        color_clusters=k,
+        color_silhouette=sil,
+        contrast=contr,
+        grayscale_ratio=gray_ratio,
         grain_score=grain,
         hf_ratio=hf_ratio,
-        dot_pattern_score=dot_pattern_score,
-        straight_line_score=straight_line_score,
-        brush_texture_score=brush_texture_score,
-        bokeh_score=bokeh_score,
+        dot_pattern_score=dots,
+        straight_line_score=straight_score,
+        brush_texture_score=brush_score,
+        bokeh_score=bokeh,
         class_scores=scores,
         primary_class=primary,
     )
 
-def _base_descriptors_for_class(a: _StyleAnalysis) -> List[str]:
+def _base_descriptors_for_class(a: StyleAnalysis) -> List[str]:
+    """
+    Exact descriptor mapping copied from style_features.py to ensure parity.
+    """
     c = a.primary_class
-    out: List[str] = []
-    if c == "photo":
-        out += ["natural lighting", "smooth gradients"]
-        if a.hf_ratio > 1.20: out.append("fine detail")
-        if a.bokeh_score > 0.30: out.append("shallow depth of field")
-        if a.saturation_std > 0.1: out.append("rich colors")
-    elif c == "comic":
-        out += ["bold outlines" if a.edge_thickness_score >= 0.03 else "clear line art"]
-        out.append("flat colors" if a.saturation_mean < 0.18 and a.saturation_std < 0.06 and a.color_clusters <= 5 else "balanced palette")
-        if a.contrast > 0.16: out.append("high contrast")
-        if a.dot_pattern_score > 0.9: out.append("screen-tone dots")
-    elif c == "manga":
-        out += ["monochrome", "clear line art"]
-        if a.dot_pattern_score > 0.8: out.append("halftone shading")
-        if a.contrast > 0.15: out.append("high contrast")
-    elif c == "children sketches":
-        out += ["simple shapes", "thin uneven lines", "playful composition"]
-    else:
-        out += ["clean finish"]
-    # deduplicate with order
-    dedup: List[str] = []
-    seen: set[str] = set()
-    for t in out:
-        tl = t.lower()
-        if tl not in seen:
-            seen.add(tl)
-            dedup.append(t)
-    return dedup[:6]
+    d: List[str] = []
 
-async def _extract_style_descriptors_async(image_path: Path, debug: bool = False) -> List[str]:
-    def _work() -> List[str]:
-        a = _analyze_style(image_path, debug=debug)
-        return _base_descriptors_for_class(a)
-    return await asyncio.to_thread(_work)
+    if c == "comic":
+        d.append("clear line art" if a.edge_coherence < 0.34 or a.edge_thickness_score < 0.03 else "bold outlines")
+        d.append("flat colors" if a.saturation_mean < 0.18 and a.saturation_std < 0.06 and a.color_clusters <= 5 else "balanced palette")
+        if a.contrast > 0.16:
+            d.append("high contrast")
+        if a.dot_pattern_score > 0.9:
+            d.append("screen-tone dots")
+        if a.hf_ratio < 1.1 and a.grain_score < 70.0:
+            d.append("clean finish")
+
+    elif c == "manga":
+        d += ["monochrome", "clear line art"]
+        if a.dot_pattern_score > 0.8:
+            d.append("halftone shading")
+        if a.contrast > 0.15:
+            d.append("high contrast")
+        if a.hf_ratio < 1.15:
+            d.append("clean finish")
+
+    elif c == "photo":
+        d.append("natural lighting")
+        if a.hf_ratio > 1.20:
+            d.append("fine detail")
+        d.append("smooth gradients")
+        if a.saturation_std > 0.1:
+            d.append("rich colors")
+        if a.bokeh_score > 0.30:
+            d.append("shallow depth of field")
+
+    elif c == "science illustration/infographic":
+        d += ["thin precise lines", "flat colors", "clean layout"]
+        if a.straight_line_score > 0.35:
+            d.append("geometric accuracy")
+        if a.saturation_std < 0.08:
+            d.append("limited palette")
+
+    elif c == "classical oil painting":
+        d += ["brush textures", "rich tones", "soft transitions"]
+        if a.brush_texture_score > 0.45:
+            d.append("impasto strokes")
+
+    elif c == "watercolor":
+        d += ["soft washes", "bleeding edges", "delicate tones"]
+        if a.saturation_mean < 0.2:
+            d.append("pastel palette")
+
+    elif c == "children sketches":
+        d += ["simple shapes", "thin uneven lines", "playful composition"]
+
+    elif c == "technical drawing/technical sketch":
+        d += ["precise straight lines", "monochrome", "high clarity"]
+
+    else:
+        d += ["loose strokes", "expressive lines", "dynamic texture"]
+
+    out: List[str] = []
+    for x in d:
+        if x not in out:
+            out.append(x)
+    return out[:5]
+
+def extract_style_descriptors(image_path: Path, debug: bool = False) -> List[str]:
+    """
+    Return short style descriptors for a given image.
+    When debug=True, print logs identical to style_features.py:
+      - [style:debug] primary_class
+      - [style:debug] class_scores
+      - [style:debug] metrics line
+      - [style:debug] descriptors
+    """
+    a = analyze_style(image_path)
+    desc = _base_descriptors_for_class(a)
+    if debug:
+        # metrics line format must match test script expectations
+        print("[style:debug] primary_class:", a.primary_class)
+        print("[style:debug] class_scores:", a.class_scores)
+        print(
+            "[style:debug] metrics:",
+            f"ed={a.edge_density:.3f}",
+            f"ecoh={a.edge_coherence:.3f}",
+            f"th={a.edge_thickness_score:.3f}",
+            f"s_mean={a.saturation_mean:.3f}",
+            f"s_std={a.saturation_std:.3f}",
+            f"k={a.color_clusters}",
+            f"sil={a.color_silhouette:.3f}",
+            f"contrast={a.contrast:.3f}",
+            f"gray_ratio={a.grayscale_ratio:.3f}",
+            f"grain={a.grain_score:.1f}",
+            f"hf_ratio={a.hf_ratio:.2f}",
+            f"dots={a.dot_pattern_score:.2f}",
+            f"straight={a.straight_line_score:.2f}",
+            f"brush={a.brush_texture_score:.2f}",
+            f"bokeh={a.bokeh_score:.2f}",
+        )
+        print("[style:debug] descriptors:", desc)
+    return desc
+
+def detect_primary_style_label(image_path: Path) -> str:
+    return analyze_style(image_path).primary_class
+
+def extract_style_with_label(image_path: Path, debug: bool = False) -> Tuple[str, List[str]]:
+    a = analyze_style(image_path)
+    desc = _base_descriptors_for_class(a)
+    if debug:
+        print("[style:debug] primary_class:", a.primary_class)
+        print("[style:debug] class_scores:", a.class_scores)
+        print("[style:debug] descriptors:", desc)
+    return a.primary_class, desc
 
 
 # =========================
@@ -768,9 +1138,7 @@ def _limit_join(tokens: List[str], limit: int) -> str:
 def _sanitize_style_text(text: str) -> str:
     t = (text or "").strip()
     t = re.sub(r"\s+", " ", t)
-    # Remove leading phrases like "style:" or similar
     t = re.sub(r"^(style|stil)[:\s-]+", "", t, flags=re.I)
-    # Cap tokens to avoid dominance
     return _retokenize_limit(t, MAX_TOKENS_STYLE_TEXT)
 
 def _apply_deactivate_all_styles(resp: StyleEngineResponse) -> None:
@@ -784,6 +1152,28 @@ def _apply_deactivate_all_styles(resp: StyleEngineResponse) -> None:
 # Public orchestration
 # =========================
 
+def _format_metrics_line(a: StyleAnalysis) -> str:
+    """
+    Produce the exact compact metrics line expected by tests.
+    """
+    return " ".join([
+        f"ed={a.edge_density:.3f}",
+        f"ecoh={a.edge_coherence:.3f}",
+        f"th={a.edge_thickness_score:.3f}",
+        f"s_mean={a.saturation_mean:.3f}",
+        f"s_std={a.saturation_std:.3f}",
+        f"k={a.color_clusters}",
+        f"sil={a.color_silhouette:.3f}",
+        f"contrast={a.contrast:.3f}",
+        f"gray_ratio={a.grayscale_ratio:.3f}",
+        f"grain={a.grain_score:.1f}",
+        f"hf_ratio={a.hf_ratio:.2f}",
+        f"dots={a.dot_pattern_score:.2f}",
+        f"straight={a.straight_line_score:.2f}",
+        f"brush={a.brush_texture_score:.2f}",
+        f"bokeh={a.bokeh_score:.2f}",
+    ])
+
 async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEFAULT_REFS_DIR) -> StyleEngineResponse:
     """
     Build additive style text from:
@@ -795,13 +1185,12 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
       - Order-preserving deduplication across sources
       - Per-source token caps: style_text (40), vision (24), descriptors (12)
       - Final cap MAX_TOKENS_FINAL (40)
-      - No synthetic fallback: if inputs are empty or disabled, result can be empty
 
-    Reset policy (deactivate_all_styles):
-      - If deactivate_all_styles==True AND no new inputs (no style text, no usable reference) in this request:
-          -> clear styles (reset) and return empty style_positive
-      - If deactivate_all_styles==True BUT new inputs are present in this request:
-          -> ignore reset and apply the new inputs (auto-reactivate)
+    Reset policy:
+      - If deactivate_all_styles==True AND no new inputs in this request:
+          -> clear styles and return empty
+      - If deactivate_all_styles==True BUT new inputs present:
+          -> ignore reset and apply new inputs
 
     Remote vision policy:
       - If APP_ALLOW_REMOTE_VISION=0, only localhost URLs are permitted
@@ -848,7 +1237,7 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
     has_new_reference = resolved_path is not None
     has_new_inputs = has_new_style_text or has_new_reference
 
-    # If deactivate requested and NO new inputs in this very request -> perform reset and return early
+    # Deactivate handling
     if req.deactivate_all_styles and not has_new_inputs:
         _apply_deactivate_all_styles(resp)
         resp.notes.append("Deactivate applied (no new inputs in request).")
@@ -856,13 +1245,11 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
     elif req.deactivate_all_styles and has_new_inputs:
         resp.notes.append("Deactivate requested but new inputs detected; applying new styles (auto-reactivate).")
 
-    # Safety nets and mode decisions
+    # Safety mode toggles
     if has_new_reference:
-        # If force-on is set, always enable local features with a note
         if FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON and not req.use_local_style_features:
             req.use_local_style_features = True
             resp.notes.append("Local style analysis forced on by env (FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON=1).")
-        # If Vision is disabled but reference exists, enable local analysis as a safety-net
         if (not req.use_ollama_vision) and (not req.use_local_style_features):
             req.use_local_style_features = True
             resp.notes.append("Local style safety-net enabled: reference provided, vision disabled.")
@@ -879,12 +1266,11 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
     else:
         resp.notes.append("No style_text_prompt provided.")
 
-    # 2) Ollama vision (only if reference is available)
+    # 2) Ollama vision
     if req.use_ollama_vision:
         if resolved_path is None:
             resp.notes.append("Ollama vision requested but no reference image resolved.")
         else:
-            # Decide URL based on hints; app supplies via request for "remote" or "cloud"
             ov_mode_url = None
             mode = (req.ollama_vision_mode or "local").lower()
             if mode in {"remote", "cloud"}:
@@ -910,16 +1296,27 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
     else:
         resp.notes.append("Ollama vision disabled by request.")
 
-    # 3) Local descriptors (only if reference is available)
+    # 3) Local descriptors with strict debug output parity
     if req.use_local_style_features:
         if resolved_path is None:
             resp.notes.append("Local style features requested but no reference image resolved.")
         else:
             try:
-                print(f"[STYLE][local] analyzing ref={resolved_path}")
-                desc = await _extract_style_descriptors_async(resolved_path, debug=False)
-                print(f"[STYLE][local] descriptors={desc}")
-                # Keep only up to MAX_TOKENS_DESCRIPTORS descriptor tokens
+                # Compute full analysis once for logging parity and descriptor generation
+                a = analyze_style(resolved_path)
+                if STYLE_LOCAL_DEBUG:
+                    print("[style:debug] primary_class:", a.primary_class)
+                    print("[style:debug] class_scores:", a.class_scores)
+                    print("[style:debug] metrics:", _format_metrics_line(a))
+                # Use exact descriptor mapping
+                try:
+                    desc = _base_descriptors_for_class(a)
+                except Exception:
+                    # Fallback to extract_style_with_label if something unexpected happens
+                    _, desc = extract_style_with_label(resolved_path, debug=False)
+                if STYLE_LOCAL_DEBUG:
+                    print("[style:debug] descriptors:", desc)
+                # Cap and deduplicate descriptors locally before merging
                 if desc:
                     dedup_desc: List[str] = []
                     seen: set[str] = set()
@@ -942,13 +1339,12 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
     else:
         resp.notes.append("Local style features disabled by request.")
 
-    # Finalize style: deduplicate tokens across sources (order-preserving: style_text, vision, descriptors)
+    # Finalize style: deduplicate tokens across sources (order-preserving)
     tokens = _dedup_ordered_tokens(style_parts_in_order)
     if tokens:
         resp.style_positive = _limit_join(tokens, MAX_TOKENS_FINAL)
         resp.notes.append(f"Final style merged with cap {MAX_TOKENS_FINAL} tokens.")
     else:
-        # Explain why empty
         reasons: List[str] = []
         if not has_new_style_text:
             reasons.append("no style_text_prompt")
@@ -980,6 +1376,7 @@ def _log_style_env() -> None:
         f"retries={HTTP_MAX_RETRIES}",
         f"caps(style={MAX_TOKENS_STYLE_TEXT}, vision={MAX_TOKENS_VISION}, desc={MAX_TOKENS_DESCRIPTORS}, final={MAX_TOKENS_FINAL})",
         f"feature_defaults(local={FEATURE_LOCAL_STYLE_ANALYSIS_DEFAULT}, vision={FEATURE_OLLAMA_VISION_DEFAULT}, force_local={FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON})",
+        f"local_debug={'on' if STYLE_LOCAL_DEBUG else 'off'}",
     )
 
 with contextlib.suppress(Exception):
@@ -1010,7 +1407,7 @@ if __name__ == "__main__":
         # Case B: reset + new style text -> should apply style (ignore reset)
         req_apply = StyleEngineRequest(
             content_positive="",
-            style_text_prompt="Comic",
+            style_text_prompt="thin precise lines, flat colors, clean layout",
             reference_source="none",
             use_local_style_features=False,
             use_ollama_vision=False,
