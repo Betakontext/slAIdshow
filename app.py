@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 # Production-ready FastAPI app for slAIdshow:
 # - Real-time audio → Whisper.cpp (pywhispercpp) → Ollama prompt → Image backend (ComfyUI or Pollinations)
-# - Style pipeline integrated: style_engine builds style_positive (and reference_text) used in generation
 
 from __future__ import annotations
 

@@ -4,16 +4,6 @@
   <meta charset="utf-8" />
   <title>slAIdshow | Local Speech-to-Image Pipeline</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!--
-    Complete file: Updated UI to:
-      - Remove "Local style analysis" toggle
-      - Keep only "Use Ollama vision" toggle (default ON)
-      - Show i18n hint when Vision is OFF:
-        DE: "Lokale Stilfeatures sind generisch; für bildspezifische Styles bitte Vision aktivieren"
-        EN: "Local style features are generic; enable Vision for image-specific styles"
-      - Keep language switch working with dynamic updates for the hint text
-      - Force use_local_style_features=false in all payloads sent to /api/style/build
-  -->
   <style>
     :root {
       --bg: #0f1115;
