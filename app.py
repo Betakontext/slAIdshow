@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 # Production-ready FastAPI app for slAIdshow:
 # - Real-time audio → Whisper.cpp (pywhispercpp) → Ollama prompt → Image backend (ComfyUI or Pollinations)
+# - Style pipeline integrated: style_engine builds style_positive (and reference_text) used in generation
+# - Extended: Runtime switching between Comfy modes (local | remote | auto) and remote target settings
+# - Extended: Debug endpoint to reveal effective image target
 
 from __future__ import annotations
 
@@ -48,7 +51,7 @@ print(f"[ENV] APP_OLLAMA_VISION_MODEL={os.getenv('APP_OLLAMA_VISION_MODEL')}, "
 import httpx
 import numpy as np
 import sounddevice as sd
-from fastapi import FastAPI, Request, UploadFile, File, Body
+from fastapi import FastAPI, Request, UploadFile, File, Body, Query
 from fastapi.responses import (
     JSONResponse,
     PlainTextResponse,
@@ -233,16 +236,29 @@ def assert_local(host: str) -> None:
 
 assert_local(OLLAMA_HOST)
 
-def _assert_image_backend_host() -> None:
+def _assert_image_backend_host():
     """
-    Allow remote image backends if explicitly enabled.
-    Blocks remote if not enabled.
+    On startup, only enforce strict host policy when running local Comfy mode.
+    Respect both static APP_ALLOW_REMOTE_BACKENDS and runtime ALLOW_CLOUD_IMAGE_BACKEND.
     """
-    allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
-    comfy_host = _env_str("APP_COMFY_HOST", "127.0.0.1")
+    comfy_mode = os.getenv("APP_COMFY_MODE", "auto").strip().lower()
+    # Enforce only when we are explicitly in local mode; remote/cloud are validated elsewhere.
+    if comfy_mode != "local":
+        return
+
+    allow_remote = (
+        _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
+        or _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0)
+    )
+
+    host = os.getenv("APP_COMFY_HOST", "127.0.0.1")
+    # If local mode with a non-localhost host and remote not allowed, raise
     if not allow_remote:
-        if comfy_host not in {"127.0.0.1", "localhost"}:
-            raise AssertionError(f"Remote image backends disabled, got {comfy_host}")
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            raise RuntimeError(
+                "APP_COMFY_MODE=local but APP_COMFY_HOST is not localhost and remote backends are not allowed. "
+                "Either set APP_ALLOW_REMOTE_BACKENDS=1 or toggle cloud/remote allowance at runtime."
+            )
 
 _assert_image_backend_host()
 
@@ -313,6 +329,21 @@ class HealthReport(BaseModel):
 class ImageBackendSwitch(BaseModel):
     backend: Literal["comfyui", "pollinations"]
     reset: bool = False
+
+# NEW: Comfy mode/remote settings and debug models
+class ComfyModeRequest(BaseModel):
+    mode: Literal["local", "remote", "auto"]
+
+class ComfyRemoteRequest(BaseModel):
+    scheme: Literal["http", "https"] = "http"
+    host: str
+    port: int = Field(default=8188, ge=1, le=65535)
+
+class DebugImageTarget(BaseModel):
+    backend_type: str
+    active_backend: str
+    comfy_mode: Optional[str] = None
+    target: Dict[str, Any] = Field(default_factory=dict)
 
 _MIN_SIZE = 128
 _MAX_SIZE = 2048
@@ -1234,6 +1265,9 @@ async def get_config():
 
     show_workflow_selector = bool(is_comfy and not comfy_disabled)
 
+    # Expose comfy mode from ENV to front-end
+    comfy_mode = os.getenv("APP_COMFY_MODE", "auto")
+
     return {
         "env_file": ENV_PATH or "(env vars only)",
         "audio": {"device_pref": AUDIO_DEVICE_PREF, "sample_rate": SAMPLE_RATE, "frame_ms": FRAME_MS, "stream_latency_sec": APP_STREAM_LATENCY_SEC},
@@ -1257,7 +1291,13 @@ async def get_config():
             "show_workflow_selector": show_workflow_selector,
             "comfy": {
                 "enabled": bool(is_comfy and not comfy_disabled),
-                "disabled_via_env": comfy_disabled
+                "disabled_via_env": comfy_disabled,
+                "mode": comfy_mode,
+                "remote": {
+                    "scheme": os.getenv("APP_COMFY_REMOTE_SCHEME", "http"),
+                    "host": os.getenv("APP_COMFY_REMOTE_HOST", ""),
+                    "port": int(os.getenv("APP_COMFY_REMOTE_PORT", "8188") or "8188"),
+                }
             }
         },
         "sse": {"tick_sec": APP_SSE_TICK_SEC},
@@ -1635,6 +1675,190 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
         tb = traceback.format_exc()
         print(f"[BACKEND] switch error: {e}\n{tb}")
         return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
+
+# ---------- NEW: Comfy mode switching, remote target, and debug ----------
+
+def _set_env(k: str, v: Optional[str]) -> None:
+    if v is None:
+        with contextlib.suppress(Exception):
+            del os.environ[k]
+        return
+    os.environ[k] = str(v)
+
+def _describe_backend_target() -> DebugImageTarget:
+    backend_type = type(BACKEND).__name__ if BACKEND is not None else "None"
+    active_backend = STATE.image_backend_name
+    comfy_mode = os.getenv("APP_COMFY_MODE", "auto")
+    target: Dict[str, Any] = {}
+    # Try backend-provided info if available
+    try:
+        if BACKEND is not None and hasattr(BACKEND, "target_info"):
+            info = BACKEND.target_info()  # type: ignore[attr-defined]
+            if isinstance(info, dict):
+                target = info
+    except Exception as e:
+        print(f"[DEBUG] target_info() failed: {e}")
+    # Fallback to ENV hints for comfy
+    if active_backend == "comfyui" and not target:
+        target = {
+            "mode_env": comfy_mode,
+            "local": {
+                "scheme": os.getenv("APP_COMFY_LOCAL_SCHEME", "http"),
+                "host": os.getenv("APP_COMFY_LOCAL_HOST", "127.0.0.1"),
+                "port": int(os.getenv("APP_COMFY_LOCAL_PORT", "8188") or "8188"),
+            },
+            "remote": {
+                "scheme": os.getenv("APP_COMFY_REMOTE_SCHEME", "http"),
+                "host": os.getenv("APP_COMFY_REMOTE_HOST", ""),
+                "port": int(os.getenv("APP_COMFY_REMOTE_PORT", "8188") or "8188"),
+            }
+        }
+    return DebugImageTarget(
+        backend_type=backend_type,
+        active_backend=active_backend,
+        comfy_mode=comfy_mode if active_backend == "comfyui" else None,
+        target=target,
+    )
+
+@app.post("/api/settings/comfy_mode")
+async def api_set_comfy_mode(req: ComfyModeRequest):
+    """
+    Switch Comfy mode at runtime:
+    - local: prefer local instance (127.0.0.1). Discovery behavior is governed by your image_backend.py (e.g., AUTO_DISCOVERY_ENABLE).
+    - remote: use configured remote (APP_COMFY_REMOTE_*).
+    - auto: choose remote when configured, else local.
+    This does not change the high-level backend (still 'comfyui'). To switch to 'cloud', use /api/settings/image_backend with 'pollinations'.
+    """
+    # Persist in ENV so image_backend.build_image_backend() can pick it up
+    _set_env("APP_COMFY_MODE", req.mode)
+    # Ensure we are on comfyui (not pollinations)
+    STATE.image_backend_name = "comfyui"
+    try:
+        _rebuild_backend(force_name="comfyui")
+        try:
+            _apply_active_workflow_if_local()
+        except Exception as e:
+            print(f"[WF] apply after comfy_mode switch failed: {e}")
+        desc = _describe_backend_target()
+        await broadcast("status", f"comfy_mode:{req.mode}")
+        return {"ok": True, "debug": desc.model_dump()}
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[BACKEND] comfy_mode switch error: {e}\n{tb}")
+        return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
+
+@app.post("/api/settings/comfy_remote")
+async def api_set_comfy_remote(req: ComfyRemoteRequest):
+    """
+    Set remote Comfy target and rebuild backend if necessary.
+    Example:
+      {"scheme":"http","host":"192.168.188.24","port":8188}
+    """
+    _set_env("APP_COMFY_REMOTE_SCHEME", req.scheme)
+    _set_env("APP_COMFY_REMOTE_HOST", req.host)
+    _set_env("APP_COMFY_REMOTE_PORT", str(req.port))
+    # Rebuild if in comfyui
+    if STATE.image_backend_name == "comfyui":
+        try:
+            _rebuild_backend()
+            try:
+                _apply_active_workflow_if_local()
+            except Exception as e:
+                print(f"[WF] apply after comfy_remote set failed: {e}")
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[BACKEND] comfy_remote update error: {e}\n{tb}")
+            return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
+    desc = _describe_backend_target()
+    await broadcast("status", "comfy_remote:updated")
+    return {"ok": True, "debug": desc.model_dump()}
+
+@app.get("/api/debug/image_target", response_model=DebugImageTarget)
+async def api_debug_image_target():
+    return _describe_backend_target()
+
+# ---------- NEW: Comfy remote reachability probe ----------
+
+def _is_valid_hostname(host: str) -> bool:
+    """
+    Basic validation for host (IPv4, IPv6 literal in brackets, or hostname).
+    This is intentionally simple; for stricter rules, enhance as needed.
+    """
+    if not host or len(host) > 255:
+        return False
+    if host.startswith("[") and host.endswith("]"):
+        inside = host[1:-1]
+        return 0 < len(inside) <= 253
+    ipv4_pattern = r"^\d{1,3}(\.\d{1,3}){3}$"
+    if re.match(ipv4_pattern, host):
+        try:
+            parts = [int(p) for p in host.split(".")]
+            return all(0 <= p <= 255 for p in parts)
+        except Exception:
+            return False
+    label = r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)"
+    return re.compile(rf"^{label}(\.{label})*$").match(host) is not None
+
+def _build_base_url(scheme: str, host: str, port: int) -> str:
+    if host.startswith("[") and host.endswith("]"):
+        return f"{scheme}://{host}:{port}"
+    return f"{scheme}://{host}:{port}"
+
+@app.get("/api/settings/comfy_remote_probe")
+async def comfy_remote_probe(
+    scheme: str = Query(..., description="http or https"),
+    host: str = Query(..., description="Hostname, IPv4, or IPv6 in [brackets]"),
+    port: int = Query(..., ge=1, le=65535, description="TCP port number"),
+):
+    """
+    Lightweight reachability probe for a remote ComfyUI instance.
+
+    Logic:
+    - Validate inputs
+    - Try GET {base}/history
+    - Fallback GET {base}/
+    - Success if 2xx
+    - Always returns status 200 with ok flag; 4xx only for bad input
+    """
+    scheme_l = (scheme or "").strip().lower()
+    if scheme_l not in {"http", "https"}:
+        return JSONResponse(
+            {"ok": False, "error": "invalid_scheme", "detail": "scheme must be http or https", "target": {"scheme": scheme, "host": host, "port": port}},
+            status_code=400,
+        )
+    if not _is_valid_hostname(host or ""):
+        return JSONResponse(
+            {"ok": False, "error": "invalid_host", "detail": "invalid host format", "target": {"scheme": scheme_l, "host": host, "port": port}},
+            status_code=400,
+        )
+
+    base = _build_base_url(scheme_l, host, int(port))
+    candidates = ["/history", "/"]
+
+    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short_http(), follow_redirects=True) as client:
+        last_error: Optional[str] = None
+        last_status: Optional[int] = None
+        for path in candidates:
+            url = f"{base}{path}"
+            try:
+                resp = await client.get(url)
+                last_status = resp.status_code
+                if 200 <= resp.status_code < 300:
+                    return {"ok": True, "target": {"scheme": scheme_l, "host": host, "port": port}, "endpoint": path, "status": resp.status_code}
+                else:
+                    last_error = f"non_2xx:{resp.status_code} at {path}"
+            except httpx.ConnectTimeout as e:
+                last_error = f"connect_timeout:{e}"
+            except httpx.ReadTimeout as e:
+                last_error = f"read_timeout:{e}"
+            except httpx.ConnectError as e:
+                last_error = f"connect_error:{e}"
+            except httpx.HTTPError as e:
+                last_error = f"http_error:{e}"
+            except Exception as e:
+                last_error = f"unexpected:{e}"
+
+    return {"ok": False, "target": {"scheme": scheme_l, "host": host, "port": port}, "error": last_error or "probe_failed", "status": last_status}
 
 # ---------- Image size, negative prompt & style prompt settings ----------
 
