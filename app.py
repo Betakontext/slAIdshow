@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 # Production-ready FastAPI app for slAIdshow:
 # - Real-time audio → Whisper.cpp (pywhispercpp) → Ollama prompt → Image backend (ComfyUI or Pollinations)
-# - Style pipeline integrated: style_engine builds style_positive (and reference_text) used in generation
 
 from __future__ import annotations
+
 
 import asyncio
 import contextlib
@@ -17,6 +17,33 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
+
+# ---------- Optional dotenv loading ----------
+
+ENV_PATH: Optional[str] = None
+try:
+    from dotenv import find_dotenv, load_dotenv
+    explicit = os.environ.get("ENV_FILE")
+    if explicit:
+        found = find_dotenv(explicit, usecwd=True)
+        if found:
+            load_dotenv(found, override=True)
+            ENV_PATH = found
+        elif os.path.isfile(explicit):
+            load_dotenv(explicit, override=True)
+            ENV_PATH = os.path.abspath(explicit)
+    if ENV_PATH is None:
+        found = find_dotenv(".env", usecwd=True)
+        if found:
+            load_dotenv(found, override=True)
+            ENV_PATH = found
+except Exception as e:
+    print(f"[ENV] dotenv not available or failed: {e}")
+
+print(f"[ENV] APP_OLLAMA_VISION_MODEL={os.getenv('APP_OLLAMA_VISION_MODEL')}, "
+      f"APP_ALLOW_REMOTE_VISION={os.getenv('APP_ALLOW_REMOTE_VISION')}, "
+      f"APP_OLLAMA_HOST={os.getenv('APP_OLLAMA_HOST')}, "
+      f"APP_OLLAMA_PORT={os.getenv('APP_OLLAMA_PORT')}")
 
 import httpx
 import numpy as np
@@ -86,27 +113,6 @@ def _backend_default_size(backend_name: str) -> tuple[int, int]:
     h = max(64, min(2048, h))
     return w, h
 
-# ---------- Optional dotenv loading ----------
-
-ENV_PATH: Optional[str] = None
-try:
-    from dotenv import find_dotenv, load_dotenv
-    explicit = os.environ.get("ENV_FILE")
-    if explicit:
-        found = find_dotenv(explicit, usecwd=True)
-        if found:
-            load_dotenv(found, override=True)
-            ENV_PATH = found
-        elif os.path.isfile(explicit):
-            load_dotenv(explicit, override=True)
-            ENV_PATH = os.path.abspath(explicit)
-    if ENV_PATH is None:
-        found = find_dotenv(".env", usecwd=True)
-        if found:
-            load_dotenv(found, override=True)
-            ENV_PATH = found
-except Exception as e:
-    print(f"[ENV] dotenv not available or failed: {e}")
 
 # ---------- Audio config ----------
 
@@ -2049,6 +2055,7 @@ def _call_build_styles_compat(req_obj: Any) -> Any:
             return await fn(req_obj)  # type: ignore[misc]
     return _call()
 
+
 @app.post("/api/style/build", response_model=StyleBuildResponse)
 async def api_style_build(req: StyleBuildRequest = Body(...)):
     """
@@ -2111,10 +2118,17 @@ async def api_style_build(req: StyleBuildRequest = Body(...)):
         # Map to API result
         api_res = _from_engine_result(res)
 
+        print("[STYLE][diag] notes:", getattr(api_res, "style_components", {}).get("notes"))
+
         # No fallback: keep exactly what the engine produced (possibly empty)
         normalized = (api_res.style_positive or "").strip()
         api_res.style_positive = normalized  # reflect trimmed value in response
         STATE.style_positive = normalized or None
+
+        print("[STYLE][diag] warnings:", getattr(api_res, "style_components", {}).get("warnings"))
+        print("[STYLE][diag] vision_text_used:", getattr(api_res, "style_components", {}).get("vision_text_used"))
+        print("[STYLE][diag] descriptors_used:", getattr(api_res, "style_components", {}).get("descriptors_used"))
+        print("[STYLE][diag] style_positive:", api_res.style_positive)
 
         # Extract human-readable vision/reference text (if present) for transparent "Ref: ..." appending later
         try:

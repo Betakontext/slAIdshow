@@ -129,6 +129,9 @@
     .footer-hud a:hover {
       text-decoration: underline;
     }
+
+    /* Optional: give the vision hint a slightly warmer color for visibility */
+    #vision-hint { color: #ffd966; }
   </style>
 </head>
 <body>
@@ -230,9 +233,13 @@
               <button id="btn-load-url" title="Load URL as reference"><span id="style-load-url-label">Laden</span></button>
             </div>
 
-            <div class="row" style="margin-bottom:8px;">
-              <label><input id="toggle-local-style" type="checkbox" /> <span id="style-toggle-local">Local style analysis</span></label>
-              <label><input id="toggle-vision" type="checkbox" /> <span id="style-toggle-vision">Use Ollama vision</span></label>
+            <!-- Only Vision toggle remains (default ON) + i18n hint when OFF -->
+            <div class="row" style="margin-bottom:8px; align-items: center;">
+              <label style="display:flex; align-items:center; gap:8px;">
+                <input id="toggle-vision" type="checkbox" checked />
+                <span id="style-toggle-vision">Use Ollama vision</span>
+              </label>
+              <span id="vision-hint" class="subtle" style="display:none; margin-left:8px;"></span>
             </div>
 
             <div class="log mono" id="style-log" style="max-height:120px;"></div>
@@ -242,7 +249,7 @@
           <!-- Prompt input -->
           <div class="row" style="margin-bottom:6px;">
               <strong id="prompt_ui_title">Bild Prompt</strong>
-              </div>
+          </div>
 
           <div class="inline-input-line" style="margin-bottom:8px;">
             <input id="plan-input" type="text" placeholder="Text prompt to generate an image" />
@@ -346,7 +353,7 @@
         wf_applied_ok: "Workflow übernommen.",
         wf_applied_fail: "Workflow-Übernahme fehlgeschlagen。",
         wf_list_fail: "Workflows konnten nicht geladen werden。",
-        // New (style engine) - UI labels
+        // Style engine - UI labels
         style_ui_title: "Stil-Steuerung",
         style_ui_deactivate: "Alle Stile deaktivieren",
         style_ui_deactivate_title: "Alle Stile deaktivieren",
@@ -357,8 +364,8 @@
         style_ui_ref_url_ph: "https://example.com/dein-bild.jpg (Alternative zum Datei-Upload)",
         style_ui_load_url: "Laden",
         style_ui_load_url_title: "URL als Referenz laden",
-        style_ui_toggle_local: "Lokale Stil-Analyse",
         style_ui_toggle_vision: "Ollama Vision verwenden",
+        style_ui_vision_hint_off: "Lokale Stilfeatures sind generisch; für bildspezifische Styles bitte Vision aktivieren",
         // Existing (style engine) - logs/status
         style_deactivate: "Alle Styles deaktiviert.",
         style_applied: "Style-Text übernommen.",
@@ -430,7 +437,7 @@
         wf_applied_ok: "Workflow applied.",
         wf_applied_fail: "Failed to apply workflow。",
         wf_list_fail: "Failed to load workflows。",
-        // New (style engine) - UI labels
+        // Style engine - UI labels
         style_ui_title: "Style Controls",
         style_ui_deactivate: "Deactivate all styles",
         style_ui_deactivate_title: "Deactivate all styles",
@@ -441,8 +448,8 @@
         style_ui_ref_url_ph: "https://example.com/your-image.jpg (optional alternative to file upload)",
         style_ui_load_url: "Load",
         style_ui_load_url_title: "Load URL as reference",
-        style_ui_toggle_local: "Local style analysis",
         style_ui_toggle_vision: "Use Ollama vision",
+        style_ui_vision_hint_off: "Local style features are generic; enable Vision for image-specific styles",
         // Existing (style engine) - logs/status
         style_deactivate: "All styles deactivated.",
         style_applied: "Style text applied.",
@@ -516,10 +523,11 @@
       const btnLoadUrl = document.getElementById('btn-load-url');
       if (btnLoadUrl) btnLoadUrl.title = t('style_ui_load_url_title');
 
-      const styleToggleLocal = document.getElementById('style-toggle-local');
-      if (styleToggleLocal) styleToggleLocal.textContent = t('style_ui_toggle_local');
       const styleToggleVision = document.getElementById('style-toggle-vision');
       if (styleToggleVision) styleToggleVision.textContent = t('style_ui_toggle_vision');
+
+      const visionHint = document.getElementById('vision-hint');
+      if (visionHint) visionHint.textContent = t('style_ui_vision_hint_off');
 
       const btnShutdown = document.getElementById('btn-shutdown');
       if (btnShutdown.dataset.mode === 'reconnect') {
@@ -541,6 +549,7 @@
       localStorage.setItem('ui_lang', LANG);
       document.documentElement.lang = LANG; // sync <html lang> on change
       applyI18N();
+      syncVisionHint(); // update hint text/visibility on language change
     });
 
     // ---------- Utility ----------
@@ -576,8 +585,8 @@
     const refFileInput = $('#ref-file');
     const refUrlInput = $('#ref-url');
     const btnLoadUrl = $('#btn-load-url');
-    const toggleLocalStyle = $('#toggle-local-style');
     const toggleVision = $('#toggle-vision');
+    const visionHintEl = document.getElementById('vision-hint');
 
     // Holds the most recent style_positive string returned by the server
     let LAST_STYLE_POSITIVE = null;
@@ -874,25 +883,26 @@
       reference_id: null,
       reference_url: '',
       style_text_prompt: '',
-      use_local_style_features: true,
-      use_ollama_vision: false,
+      use_local_style_features: false, // fixed OFF in UI/payload
+      use_ollama_vision: true,        // default ON
       deactivate_all_styles: false,
     };
 
     function loadStyleState() {
       try {
         const raw = localStorage.getItem('style_state_v1');
-        if (!raw) return;
-        const s = JSON.parse(raw);
-        Object.assign(STYLE_STATE, s || {});
+        if (raw) {
+          const s = JSON.parse(raw);
+          Object.assign(STYLE_STATE, s || {});
+        }
       } catch {}
-      // Reflect into UI
       if (STYLE_STATE.style_text_prompt) styleTextInput.value = STYLE_STATE.style_text_prompt;
       if (STYLE_STATE.reference_source === 'url' && STYLE_STATE.reference_url) {
         refUrlInput.value = STYLE_STATE.reference_url;
       }
-      toggleLocalStyle.checked = !!STYLE_STATE.use_local_style_features;
-      toggleVision.checked = !!STYLE_STATE.use_ollama_vision;
+      // Reflect Vision toggle
+      toggleVision.checked = STYLE_STATE.use_ollama_vision === true;
+      syncVisionHint();
     }
 
     function saveStyleState() {
@@ -907,7 +917,7 @@
         reference_source: STYLE_STATE.reference_source || 'none',
         reference_id: STYLE_STATE.reference_id || null,
         reference_url: STYLE_STATE.reference_url || null,
-        use_local_style_features: !!STYLE_STATE.use_local_style_features,
+        use_local_style_features: false, // enforce OFF
         use_ollama_vision: !!STYLE_STATE.use_ollama_vision,
         deactivate_all_styles: !!STYLE_STATE.deactivate_all_styles,
       };
@@ -1030,17 +1040,21 @@
       }
     });
 
-    // Toggle local style analysis
-    toggleLocalStyle.addEventListener('change', async () => {
-      STYLE_STATE.use_local_style_features = !!toggleLocalStyle.checked;
-      saveStyleState();
-      await styleBuild($('#plan-input').value.trim() || '');
-    });
+    // Vision toggle + hint
+    function syncVisionHint() {
+      if (!visionHintEl) return;
+      if (toggleVision.checked) {
+        visionHintEl.style.display = 'none';
+      } else {
+        visionHintEl.textContent = t('style_ui_vision_hint_off');
+        visionHintEl.style.display = '';
+      }
+    }
 
-    // Toggle vision
     toggleVision.addEventListener('change', async () => {
       STYLE_STATE.use_ollama_vision = !!toggleVision.checked;
       saveStyleState();
+      syncVisionHint();
       await styleBuild($('#plan-input').value.trim() || '');
     });
 
@@ -1051,8 +1065,8 @@
       STYLE_STATE.reference_source = 'none';
       STYLE_STATE.reference_id = null;
       STYLE_STATE.reference_url = '';
-      STYLE_STATE.use_local_style_features = false;
-      STYLE_STATE.use_ollama_vision = false;
+      STYLE_STATE.use_local_style_features = false;  // keep false
+      STYLE_STATE.use_ollama_vision = false;        // user intent: turn off
       saveStyleState();
 
       log(styleLog, t('style_deactivate'));
@@ -1060,8 +1074,8 @@
       styleTextInput.value = '';
       refUrlInput.value = '';
       if (refFileInput) refFileInput.value = '';
-      toggleLocalStyle.checked = false;
       toggleVision.checked = false;
+      syncVisionHint();
 
       await resetAllStylesServer();
       await styleBuild($('#plan-input').value.trim() || '');
@@ -1408,8 +1422,17 @@
         }
 
         if (j?.style) {
-          if (typeof j.style.use_local_style_features === 'boolean') toggleLocalStyle.checked = j.style.use_local_style_features;
-          if (typeof j.style.use_ollama_vision === 'boolean') toggleVision.checked = j.style.use_ollama_vision;
+          if (typeof j.style.use_ollama_vision === 'boolean') {
+            toggleVision.checked = j.style.use_ollama_vision;
+            STYLE_STATE.use_ollama_vision = j.style.use_ollama_vision;
+          } else {
+            toggleVision.checked = true;
+            STYLE_STATE.use_ollama_vision = true;
+          }
+          // Force local features OFF in UI/State
+          STYLE_STATE.use_local_style_features = false;
+          syncVisionHint();
+          saveStyleState();
         }
 
         if (statusEl.dataset.state !== 'connected') statusEl.textContent = t('status_ready');
@@ -1422,6 +1445,7 @@
     (async function init() {
       applyI18N();
       loadStyleState();
+      syncVisionHint();
       await refreshConfig();
       function onSizeInputChange() { updateSizePill(); scheduleSizeSync(); }
       widthInput.addEventListener('input', onSizeInputChange);
