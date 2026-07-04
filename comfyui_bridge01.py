@@ -1,14 +1,27 @@
-# comfyui_bridge.py
-# --------------------------------------------------------------------------------------
-# Production-grade ComfyUI bridge with robust remote (tunnel) handling.
-# Key changes in this version:
-# - Query-view downloader no longer sends an empty 'subfolder' parameter (critical fix)
-# - Conservative headers for binary downloads (helps with some tunnels/proxies)
-# - Slightly more generous retry/backoff on query downloads
-# - Minimal, precise logging additions for better diagnostics
-#
-# All other logic and public signatures are intentionally kept as-is per request.
-# --------------------------------------------------------------------------------------
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ComfyUI bridge with HTTPS support and robust retries.
+
+What's new in this version:
+- Supports APP_COMFY_SCHEME to choose http/https explicitly.
+- Auto-picks https when APP_COMFY_SCHEME is not set but APP_COMFY_PORT=443.
+- Logs the effective base URL to aid diagnostics.
+- Keeps existing retry logic and view-mode selection.
+- Respects remote-backend safety policy (APP_ALLOW_REMOTE_BACKENDS, APP_ALLOWED_SUBNETS).
+
+How to use:
+- For Cloudflared Quick Tunnel:
+  APP_ALLOW_REMOTE_BACKENDS=1
+  APP_COMFY_HOST=<your_trycloudflare_host_without_https>
+  APP_COMFY_PORT=443
+  APP_COMFY_FORCE_VIEW_MODE=query
+  APP_COMFY_SCHEME=https    # optional; auto-https when port=443 also works
+
+Testing:
+- curl -I https://<host>/
+- curl -s -X POST https://<host>/prompt -H "Content-Type: application/json" -d '{"prompt":{}}'
+"""
 
 from __future__ import annotations
 
@@ -84,14 +97,13 @@ _COMFY_OUTPUT_DIR: Optional[Path] = Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).r
 class ComfyConnection(BaseModel):
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=8188)
-    scheme: Optional[str] = Field(default=None)  # 'http' or 'https'; if None, auto by port or env
+    scheme: Optional[str] = Field(default=None)  # 'http' or 'https'; if None, auto by port
 
     @property
     def base(self) -> str:
         """
         Build base URL with proper scheme.
         - Prefer explicit APP_COMFY_SCHEME if provided.
-        - Else use provided scheme.
         - Else auto-select https when port == 443, otherwise http.
         """
         _assert_image_backend_host_policy(self.host)
@@ -221,21 +233,14 @@ async def _post_prompt(
     base_url: str,
     body: Dict[str, Any],
 ) -> str:
-    """
-    POST /prompt with retries. Classify HTTP 400 as prompt/workflow error (reachable),
-    not as 'unavailable'.
-    """
     delay = 0.8
     last_exc: Optional[Exception] = None
     for attempt in range(1, 5):
         try:
-            url = f"{base_url}/prompt"
-            print(f"DEBUG comfy POST {url} attempt#{attempt}")
-            r = await client.post(url, json=body)
+            r = await client.post(f"{base_url}/prompt", json=body)
             if r.status_code == 400:
-                text = r.text[:500].replace("\n", " ")
-                print(f"DEBUG comfy POST /prompt 400 body: {text}")
-                raise RuntimeError(f"comfy_prompt_invalid_400: {text}")
+                text = r.text[:300].replace("\n", " ")
+                raise RuntimeError(f"comfy_400: {text}")
             r.raise_for_status()
             j = r.json()
             if not isinstance(j, dict):
@@ -254,6 +259,7 @@ async def _post_prompt(
                 continue
             break
         except Exception as e:
+            # Non-retriable or unexpected
             print(f"DEBUG comfy POST /prompt unexpected error: {repr(e)}")
             raise
     raise RuntimeError(f"comfy_post_prompt_failed: {last_exc}")
@@ -301,8 +307,7 @@ async def _poll_history_ready(
     deadline = time.time() + max_wait_sec
     last_payload: Optional[Dict[str, Any]] = None
     while time.time() < deadline:
-        url = f"{base_url}/history/{prompt_id}"
-        r = await client.get(url)
+        r = await client.get(f"{base_url}/history/{prompt_id}")
         if r.status_code == 404:
             await asyncio.sleep(poll_interval)
             continue
@@ -416,53 +421,35 @@ async def _download_via_view_query(
 ) -> bytes:
     """
     Download via query style: /api/view?filename=...&type=...&subfolder=...
-    Tries multiple (type, subfolder, filename) candidates.
-    IMPORTANT: Do NOT include 'subfolder' when it is empty, as some tunnels/proxies mishandle empty params.
+    Tries multiple (type,subfolder,filename) candidates; parameters are URL-encoded via urlencode.
     """
     filename = (filename or "").strip().lstrip("/")
     candidates = _build_view_candidates(folder_type, subfolder, filename)
     last_exc: Optional[Exception] = None
-
-    # Conservative headers to avoid proxy compression/chunking issues
-    headers = {
-        "Accept": "image/png",
-        "Cache-Control": "no-cache",
-        "Connection": "close",
-        "Accept-Encoding": "identity",
-    }
-
     for idx, (t, s, f) in enumerate(candidates, start=1):
         params = {
             "filename": f,
             "type": (t or "output"),
+            "subfolder": (s or ""),
         }
-        # Only include subfolder when it is non-empty
-        s_clean = (s or "").strip().strip("/")
-        if s_clean:
-            params["subfolder"] = s_clean
-
-        # Strict encoding for all params
-        qs = urlencode(params, quote_via=quote, safe="")
+        qs = urlencode(params, safe="/")
         url = f"{base_url}/api/view?{qs}"
-
-        # More generous backoff for tunnels (gives time for file to appear)
-        delays = [0.2, 0.4, 0.8, 1.2]
-        for attempt, delay in enumerate(delays, start=1):
+        delay = 0.2
+        for attempt in range(1, 3):
             try:
                 print(f"DEBUG comfy GET[query] try#{attempt} cand#{idx}: {url}")
-                r = await client.get(url, headers=headers)
+                r = await client.get(url)
                 print(f"DEBUG comfy GET[query] status={r.status_code} bytes={len(r.content) if r.content else 0}")
                 r.raise_for_status()
                 data = r.content
                 if not data or len(data) < 256:
-                    raise RuntimeError(f"image_download_too_small (url={url})")
+                    raise RuntimeError("image_download_too_small")
                 return data
             except Exception as e:
                 last_exc = e
-                print(f"DEBUG comfy GET[query] error: {repr(e)} (url={url})")
-                if attempt < len(delays):
+                if attempt < 2:
                     await asyncio.sleep(delay)
-                    continue
+                    delay *= 2.0
                 else:
                     break
     if last_exc:
@@ -513,9 +500,6 @@ async def _download_images(
             if not filename:
                 continue
 
-            # Helpful diagnostic log
-            print(f"[HISTORY] chosen file='{filename}' type='{folder_type}' subfolder='{subfolder if subfolder else '(empty)'}'")
-
             delay = 0.8
             data: Optional[bytes] = None
             for attempt in range(1, 3):
@@ -545,7 +529,6 @@ async def _download_images(
             suffix = Path(filename).suffix or ".png"
             target = out_dir / f"img_{uuid.uuid4().hex}{suffix}"
             target.write_bytes(data)
-            print(f"DEBUG comfy saved image: {target.name} bytes={len(data)}")
             saved.append(target)
 
     if not found_any:
@@ -579,10 +562,6 @@ async def generate_from_prompt_dict(
     """
     Submit a ComfyUI API prompt dict, poll history, and download images to out_dir.
     Selects view mode automatically (path for local, query for remote) or via env override.
-
-    Caller responsibilities:
-    - For local/LAN mode: pass host=127.0.0.1 or LAN IP, port typically 8188; leave APP_COMFY_SCHEME unset or 'http'; APP_COMFY_FORCE_VIEW_MODE auto/path.
-    - For remote mode (Cloudflared): pass host=<tunnel-host>, port=443; set APP_COMFY_SCHEME=https and APP_COMFY_FORCE_VIEW_MODE=query.
     """
     payload = override_prompt_inplace(
         body=prompt_dict,
@@ -598,7 +577,7 @@ async def generate_from_prompt_dict(
         seed=seed,
     )
 
-    # Build connection with scheme awareness (env can override)
+    # Build connection with scheme awareness
     conn = ComfyConnection(
         host=host,
         port=port,
@@ -607,7 +586,6 @@ async def generate_from_prompt_dict(
     base = conn.base
     view_mode = _select_view_mode(conn.host)
     print(f"[COMFY VIEW MODE] {view_mode} (host={conn.host})")
-    print(f"[COMFY ENDPOINTS] prompt={base}/prompt history={base}/history/{{prompt_id}} view={'/api/view?...' if view_mode=='query' else '/view/...'}")
 
     async with httpx.AsyncClient(limits=_limits(), timeout=_timeout(max_wait_sec + 30)) as client:
         prompt_id = await _post_prompt(client, base, payload)

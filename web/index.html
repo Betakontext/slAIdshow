@@ -15,6 +15,8 @@
       --ok: #3ddc84;
       --btn: #232734;
       --border: #262b36;
+      --panel2: #1b202a;
+      --warn: #ffd966;
     }
     * { box-sizing: border-box; }
     body {
@@ -47,10 +49,7 @@
       display: grid; gap: 16px;
       grid-template-columns: 1.3fr .7fr;
     }
-
-    @media (max-width: 1000px) {
-      .grid { grid-template-columns: 1fr; }
-    }
+    @media (max-width: 1000px) { .grid { grid-template-columns: 1fr; } }
     .card {
       background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
     }
@@ -90,48 +89,42 @@
       font-size: 12px; color: #c5cad6; background: #0d1016; border: 1px solid var(--border);
       padding: 8px; border-radius: 8px; max-height: 240px; overflow: auto; white-space: pre-wrap;
     }
-
     .inline-input-line{display:flex;gap:8px;align-items:center}
     .inline-input-line input{flex:1}
-
     .pill { font-size: 12px; color: #cfd6e6; background: #0e121a; border: 1px solid var(--border); padding: 4px 8px; border-radius: 999px; }
     .right { margin-left: auto; }
     select.lang {
       background: var(--btn); color: var(--text); border: 1px solid #2c3140; border-radius: 8px; padding: 6px 10px;
     }
-    .warn { color: #ffd966; }
+    .warn { color: var(--warn); }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 11px; }
-
     .subtle { color: var(--muted); font-size: 12px; }
-
-    /* Footer: bottom-left support/contact links */
     .footer-hud {
-      position: fixed;
-      left: 10px;
-      bottom: 10px;
-      z-index: 20;
-      font-size: 12px;
-      color: var(--muted);
-      background: rgba(0,0,0,0.35);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 6px 10px;
-      backdrop-filter: blur(6px);
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      pointer-events: auto;
+      position: fixed; left: 10px; bottom: 10px; z-index: 20; font-size: 12px; color: var(--muted);
+      background: rgba(0,0,0,0.35); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+      backdrop-filter: blur(6px); display: flex; gap: 10px; align-items: center; pointer-events: auto;
     }
-    .footer-hud a {
-      color: #9ecbff;
-      text-decoration: none;
+    .footer-hud a { color: #9ecbff; text-decoration: none; }
+    .footer-hud a:hover { text-decoration: underline; }
+
+    /* Remote config block */
+    .remote-block {
+      background: var(--panel2);
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      margin: 8px 0 2px 0;
     }
-    .footer-hud a:hover {
-      text-decoration: underline;
+    .remote-grid {
+      display: grid;
+      grid-template-columns: 2fr 0.7fr 1fr auto;
+      gap: 8px;
+      align-items: end;
     }
+    .hidden { display: none !important; }
 
     /* Optional: give the vision hint a slightly warmer color for visibility */
-    #vision-hint { color: #ffd966; }
+    #vision-hint { color: var(--warn); }
   </style>
 </head>
 <body>
@@ -179,11 +172,41 @@
           <div class="row" style="margin-bottom:8px;">
             <label for="backend-select" style="min-width:120px;" id="label-backend">Image-Backend</label>
             <select id="backend-select" title="Image-Backend wählen">
-              <option value="comfyui">ComfyUI (lokal)</option>
+              <option value="comfyui-local">ComfyUI (lokal)</option>
+              <option value="comfyui-remote">ComfyUI (remote)</option>
               <option value="pollinations">Pollinations (Cloud)</option>
             </select>
             <button id="btn-apply-backend">Anwenden</button>
             <span id="backend-warn" class="warn" style="display:none;"></span>
+          </div>
+
+          <!-- Remote ComfyUI configuration (visible only when 'comfyui-remote') -->
+          <div id="remote-config" class="remote-block hidden">
+            <div class="row" style="margin-bottom:6px;">
+              <strong id="remote-title">Remote ComfyUI (Cloudflared)</strong>
+              <span id="remote-subtitle" class="subtle">· öffentlich erreichbarer Tunnel-Host</span>
+            </div>
+            <div class="remote-grid">
+              <div>
+                <label for="remote-host" class="subtle" id="label-remote-host">Remote Host</label>
+                <input id="remote-host" type="text" placeholder="abcdef.trycloudflare.com" />
+              </div>
+              <div>
+                <label for="remote-port" class="subtle" id="label-remote-port">Port</label>
+                <input id="remote-port" type="number" min="1" max="65535" value="443" />
+              </div>
+              <div>
+                <label for="remote-scheme" class="subtle" id="label-remote-scheme">Scheme</label>
+                <select id="remote-scheme">
+                  <option value="https" selected>https</option>
+                  <option value="http">http</option>
+                </select>
+              </div>
+              <div>
+                <button id="btn-remote-test" title="Test /history auf Remote">Test</button>
+              </div>
+            </div>
+            <div id="remote-test-status" class="subtle" style="margin-top:6px;"></div>
           </div>
 
           <!-- Workflow switcher (only visible when ComfyUI backend is active) -->
@@ -233,7 +256,6 @@
               <button id="btn-load-url" title="Load URL as reference"><span id="style-load-url-label">Laden</span></button>
             </div>
 
-            <!-- Only Vision toggle remains (default ON) + i18n hint when OFF -->
             <div class="row" style="margin-bottom:8px; align-items: center;">
               <label style="display:flex; align-items:center; gap:8px;">
                 <input id="toggle-vision" type="checkbox" checked />
@@ -286,8 +308,6 @@
       </aside>
     </div>
   </main>
-
-
 
   <script>
     // ---------- i18n dictionary ----------
@@ -366,15 +386,17 @@
         style_ui_load_url_title: "URL als Referenz laden",
         style_ui_toggle_vision: "Ollama Vision verwenden",
         style_ui_vision_hint_off: "Lokale Stilfeatures sind generisch; für bildspezifische Styles bitte Vision aktivieren",
-        // Existing (style engine) - logs/status
-        style_deactivate: "Alle Styles deaktiviert.",
-        style_applied: "Style-Text übernommen.",
-        style_file_ok: "Referenzbild hochgeladen.",
-        style_file_fail: "Upload fehlgeschlagen.",
-        style_url_ok: "Referenzbild geladen.",
-        style_url_fail: "URL-Laden fehlgeschlagen.",
-        style_build_ok: "Style-Bausteine aktualisiert.",
-        style_build_fail: "Style-Build fehlgeschlagen。",
+        // Remote UI
+        remote_title: "Remote ComfyUI (Cloudflared)",
+        remote_subtitle: "· öffentlich erreichbarer Tunnel-Host",
+        remote_label_host: "Remote Host",
+        remote_label_port: "Port",
+        remote_label_scheme: "Scheme",
+        remote_btn_test: "Test",
+        remote_probe_ok: "Remote erreichbar.",
+        remote_probe_fail: "Probe fehlgeschlagen.",
+        remote_missing_host: "Bitte Remote Host eingeben.",
+        remote_probing: "Teste /history …",
       },
       en: {
         brand: "slAIdshow | Local Speech-to-Image Pipeline",
@@ -450,15 +472,17 @@
         style_ui_load_url_title: "Load URL as reference",
         style_ui_toggle_vision: "Use Ollama vision",
         style_ui_vision_hint_off: "Local style features are generic; enable Vision for image-specific styles",
-        // Existing (style engine) - logs/status
-        style_deactivate: "All styles deactivated.",
-        style_applied: "Style text applied.",
-        style_file_ok: "Reference image uploaded.",
-        style_file_fail: "Upload failed.",
-        style_url_ok: "Reference image loaded.",
-        style_url_fail: "URL load failed.",
-        style_build_ok: "Style components updated.",
-        style_build_fail: "Style build failed。",
+        // Remote UI
+        remote_title: "Remote ComfyUI (Cloudflared)",
+        remote_subtitle: "· publicly accessible tunnel host",
+        remote_label_host: "Remote Host",
+        remote_label_port: "Port",
+        remote_label_scheme: "Scheme",
+        remote_btn_test: "Test",
+        remote_probe_ok: "Remote reachable.",
+        remote_probe_fail: "Probe failed.",
+        remote_missing_host: "Please enter a remote host.",
+        remote_probing: "Probing /history ...",
       }
     };
 
@@ -467,7 +491,6 @@
     let LANG = localStorage.getItem('ui_lang') || 'de';
     langSelect.value = LANG;
     document.documentElement.lang = LANG; // keep <html lang> in sync
-
     function t(key) { return I18N[LANG][key] || key; }
 
     function applyI18N() {
@@ -499,46 +522,44 @@
       document.getElementById('plan-input').placeholder = t('ph_plan');
       document.getElementById('neg-input').placeholder = t('ph_neg');
 
-      // Style Engine UI: apply translations
+      // Style Engine UI
       const styleTitle = document.getElementById('style-title');
       if (styleTitle) styleTitle.textContent = t('style_ui_title');
       const styleDeactivate = document.getElementById('style-deactivate-label');
       if (styleDeactivate) styleDeactivate.textContent = t('style_ui_deactivate');
       const btnStyleDeactivate = document.getElementById('btn-style-deactivate');
       if (btnStyleDeactivate) btnStyleDeactivate.title = t('style_ui_deactivate_title');
-
       const styleText = document.getElementById('style-text');
       if (styleText) styleText.placeholder = t('style_ui_text_ph');
       const styleApplyLabel = document.getElementById('style-apply-label');
       if (styleApplyLabel) styleApplyLabel.textContent = t('style_ui_apply');
       const btnApplyStyleText = document.getElementById('btn-apply-style-text');
       if (btnApplyStyleText) btnApplyStyleText.title = t('style_ui_apply_title');
-
       const styleRefLabel = document.getElementById('style-ref-label');
       if (styleRefLabel) styleRefLabel.textContent = t('style_ui_ref_label');
       const refUrl = document.getElementById('ref-url');
       if (refUrl) refUrl.placeholder = t('style_ui_ref_url_ph');
       const styleLoadUrlLabel = document.getElementById('style-load-url-label');
       if (styleLoadUrlLabel) styleLoadUrlLabel.textContent = t('style_ui_load_url');
-      const btnLoadUrl = document.getElementById('btn-load-url');
-      if (btnLoadUrl) btnLoadUrl.title = t('style_ui_load_url_title');
 
       const styleToggleVision = document.getElementById('style-toggle-vision');
       if (styleToggleVision) styleToggleVision.textContent = t('style_ui_toggle_vision');
-
       const visionHint = document.getElementById('vision-hint');
       if (visionHint) visionHint.textContent = t('style_ui_vision_hint_off');
 
-      const btnShutdown = document.getElementById('btn-shutdown');
-      if (btnShutdown.dataset.mode === 'reconnect') {
-        btnShutdown.textContent = t('reconnect');
-        btnShutdown.title = t('reconnect');
-        btnShutdown.classList.remove('btn-danger');
-      } else {
-        btnShutdown.textContent = t('shutdown');
-        btnShutdown.title = t('shutdown');
-        btnShutdown.classList.add('btn-danger');
-      }
+      // Remote ComfyUI block
+      const remoteTitle = document.getElementById('remote-title');
+      if (remoteTitle) remoteTitle.textContent = t('remote_title');
+      const remoteSubtitle = document.getElementById('remote-subtitle');
+      if (remoteSubtitle) remoteSubtitle.textContent = t('remote_subtitle');
+      const labelRemoteHost = document.getElementById('label-remote-host');
+      if (labelRemoteHost) labelRemoteHost.textContent = t('remote_label_host');
+      const labelRemotePort = document.getElementById('label-remote-port');
+      if (labelRemotePort) labelRemotePort.textContent = t('remote_label_port');
+      const labelRemoteScheme = document.getElementById('label-remote-scheme');
+      if (labelRemoteScheme) labelRemoteScheme.textContent = t('remote_label_scheme');
+      const btnRemoteTest = document.getElementById('btn-remote-test');
+      if (btnRemoteTest) btnRemoteTest.textContent = t('remote_btn_test');
 
       const statusEl = document.getElementById('status');
       if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
@@ -547,9 +568,9 @@
     langSelect.addEventListener('change', () => {
       LANG = langSelect.value;
       localStorage.setItem('ui_lang', LANG);
-      document.documentElement.lang = LANG; // sync <html lang> on change
+      document.documentElement.lang = LANG;
       applyI18N();
-      syncVisionHint(); // update hint text/visibility on language change
+      syncVisionHint();
     });
 
     // ---------- Utility ----------
@@ -566,6 +587,13 @@
     const backendSelect = $('#backend-select');
     const backendWarn = $('#backend-warn');
     const btnApplyBackend = $('#btn-apply-backend');
+
+    const remoteBlock = $('#remote-config');
+    const remoteHost = $('#remote-host');
+    const remotePort = $('#remote-port');
+    const remoteScheme = $('#remote-scheme');
+    const btnRemoteTest = $('#btn-remote-test');
+    const remoteTestStatus = $('#remote-test-status');
 
     const workflowBlock = document.getElementById('workflow-block');
     const workflowSelect = $('#workflow-select');
@@ -588,7 +616,6 @@
     const toggleVision = $('#toggle-vision');
     const visionHintEl = document.getElementById('vision-hint');
 
-    // Holds the most recent style_positive string returned by the server
     let LAST_STYLE_POSITIVE = null;
 
     function log(el, msg) {
@@ -624,15 +651,7 @@
     const fsLabel = $('#fs-label');
 
     function isInFullscreenFor(el) { return document.fullscreenElement === el; }
-    async function enterFullscreen(el) {
-      try {
-        if (!document.fullscreenElement) await el.requestFullscreen();
-        else if (document.fullscreenElement !== el) {
-          await document.exitFullscreen();
-          await el.requestFullscreen();
-        }
-      } catch (e) { console.warn('enterFullscreen failed', e); }
-    }
+    async function enterFullscreen(el) { try { if (!document.fullscreenElement) await el.requestFullscreen(); else if (document.fullscreenElement !== el) { await document.exitFullscreen(); await el.requestFullscreen(); } } catch (e) { console.warn('enterFullscreen failed', e); } }
     async function exitFullscreen() { try { if (document.fullscreenElement) await document.exitFullscreen(); } catch (e) { console.warn('exitFullscreen failed', e); } }
     async function toggleFullscreenFor(el) { isInFullscreenFor(el) ? await exitFullscreen() : await enterFullscreen(el); }
     function syncFullscreenUI() {
@@ -723,9 +742,7 @@
         scheduleReconnect();
       };
 
-      sse.addEventListener('status', (ev) => {
-        if (ev?.data) { statusEl.textContent = ev.data; log(statusLog, ev.data); }
-      });
+      sse.addEventListener('status', (ev) => { if (ev?.data) { statusEl.textContent = ev.data; log(statusLog, ev.data); } });
       sse.addEventListener('transcript', (ev) => { if (ev?.data) log(transcriptLog, ev.data); });
       sse.addEventListener('llm_prompt', (ev) => {
         if (ev?.data) {
@@ -877,38 +894,29 @@
     }
 
     // ---------- Style Engine: local state and helpers ----------
-    // Note: endpoints used here must already exist server-side.
     const STYLE_STATE = {
-      reference_source: 'none',      // 'none' | 'local_file' | 'url'
+      reference_source: 'none',
       reference_id: null,
       reference_url: '',
       style_text_prompt: '',
-      use_local_style_features: false, // fixed OFF in UI/payload
-      use_ollama_vision: true,        // default ON
+      use_local_style_features: false,
+      use_ollama_vision: true,
       deactivate_all_styles: false,
     };
 
     function loadStyleState() {
       try {
         const raw = localStorage.getItem('style_state_v1');
-        if (raw) {
-          const s = JSON.parse(raw);
-          Object.assign(STYLE_STATE, s || {});
-        }
+        if (raw) Object.assign(STYLE_STATE, JSON.parse(raw) || {});
       } catch {}
       if (STYLE_STATE.style_text_prompt) styleTextInput.value = STYLE_STATE.style_text_prompt;
       if (STYLE_STATE.reference_source === 'url' && STYLE_STATE.reference_url) {
         refUrlInput.value = STYLE_STATE.reference_url;
       }
-      // Reflect Vision toggle
       toggleVision.checked = STYLE_STATE.use_ollama_vision === true;
       syncVisionHint();
     }
-
-    function saveStyleState() {
-      const s = Object.assign({}, STYLE_STATE);
-      localStorage.setItem('style_state_v1', JSON.stringify(s));
-    }
+    function saveStyleState() { localStorage.setItem('style_state_v1', JSON.stringify(STYLE_STATE)); }
 
     async function styleBuild(contentPositiveForNow = null) {
       const payload = {
@@ -917,11 +925,10 @@
         reference_source: STYLE_STATE.reference_source || 'none',
         reference_id: STYLE_STATE.reference_id || null,
         reference_url: STYLE_STATE.reference_url || null,
-        use_local_style_features: false, // enforce OFF
+        use_local_style_features: false,
         use_ollama_vision: !!STYLE_STATE.use_ollama_vision,
         deactivate_all_styles: !!STYLE_STATE.deactivate_all_styles,
       };
-
       try {
         const r = await fetch('/api/style/build', {
           method: 'POST',
@@ -930,19 +937,11 @@
         });
         const j = await r.json().catch(() => ({}));
         if (!r.ok || !j) throw new Error(`${r.status}`);
-        // Update client-side current style string to be passed forward
         LAST_STYLE_POSITIVE = (j.style_positive || '').trim() || null;
-
-        if (j.warnings && Array.isArray(j.warnings) && j.warnings.length) {
-          for (const w of j.warnings) log(styleLog, `warn: ${w}`);
-        }
-        log(styleLog, `${t('style_build_ok')} style_positive="${(j.style_positive||'').slice(0,200)}"`);
-        if (j.descriptors_used && j.descriptors_used.length) {
-          log(styleLog, `descriptors: ${j.descriptors_used.join(', ')}`);
-        }
-        if (j.vision_text_used) {
-          log(styleLog, `vision: ${j.vision_text_used}`);
-        }
+        if (j.warnings && Array.isArray(j.warnings)) for (const w of j.warnings) log(styleLog, `warn: ${w}`);
+        log(styleLog, `Style OK; style_positive="${(j.style_positive||'').slice(0,200)}"`);
+        if (j.descriptors_used?.length) log(styleLog, `descriptors: ${j.descriptors_used.join(', ')}`);
+        if (j.vision_text_used) log(styleLog, `vision: ${j.vision_text_used}`);
         if (j.reference_id) {
           STYLE_STATE.reference_id = j.reference_id;
           STYLE_STATE.reference_source = 'local_file';
@@ -950,8 +949,7 @@
         }
         return j;
       } catch (e) {
-        log(styleLog, `${t('style_build_fail')}: ${e}`);
-        // Keep LAST_STYLE_POSITIVE unchanged on failure
+        log(styleLog, `Style build failed: ${e}`);
         return null;
       }
     }
@@ -966,12 +964,12 @@
           STYLE_STATE.reference_id = j.reference_id;
           STYLE_STATE.reference_source = 'local_file';
           saveStyleState();
-          log(styleLog, `${t('style_file_ok')} (${j.reference_id})`);
+          log(styleLog, `Referenz hochgeladen (${j.reference_id})`);
           return j;
         }
         throw new Error(j?.detail || j?.error || `HTTP ${r.status}`);
       } catch (e) {
-        log(styleLog, `${t('style_file_fail')}: ${e}`);
+        log(styleLog, `Upload fehlgeschlagen: ${e}`);
         return null;
       }
     }
@@ -989,45 +987,33 @@
           STYLE_STATE.reference_source = 'local_file';
           STYLE_STATE.reference_url = url;
           saveStyleState();
-          log(styleLog, `${t('style_url_ok')} (${j.reference_id})`);
+          log(styleLog, `Referenz von URL geladen (${j.reference_id})`);
           return j;
         }
         throw new Error(j?.detail || j?.error || `HTTP ${r.status}`);
       } catch (e) {
-        log(styleLog, `${t('style_url_fail')}: ${e}`);
+        log(styleLog, `URL laden fehlgeschlagen: ${e}`);
         return null;
       }
     }
 
     async function resetAllStylesServer() {
-      try {
-        const r = await fetch('/api/style/reset', { method: 'POST' });
-        const ok = r.ok;
-        if (!ok) throw new Error(`HTTP ${r.status}`);
-      } catch (e) {
-        log(styleLog, `reset(server) failed: ${e}`);
-      }
+      try { await fetch('/api/style/reset', { method: 'POST' }); }
+      catch (e) { log(styleLog, `reset(server) failed: ${e}`); }
     }
 
-    // Hook style text apply
     btnApplyStyleText.addEventListener('click', async () => {
       STYLE_STATE.style_text_prompt = styleTextInput.value.trim();
       saveStyleState();
-      log(styleLog, t('style_applied'));
+      log(styleLog, 'Style-Text übernommen.');
       await styleBuild($('#plan-input').value.trim() || '');
     });
-
-    // Hook file upload
     refFileInput.addEventListener('change', async (ev) => {
       const f = ev.target.files && ev.target.files[0];
       if (!f) return;
       const up = await uploadReferenceFile(f);
-      if (up) {
-        await styleBuild($('#plan-input').value.trim() || '');
-      }
+      if (up) await styleBuild($('#plan-input').value.trim() || '');
     });
-
-    // Hook URL load
     btnLoadUrl.addEventListener('click', async () => {
       const url = (refUrlInput.value || '').trim();
       if (!url) return;
@@ -1035,41 +1021,31 @@
       STYLE_STATE.reference_url = url;
       saveStyleState();
       const saved = await saveReferenceFromUrl(url);
-      if (saved) {
-        await styleBuild($('#plan-input').value.trim() || '');
-      }
+      if (saved) await styleBuild($('#plan-input').value.trim() || '');
     });
 
-    // Vision toggle + hint
     function syncVisionHint() {
       if (!visionHintEl) return;
-      if (toggleVision.checked) {
-        visionHintEl.style.display = 'none';
-      } else {
-        visionHintEl.textContent = t('style_ui_vision_hint_off');
-        visionHintEl.style.display = '';
-      }
+      if (toggleVision.checked) visionHintEl.style.display = 'none';
+      else { visionHintEl.textContent = t('style_ui_vision_hint_off'); visionHintEl.style.display = ''; }
     }
-
     toggleVision.addEventListener('change', async () => {
       STYLE_STATE.use_ollama_vision = !!toggleVision.checked;
       saveStyleState();
       syncVisionHint();
       await styleBuild($('#plan-input').value.trim() || '');
     });
-
-    // Deactivate all styles
     btnStyleDeactivate.addEventListener('click', async () => {
       STYLE_STATE.deactivate_all_styles = false;
       STYLE_STATE.style_text_prompt = '';
       STYLE_STATE.reference_source = 'none';
       STYLE_STATE.reference_id = null;
       STYLE_STATE.reference_url = '';
-      STYLE_STATE.use_local_style_features = false;  // keep false
-      STYLE_STATE.use_ollama_vision = false;        // user intent: turn off
+      STYLE_STATE.use_local_style_features = false;
+      STYLE_STATE.use_ollama_vision = false;
       saveStyleState();
 
-      log(styleLog, t('style_deactivate'));
+      log(styleLog, 'Alle Styles deaktiviert.');
 
       styleTextInput.value = '';
       refUrlInput.value = '';
@@ -1079,8 +1055,6 @@
 
       await resetAllStylesServer();
       await styleBuild($('#plan-input').value.trim() || '');
-
-      log(styleLog, t('style_deactivate'));
     });
 
     // ---------- Plan ----------
@@ -1090,21 +1064,12 @@
       const btn = $('#btn-plan');
       btn.disabled = true;
       try {
-        // Build or refresh current style first
         const sb = await styleBuild(text);
         if (sb && typeof sb.style_positive === 'string') {
           LAST_STYLE_POSITIVE = sb.style_positive.trim() || null;
         }
-
         const size = currentSizePayload();
-        const body = {
-          text,
-          tags: [],
-          width: size.width,
-          height: size.height,
-          // Pass the freshest style string to the server for deterministic behavior
-          style_positive: LAST_STYLE_POSITIVE
-        };
+        const body = { text, tags: [], width: size.width, height: size.height, style_positive: LAST_STYLE_POSITIVE };
         const r = await fetch('/api/plan', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1122,17 +1087,14 @@
       const prompt = document.getElementById('plan-input').value.trim();
       const negative = document.getElementById('neg-input').value.trim();
       if (!prompt) return;
-
       const btn = document.getElementById('btn-direct');
       btn.disabled = true;
       const size = currentSizePayload();
       try {
-        // Build or refresh current style first
         const sb = await styleBuild(prompt);
         if (sb && typeof sb.style_positive === 'string') {
           LAST_STYLE_POSITIVE = sb.style_positive.trim() || null;
         }
-
         const r = await fetch('/api/image/direct', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1141,7 +1103,6 @@
             negative_prompt: negative || null,
             width: size.width,
             height: size.height,
-            // Include style_positive explicitly for robustness against races
             style_positive: LAST_STYLE_POSITIVE
           })
         });
@@ -1186,51 +1147,126 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ allow: true })
         });
-      return r.ok;
+        return r.ok;
       } catch { return false; }
     }
 
-    // ---------- Backend switch ----------
+    // ---------- Backend switch incl. remote mode ----------
+    backendSelect.addEventListener('change', () => {
+      const val = backendSelect.value;
+      remoteBlock.classList.toggle('hidden', val !== 'comfyui-remote');
+    });
+
     btnApplyBackend.addEventListener('click', async () => {
-      const backend = backendSelect.value;
+      const sel = backendSelect.value;
       backendWarn.style.display = 'none';
       btnApplyBackend.disabled = true;
       try {
-        if (backend === 'pollinations') {
+        if (sel === 'pollinations') {
           const ok = await ensureCloudAllowed();
           if (!ok) log(statusLog, 'Could not enable cloud.');
-        }
-        const r = await fetch('/api/settings/image_backend', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ backend })
-        });
-        const j = await r.json().catch(() => ({}));
-        if (r.ok && j.ok) {
-          log(statusLog, t('backend_switched_ok'));
-          await refreshConfig();
-          if (workflowBlock.style.display !== 'none') {
-            await refreshWorkflowList();
+          const r1 = await fetch('/api/settings/image_backend', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ backend: 'pollinations' })
+          });
+          const j1 = await r1.json().catch(()=> ({}));
+          if (!r1.ok || !j1?.ok) {
+            const err = j1?.error || `${r1.status}`;
+            log(statusLog, `${t('backend_switch_failed')}: ${err}`);
+            if (j1?.reason === 'cloud_blocked') { backendWarn.textContent = t('backend_warn_cloud_blocked'); backendWarn.style.display=''; }
+            else if (j1?.reason === 'missing_secret') { backendWarn.textContent = t('backend_warn_missing_secret'); backendWarn.style.display=''; }
           } else {
-            workflowSelect.innerHTML = '';
-            workflowPreview.textContent = '';
-            wfWarn.style.display = 'none';
+            log(statusLog, t('backend_switched_ok'));
           }
-        } else {
-          const err = j?.error || `${r.status}`;
-          log(statusLog, `${t('backend_switch_failed')}: ${err}`);
-          if (j?.reason === 'cloud_blocked') {
-            backendWarn.textContent = t('backend_warn_cloud_blocked');
+        } else if (sel === 'comfyui-local') {
+          // set backend then mode=local
+          await fetch('/api/settings/image_backend', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ backend: 'comfyui' })
+          });
+          await fetch("/api/settings/image_allow_cloud", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ allow: true })
+          });
+          await fetch('/api/settings/comfy_mode', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'local' })
+          });
+          log(statusLog, t('backend_switched_ok'));
+        } else if (sel === 'comfyui-remote') {
+          const host = (remoteHost.value || '').trim();
+          const port = parseInt(remotePort.value || '443', 10);
+          const scheme = (remoteScheme.value || 'https').toLowerCase();
+          if (!host) {
+            backendWarn.textContent = t('remote_missing_host');
             backendWarn.style.display = '';
-          } else if (j?.reason === 'missing_secret') {
-            backendWarn.textContent = t('backend_warn_missing_secret');
-            backendWarn.style.display = '';
+            return;
           }
+
+          // NEW: allow remote/cloud
+          await fetch("/api/settings/image_allow_cloud", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ allow: true })
+          });
+
+          // Order: backend -> comfy_remote -> comfy_mode(remote)
+          await fetch('/api/settings/image_backend', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ backend: 'comfyui' })
+          });
+          const rRemote = await fetch('/api/settings/comfy_remote', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host, port, scheme })
+          });
+          if (!rRemote.ok) {
+            const txt = await rRemote.text().catch(()=> '');
+            log(statusLog, `setting comfy_remote failed: HTTP ${rRemote.status} ${txt}`);
+          }
+          const rMode = await fetch('/api/settings/comfy_mode', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'remote' })
+          });
+          if (!rMode.ok) {
+            const txt = await rMode.text().catch(()=> '');
+            log(statusLog, `${t('backend_switch_failed')}: HTTP ${rMode.status} ${txt}`);
+          } else {
+            log(statusLog, t('backend_switched_ok'));
+          }
+        }
+        await refreshConfig();
+        if (workflowBlock.style.display !== 'none') await refreshWorkflowList();
+        else {
+          workflowSelect.innerHTML = '';
+          workflowPreview.textContent = '';
+          wfWarn.style.display = 'none';
         }
       } catch (e) {
         log(statusLog, `${t('backend_switch_failed')}: ${e}`);
       } finally {
         btnApplyBackend.disabled = false;
+      }
+    });
+
+    // ---------- Remote probe ----------
+    btnRemoteTest.addEventListener('click', async () => {
+      const host = (remoteHost.value || '').trim();
+      const port = parseInt(remotePort.value || '443', 10);
+      const scheme = (remoteScheme.value || 'https').toLowerCase();
+      if (!host) { remoteTestStatus.textContent = t('remote_missing_host'); return; }
+      remoteTestStatus.textContent = t('remote_probing');
+      try {
+        const url = `/api/settings/comfy_remote_probe?host=${encodeURIComponent(host)}&port=${encodeURIComponent(port)}&scheme=${encodeURIComponent(scheme)}`;
+        const r = await fetch(url);
+        const j = await r.json().catch(()=> ({}));
+        if (r.ok && (j.ok === true || j.status === 'ok')) {
+          remoteTestStatus.textContent = t('remote_probe_ok');
+        } else {
+          remoteTestStatus.textContent = t('remote_probe_fail');
+        }
+      } catch (e) {
+        remoteTestStatus.textContent = `${t('remote_probe_fail')}: ${e}`;
       }
     });
 
@@ -1287,11 +1323,9 @@
         wfWarn.style.display = 'none';
         return;
       }
-
       wfWarn.style.display = 'none';
       let items = await listWorkflowsFromServer();
       if (!items) items = await listWorkflowsByIndexJson();
-
       if (!items || items.length === 0) {
         wfWarn.textContent = t('wf_list_fail');
         wfWarn.style.display = '';
@@ -1299,7 +1333,6 @@
         workflowPreview.textContent = '';
         return;
       }
-
       workflowSelect.innerHTML = '';
       const stored = localStorage.getItem('active_workflow') || '';
       let foundStored = false;
@@ -1313,9 +1346,7 @@
         if (stored && stored === fn) { opt.selected = true; foundStored = true; }
         workflowSelect.appendChild(opt);
       }
-      if (!foundStored && workflowSelect.options.length > 0) {
-        workflowSelect.selectedIndex = 0;
-      }
+      if (!foundStored && workflowSelect.options.length > 0) workflowSelect.selectedIndex = 0;
       const cur = workflowSelect.value;
       if (cur) await loadWorkflowPreview(cur);
     }
@@ -1393,8 +1424,20 @@
         $('#poll-pill').textContent = `Images: ${j?.image?.backend || '?'}`;
         $('#sr-pill').textContent = `SR: ${j?.audio?.sample_rate || '?'}`;
 
+        // Reflect backend and comfy mode
         const current = (j?.image?.backend || 'comfyui').toLowerCase();
-        backendSelect.value = current === 'pollinations' ? 'pollinations' : 'comfyui';
+        const mode = (j?.image?.comfy?.mode || 'local').toLowerCase();
+        if (current === 'pollinations') backendSelect.value = 'pollinations';
+        else backendSelect.value = (mode === 'remote') ? 'comfyui-remote' : 'comfyui-local';
+
+        // Remote values from config
+        const rhost = j?.image?.comfy?.remote?.host || '';
+        const rport = j?.image?.comfy?.remote?.port ?? 443;
+        const rscheme = (j?.image?.comfy?.remote?.scheme || 'https').toLowerCase();
+        remoteHost.value = rhost || '';
+        remotePort.value = rport || 443;
+        remoteScheme.value = rscheme || 'https';
+        remoteBlock.classList.toggle('hidden', backendSelect.value !== 'comfyui-remote');
 
         const w = Number(j?.image?.current_width ?? j?.image?.width_default ?? 512);
         const h = Number(j?.image?.current_height ?? j?.image?.height_default ?? 512);
@@ -1405,7 +1448,7 @@
         const neg = (j?.image?.negative_prompt || '').trim();
         if (neg) document.getElementById('neg-input').value = neg;
 
-        const showWF = !!(j?.image?.show_workflow_selector);
+        const showWF = (current === 'comfyui') && !!(j?.image?.show_workflow_selector);
         workflowBlock.style.display = showWF ? '' : 'none';
 
         if (showWF) {
@@ -1429,7 +1472,6 @@
             toggleVision.checked = true;
             STYLE_STATE.use_ollama_vision = true;
           }
-          // Force local features OFF in UI/State
           STYLE_STATE.use_local_style_features = false;
           syncVisionHint();
           saveStyleState();
@@ -1456,11 +1498,9 @@
     })();
   </script>
 
-  <!-- Bottom-left support/contact links -->
   <div class="footer-hud" aria-label="Support & Kontakt">
     <span>SUPPORT: <a href="https://buymeacoffee.com/betakontext" target="_blank" rel="noopener">buymeacoffee.com/betakontext</a></span>
     <span>CONTACT: Christoph Medicus | <a href="mailto:dev@betakontext.de">dev@betakontext.de</a> | <a href="https://dev.betakontext.de" target="_blank" rel="noopener">dev.betakontext.de</a></span>
   </div>
-
 </body>
 </html>
