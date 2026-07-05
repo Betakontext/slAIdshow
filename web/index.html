@@ -95,7 +95,7 @@
       background: var(--btn); color: var(--text); border: 1px solid #2c3140; border-radius: 8px; padding: 6px 10px;
     }
     .warn { color: var(--warn); }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 11px; }
+    .mono { font-family: ui-monospace; font-size: 11px; }
     .subtle { color: var(--muted); font-size: 12px; }
     .footer-hud {
       position: fixed; left: 10px; bottom: 10px; z-index: 20; font-size: 12px; color: var(--muted);
@@ -182,9 +182,10 @@
               <span id="remote-subtitle" class="subtle">· öffentlich erreichbarer Tunnel-Host</span>
             </div>
 
-            <!-- Bridge actions: read tunnel URL from /static/bridge -->
+            <!-- Bridge actions: read tunnel URL locally or via server PULL_URL -->
             <div class="bridge-row">
               <button id="btn-bridge-sync" title="Sync tunnel files into outputs/images/bridge/">Read tunnel URL</button>
+              <button id="btn-bridge-pull" title="Fetch from server PULL_URL and auto-apply">Load from PULL_URL</button>
               <span id="bridge-status" class="bridge-status"></span>
             </div>
 
@@ -404,6 +405,10 @@
         bridge_not_found: "Keine Tunnel-URL gefunden.",
         bridge_applied: "Übernommen",
         bridge_apply_failed: "Übernahme fehlgeschlagen",
+        pull_btn: "Aus PULL_URL laden",
+        pull_fetching: "Hole PULL_URL …",
+        pull_ok: "Remote angewendet",
+        pull_fail: "PULL_URL fehlgeschlagen",
       },
       en: {
         brand: "slAIdshow | Local Speech-to-Image Pipeline",
@@ -494,6 +499,10 @@
         bridge_not_found: "No tunnel URL found.",
         bridge_applied: "Applied",
         bridge_apply_failed: "Apply failed",
+        pull_btn: "Load from PULL_URL",
+        pull_fetching: "Fetching PULL_URL …",
+        pull_ok: "Remote applied",
+        pull_fail: "PULL_URL failed",
       }
     };
 
@@ -573,6 +582,9 @@
       const btnBridge = document.getElementById('btn-bridge-sync');
       if (btnBridge) btnBridge.textContent = t('bridge_read');
 
+      const btnPull = document.getElementById('btn-bridge-pull');
+      if (btnPull) btnPull.textContent = t('pull_btn');
+
       const statusEl = document.getElementById('status');
       if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
     }
@@ -612,6 +624,7 @@
     const remoteAutoStatus = document.getElementById('remote-auto-status');
 
     const btnBridgeSync = document.getElementById('btn-bridge-sync');
+    const btnBridgePull = document.getElementById('btn-bridge-pull');
     const bridgeStatus = document.getElementById('bridge-status');
 
     const workflowBlock = document.getElementById('workflow-block');
@@ -1174,6 +1187,61 @@
       remoteBlock.classList.toggle('hidden', val !== 'comfyui-remote');
     });
 
+    // New helper: apply from server PULL_URL (env-driven)
+    async function applyFromPullEnv() {
+      // UI feedback start
+      bridgeStatus.textContent = t('pull_fetching');
+      // Optional: make sure cloud is allowed before switching
+      try { await ensureCloudAllowed(); } catch {}
+      try {
+        // Optional: discover pull_url (for diagnostics); not required to send
+        const rGet = await fetch('/api/settings/pull_url', { cache: 'no-store' });
+        const jGet = await rGet.json().catch(()=> ({}));
+        if (!rGet.ok || !jGet?.pull_url) {
+          bridgeStatus.textContent = `${t('pull_fail')}: missing PULL_URL on server`;
+          return null;
+        }
+      } catch {
+        // proceed; backend endpoint may still use its own env
+      }
+
+      // Ask backend to fetch the JSON, parse, and apply settings server-side
+      try {
+        const r = await fetch('/api/bridge/apply_from_pull', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}) // backend defaults to env PULL_URL
+        });
+        const j = await r.json().catch(()=> ({}));
+        if (!r.ok || !j?.applied) {
+          const reason = j?.error || j?.detail || `HTTP ${r.status}`;
+          bridgeStatus.textContent = `${t('pull_fail')}: ${reason}`;
+          return null;
+        }
+
+        // Prefill UI fields with returned values
+        if (j.host) remoteHost.value = j.host;
+        if (j.port) remotePort.value = String(j.port);
+        if (j.scheme) remoteScheme.value = j.scheme;
+
+        // Ensure the UI reflects remote mode
+        backendSelect.value = 'comfyui-remote';
+        remoteBlock.classList.toggle('hidden', false);
+
+        // Refresh visible config
+        await refreshConfig().catch(()=>{});
+
+        // Status success
+        bridgeStatus.textContent = `${t('pull_ok')}: ${j.url || j.host}`;
+        remoteAutoStatus.textContent = `${t('bridge_applied')}: ${j.host || ''}`;
+
+        return j;
+      } catch (e) {
+        bridgeStatus.textContent = `${t('pull_fail')}: ${e}`;
+        return null;
+      }
+    }
+
     btnApplyBackend.addEventListener('click', async () => {
       const sel = backendSelect.value;
       backendWarn.style.display = 'none';
@@ -1211,14 +1279,27 @@
           });
           log(statusLog, t('backend_switched_ok'));
         } else if (sel === 'comfyui-remote') {
-          const host = (remoteHost.value || '').trim();
-          const port = parseInt(remotePort.value || '443', 10);
-          const scheme = (remoteScheme.value || 'https').toLowerCase();
-          if (!host) {
-            backendWarn.textContent = t('remote_missing_host');
-            backendWarn.style.display = '';
+          // If no host is filled, auto-apply from PULL_URL first
+          const hostExisting = (remoteHost.value || '').trim();
+          if (!hostExisting) {
+            const applied = await applyFromPullEnv();
+            if (!applied) {
+              backendWarn.textContent = t('remote_missing_host');
+              backendWarn.style.display = '';
+              btnApplyBackend.disabled = false;
+              return;
+            }
+            // after server applied, do not resend duplicate settings; just refresh config
+            log(statusLog, t('backend_switched_ok'));
+            await refreshConfig().catch(()=>{});
+            btnApplyBackend.disabled = false;
             return;
           }
+
+          const host = hostExisting;
+          const port = parseInt(remotePort.value || '443', 10);
+          const scheme = (remoteScheme.value || 'https').toLowerCase();
+
           await fetch("/api/settings/image_allow_cloud", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ allow: true })
@@ -1603,6 +1684,11 @@
       });
       return r1.ok && r2.ok && r3.ok;
     }
+
+    // Wire the new PULL_URL button
+    btnBridgePull.addEventListener('click', async () => {
+      await applyFromPullEnv();
+    });
 
     // ---------- Init ----------
     (async function init() {

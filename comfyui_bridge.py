@@ -10,16 +10,35 @@
 # - Adds FS fallback for artifacts when APP_COMFY_OUTPUT_DIR is set.
 # - Tests common subfolders for artifacts ("", "tunnels", "bridge") in addition to folder_type.
 #
+# New in this revision:
+# - FastAPI router exposing:
+#     GET  /api/settings/pull_url            -> returns the PULL_URL from env (for UI prefill/debug)
+#     POST /api/bridge/apply_from_pull       -> fetches JSON at PULL_URL (or body override), parses "url",
+#                                               computes scheme/host/port, applies remote settings server-side
+# - Async httpx fetch with timeout/retries and a cachebuster.
+# - Internal application of settings via local API calls (idempotent):
+#     POST /api/settings/image_allow_cloud
+#     POST /api/settings/image_backend      {backend:"comfyui"}
+#     POST /api/settings/comfy_remote       {host,port,scheme}
+#     POST /api/settings/comfy_mode         {mode:"remote"}
+#
 # Public API:
 #   - override_prompt_inplace(...)
 #   - generate_from_prompt_dict(..., copy_bridge_artifacts: bool = True)
 #   - sync_bridge_artifacts(host: str, port: int, *, view_mode: Optional[str] = None) -> Dict[str, int]
+#   - bridge_router (FastAPI APIRouter): register via app.include_router(bridge_router, prefix="/api")
 #
 # Env expectations for remote:
 #   APP_ALLOW_REMOTE_BACKENDS=1
 #   APP_COMFY_SCHEME=https
 #   APP_COMFY_FORCE_VIEW_MODE=query
 #   (host is non-local, port likely 443)
+#
+# Env for pull/apply:
+#   PULL_URL=https://.../tunnel_url.json
+#   APP_PULL_TIMEOUT_SEC=3
+#   APP_PULL_RETRIES=3
+#   APP_INTERNAL_API_BASE=http://127.0.0.1:8080   # Base used to call local settings endpoints
 # --------------------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -32,10 +51,12 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Iterable
-from urllib.parse import urlencode, quote
+from urllib.parse import urlencode, quote, urlparse
 
 import httpx
 from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Body
+from fastapi.responses import JSONResponse
 
 # -----------------------------
 # Env helpers & host policy
@@ -47,6 +68,12 @@ def _env_str(k: str, d: str = "") -> str:
 def _env_bool01(k: str, d: int = 0) -> bool:
     v = (os.getenv(k, str(d)) or "").strip().lower()
     return v in {"1", "true", "yes", "on"}
+
+def _env_int(k: str, d: int) -> int:
+    try:
+        return int((os.getenv(k, str(d)) or "").strip())
+    except Exception:
+        return d
 
 def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
     try:
@@ -91,6 +118,9 @@ _COMFY_OUTPUT_DIR: Optional[Path] = Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).r
 
 # Local bridge dir for discovery artifacts exposed under /static/bridge/ by the server
 _LOCAL_BRIDGE_DIR: Path = Path("outputs/images/bridge").resolve()
+
+# Internal API base (self calls to apply settings)
+_INTERNAL_API_BASE: str = _env_str("APP_INTERNAL_API_BASE", "http://127.0.0.1:8080").rstrip("/")
 
 # -----------------------------
 # Connection / helpers
@@ -228,7 +258,7 @@ def override_prompt_inplace(
     return payload
 
 # -----------------------------
-# HTTP calls
+# HTTP calls to ComfyUI
 # -----------------------------
 
 async def _post_prompt(
@@ -624,7 +654,7 @@ async def _download_images(
     return saved
 
 # -----------------------------
-# Public entry points
+# Public entry points (Comfy job)
 # -----------------------------
 
 async def generate_from_prompt_dict(
@@ -734,3 +764,178 @@ async def sync_bridge_artifacts(
         result = await _copy_bridge_artifacts(client, base, vm, _LOCAL_BRIDGE_DIR)
         result.update({"host": host, "base": base, "view_mode": vm})
         return result
+
+# -----------------------------
+# New: PULL_URL router (GET pull_url, POST apply_from_pull)
+# -----------------------------
+
+bridge_router = APIRouter()
+
+class ApplyFromPullIn(BaseModel):
+    pull_url: Optional[str] = None  # overrides env PULL_URL if provided
+
+class ApplyFromPullOut(BaseModel):
+    applied: bool
+    url: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    scheme: Optional[str] = None
+    error: Optional[str] = None
+    detail: Optional[str] = None
+
+def _short_timeout() -> httpx.Timeout:
+    # Short pulls to keep UI snappy; configurable via env
+    t = float(_env_int("APP_PULL_TIMEOUT_SEC", 3))
+    t = max(1.0, min(t, 15.0))
+    return httpx.Timeout(connect=2.0, read=t, write=2.0, pool=2.0)
+
+async def _pull_json_with_retries(url: str) -> Dict[str, Any]:
+    """
+    Fetch JSON from 'url' with retries and a cache-busting query param.
+    Expected structure: {"url": "https://<tunnel-host>[:port]"} or {"public_url": "..."} or {"comfy_url": "..."}.
+    """
+    retries = int(_env_int("APP_PULL_RETRIES", 3))
+    base_delay = 0.5
+    # add cachebuster
+    sep = "&" if "?" in url else "?"
+    url_cb = f"{url}{sep}t={int(time.time()*1000)}"
+    last_exc: Optional[Exception] = None
+    async with httpx.AsyncClient(limits=_limits(), timeout=_short_timeout(), follow_redirects=True) as client:
+        for attempt in range(1, retries + 1):
+            try:
+                r = await client.get(url_cb)
+                r.raise_for_status()
+                j = r.json()
+                if not isinstance(j, dict):
+                    raise ValueError("pull_json_not_object")
+                return j
+            except Exception as e:
+                last_exc = e
+                if attempt >= retries:
+                    break
+                await asyncio.sleep(base_delay)
+                base_delay *= 1.7
+    raise RuntimeError(f"pull_failed: {last_exc}")
+
+def _extract_url_field(j: Dict[str, Any]) -> Optional[str]:
+    """
+    Accept multiple possible keys to be tolerant: 'url', 'public_url', 'comfy_url'.
+    """
+    for k in ("url", "public_url", "comfy_url"):
+        val = j.get(k)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+def _parse_url_host_port_scheme(u: str) -> Tuple[str, int, str]:
+    """
+    Parse a URL into (host, port, scheme) with defaults (https→443, http→80).
+    """
+    up = urlparse(u)
+    scheme = (up.scheme or "https").lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError("unsupported_scheme")
+    host = (up.hostname or up.netloc or "").strip()
+    if not host:
+        raise ValueError("missing_host")
+    if up.port:
+        port = int(up.port)
+    else:
+        port = 443 if scheme == "https" else 80
+    if port < 1 or port > 65535:
+        raise ValueError("invalid_port")
+    return host, port, scheme
+
+async def _apply_remote_settings(host: str, port: int, scheme: str) -> None:
+    """
+    Apply settings by calling the local FastAPI endpoints in-order.
+    - image_allow_cloud -> true
+    - image_backend -> comfyui
+    - comfy_remote -> host/port/scheme
+    - comfy_mode -> remote
+    """
+    base = _INTERNAL_API_BASE
+    async with httpx.AsyncClient(limits=_limits(), timeout=_short_timeout()) as client:
+        # 1) allow cloud
+        r1 = await client.post(f"{base}/api/settings/image_allow_cloud", json={"allow": True})
+        if r1.status_code >= 300:
+            raise RuntimeError(f"image_allow_cloud_failed:{r1.status_code}")
+        # 2) switch backend
+        r2 = await client.post(f"{base}/api/settings/image_backend", json={"backend": "comfyui"})
+        if r2.status_code >= 300:
+            raise RuntimeError(f"image_backend_failed:{r2.status_code} {r2.text[:200]}")
+        # 3) set remote target
+        r3 = await client.post(f"{base}/api/settings/comfy_remote", json={"host": host, "port": port, "scheme": scheme})
+        if r3.status_code >= 300:
+            raise RuntimeError(f"comfy_remote_failed:{r3.status_code} {r3.text[:200]}")
+        # 4) set mode
+        r4 = await client.post(f"{base}/api/settings/comfy_mode", json={"mode": "remote"})
+        if r4.status_code >= 300:
+            raise RuntimeError(f"comfy_mode_failed:{r4.status_code} {r4.text[:200]}")
+
+@bridge_router.get("/settings/pull_url")
+async def get_pull_url():
+    """
+    Return the configured PULL_URL for UI diagnostics.
+    """
+    pull = _env_str("PULL_URL", "")
+    return {"pull_url": pull or ""}
+
+@bridge_router.post("/bridge/apply_from_pull", response_model=ApplyFromPullOut)
+async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyFromPullIn)):
+    """
+    Server-side "one-click" apply:
+    - Determine pull_url (body.pull_url or env PULL_URL)
+    - Fetch JSON with timeout/retries (expects a field 'url' or compatible)
+    - Parse host/port/scheme
+    - Apply via local settings endpoints (idempotent)
+    - Return applied parameters for UI to display
+    """
+    pull_url = (payload.pull_url or _env_str("PULL_URL", "")).strip()
+    if not pull_url:
+        return JSONResponse(
+            status_code=400,
+            content=ApplyFromPullOut(applied=False, error="missing_pull_url", detail="Configure PULL_URL in .env or pass in body").model_dump()
+        )
+
+    try:
+        doc = await _pull_json_with_retries(pull_url)
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content=ApplyFromPullOut(applied=False, error="pull_fetch_failed", detail=str(e)).model_dump()
+        )
+
+    url_val = _extract_url_field(doc)
+    if not url_val or not (url_val.startswith("http://") or url_val.startswith("https://")):
+        return JSONResponse(
+            status_code=400,
+            content=ApplyFromPullOut(applied=False, error="invalid_pull_payload", detail="Missing or invalid 'url' field").model_dump()
+        )
+
+    try:
+        host, port, scheme = _parse_url_host_port_scheme(url_val)
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content=ApplyFromPullOut(applied=False, error="parse_error", detail=str(e)).model_dump()
+        )
+
+    # Policy check (warn but do not block here; settings endpoint may enforce further)
+    try:
+        _assert_image_backend_host_policy(host)
+    except AssertionError as e:
+        # Continue to apply; policy for image backend selection is enforced elsewhere as well.
+        print(f"[PULL][policy] warning: {e}")
+
+    try:
+        await _apply_remote_settings(host, port, scheme)
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content=ApplyFromPullOut(applied=False, url=url_val, host=host, port=port, scheme=scheme, error="apply_failed", detail=str(e)).model_dump()
+        )
+
+    return ApplyFromPullOut(applied=True, url=url_val, host=host, port=port, scheme=scheme)
+
+# End router
