@@ -1,13 +1,25 @@
 # comfyui_bridge.py
 # --------------------------------------------------------------------------------------
-# Production-grade ComfyUI bridge with robust remote (tunnel) handling.
-# Key changes in this version:
-# - Query-view downloader no longer sends an empty 'subfolder' parameter (critical fix)
-# - Conservative headers for binary downloads (helps with some tunnels/proxies)
-# - Slightly more generous retry/backoff on query downloads
-# - Minimal, precise logging additions for better diagnostics
+# Production-grade ComfyUI bridge with robust remote (tunnel) handling + bridge artifacts.
 #
-# All other logic and public signatures are intentionally kept as-is per request.
+# This version adds:
+# - Deterministic remote artifact sync helper: sync_bridge_artifacts(host, port, ...)
+#   so the UI can fetch tunnel_url.json/txt immediately after switching to remote.
+# - Keeps existing behavior: pre/post artifact copy around image generation in remote/query mode.
+# - Uses the SAME download mechanism as images (ComfyUI /api/view or /view), with retries.
+# - Adds FS fallback for artifacts when APP_COMFY_OUTPUT_DIR is set.
+# - Tests common subfolders for artifacts ("", "tunnels", "bridge") in addition to folder_type.
+#
+# Public API:
+#   - override_prompt_inplace(...)
+#   - generate_from_prompt_dict(..., copy_bridge_artifacts: bool = True)
+#   - sync_bridge_artifacts(host: str, port: int, *, view_mode: Optional[str] = None) -> Dict[str, int]
+#
+# Env expectations for remote:
+#   APP_ALLOW_REMOTE_BACKENDS=1
+#   APP_COMFY_SCHEME=https
+#   APP_COMFY_FORCE_VIEW_MODE=query
+#   (host is non-local, port likely 443)
 # --------------------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -76,6 +88,9 @@ def _assert_image_backend_host_policy(host: str) -> None:
 
 # Optional filesystem fallback when /view is unavailable or unsuitable (mounted output dir).
 _COMFY_OUTPUT_DIR: Optional[Path] = Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).resolve() if _env_str("APP_COMFY_OUTPUT_DIR", "") else None
+
+# Local bridge dir for discovery artifacts exposed under /static/bridge/ by the server
+_LOCAL_BRIDGE_DIR: Path = Path("outputs/images/bridge").resolve()
 
 # -----------------------------
 # Connection / helpers
@@ -393,8 +408,8 @@ async def _download_via_view_path(
                 print(f"DEBUG comfy GET[path] status={r.status_code} bytes={len(r.content) if r.content else 0}")
                 r.raise_for_status()
                 data = r.content
-                if not data or len(data) < 256:
-                    raise RuntimeError("image_download_too_small")
+                if not data or len(data) < 64:
+                    raise RuntimeError("download_too_small")
                 return data
             except Exception as e:
                 last_exc = e
@@ -405,7 +420,7 @@ async def _download_via_view_path(
                     break
     if last_exc:
         raise last_exc
-    raise RuntimeError("image_download_failed_unknown_path")
+    raise RuntimeError("download_failed_unknown_path")
 
 async def _download_via_view_query(
     client: httpx.AsyncClient,
@@ -423,29 +438,22 @@ async def _download_via_view_query(
     candidates = _build_view_candidates(folder_type, subfolder, filename)
     last_exc: Optional[Exception] = None
 
-    # Conservative headers to avoid proxy compression/chunking issues
     headers = {
-        "Accept": "image/png",
+        "Accept": "*/*",
         "Cache-Control": "no-cache",
         "Connection": "close",
         "Accept-Encoding": "identity",
     }
 
     for idx, (t, s, f) in enumerate(candidates, start=1):
-        params = {
-            "filename": f,
-            "type": (t or "output"),
-        }
-        # Only include subfolder when it is non-empty
+        params = {"filename": f, "type": (t or "output")}
         s_clean = (s or "").strip().strip("/")
         if s_clean:
             params["subfolder"] = s_clean
 
-        # Strict encoding for all params
         qs = urlencode(params, quote_via=quote, safe="")
         url = f"{base_url}/api/view?{qs}"
 
-        # More generous backoff for tunnels (gives time for file to appear)
         delays = [0.2, 0.4, 0.8, 1.2]
         for attempt, delay in enumerate(delays, start=1):
             try:
@@ -454,8 +462,8 @@ async def _download_via_view_query(
                 print(f"DEBUG comfy GET[query] status={r.status_code} bytes={len(r.content) if r.content else 0}")
                 r.raise_for_status()
                 data = r.content
-                if not data or len(data) < 256:
-                    raise RuntimeError(f"image_download_too_small (url={url})")
+                if not data or len(data) < 64:
+                    raise RuntimeError(f"download_too_small (url={url})")
                 return data
             except Exception as e:
                 last_exc = e
@@ -467,7 +475,7 @@ async def _download_via_view_query(
                     break
     if last_exc:
         raise last_exc
-    raise RuntimeError("image_download_failed_unknown_query")
+    raise RuntimeError("download_failed_unknown_query")
 
 def _fs_fallback_read(folder_type: str, subfolder: str, filename: str) -> Optional[bytes]:
     if _COMFY_OUTPUT_DIR is None:
@@ -483,6 +491,70 @@ def _fs_fallback_read(folder_type: str, subfolder: str, filename: str) -> Option
     except Exception:
         return None
     return None
+
+# -----------------------------
+# Artifact copy (bridge)
+# -----------------------------
+
+async def _copy_bridge_artifacts(
+    client: httpx.AsyncClient,
+    base_url: str,
+    view_mode: str,
+    out_dir_bridge: Path,
+) -> Dict[str, int]:
+    """
+    Attempt to fetch tunnel_url.{json,txt} from the remote using the same view mechanism
+    and write them into outputs/images/bridge locally.
+    Non-fatal on failure; logs and returns summary counts.
+
+    Improvements:
+    - Also tries common artifact subfolders: "", "tunnels", "bridge"
+    - Accepts smaller thresholds: JSON/TXT >= 3 bytes
+    - Uses FS fallback when APP_COMFY_OUTPUT_DIR is set
+    """
+    out_dir_bridge.mkdir(parents=True, exist_ok=True)
+
+    async def _try_fetch_one(filename: str) -> Optional[bytes]:
+        # Try candidates across folder types and common subfolders
+        subfolders = ["", "tunnels", "bridge"]
+        for folder_type in ("output", "temp"):
+            for sub in subfolders:
+                try:
+                    if view_mode == "query":
+                        return await _download_via_view_query(client, base_url, folder_type, sub, filename)
+                    else:
+                        return await _download_via_view_path(client, base_url, folder_type, sub, filename)
+                except Exception as e:
+                    print(f"DEBUG bridge artifact fetch failed for {filename} type={folder_type} sub='{sub}': {repr(e)}")
+                    continue
+        # FS fallback attempts with same subfolders
+        for sub in ["", "tunnels", "bridge"]:
+            data = _fs_fallback_read("output", sub, filename) or _fs_fallback_read("temp", sub, filename)
+            if data:
+                return data
+        return None
+
+    saved = 0
+    errors = 0
+    for fname in ("tunnel_url.json", "tunnel_url.txt"):
+        try:
+            data = await _try_fetch_one(fname)
+            if data and len(data) >= 3:
+                target = out_dir_bridge / fname
+                target.write_bytes(data)
+                saved += 1
+                print(f"[BRIDGE] saved {fname} bytes={len(data)} -> {target}")
+            else:
+                print(f"[BRIDGE] not found or too small: {fname}")
+                errors += 1
+        except Exception as e:
+            errors += 1
+            print(f"[BRIDGE] error saving {fname}: {repr(e)}")
+    return {"saved": saved, "errors": errors}
+
+# -----------------------------
+# Image downloads
+# -----------------------------
 
 async def _download_images(
     client: httpx.AsyncClient,
@@ -513,7 +585,6 @@ async def _download_images(
             if not filename:
                 continue
 
-            # Helpful diagnostic log
             print(f"[HISTORY] chosen file='{filename}' type='{folder_type}' subfolder='{subfolder if subfolder else '(empty)'}'")
 
             delay = 0.8
@@ -532,7 +603,6 @@ async def _download_images(
                         delay *= 1.7
                         continue
                 except Exception as e:
-                    # Fall through to FS fallback
                     print(f"DEBUG comfy download unexpected error (will try FS fallback): {repr(e)}")
 
             if data is None:
@@ -554,7 +624,7 @@ async def _download_images(
     return saved
 
 # -----------------------------
-# Public entry point
+# Public entry points
 # -----------------------------
 
 async def generate_from_prompt_dict(
@@ -575,14 +645,18 @@ async def generate_from_prompt_dict(
     port: int = 8188,
     max_wait_sec: float = 150.0,
     poll_interval: float = 1.0,
+    copy_bridge_artifacts: bool = True,
 ) -> List[Path]:
     """
     Submit a ComfyUI API prompt dict, poll history, and download images to out_dir.
+    Additionally (when copy_bridge_artifacts=True), copy discovery artifacts
+    (tunnel_url.json/.txt) from the remote into outputs/images/bridge/ for the Web UI.
+
     Selects view mode automatically (path for local, query for remote) or via env override.
 
     Caller responsibilities:
-    - For local/LAN mode: pass host=127.0.0.1 or LAN IP, port typically 8188; leave APP_COMFY_SCHEME unset or 'http'; APP_COMFY_FORCE_VIEW_MODE auto/path.
-    - For remote mode (Cloudflared): pass host=<tunnel-host>, port=443; set APP_COMFY_SCHEME=https and APP_COMFY_FORCE_VIEW_MODE=query.
+    - Local/LAN: host=127.0.0.1 or LAN IP, port 8188; APP_COMFY_SCHEME unset or 'http'; APP_COMFY_FORCE_VIEW_MODE auto/path.
+    - Remote (Cloudflared): host=<tunnel-host>, port=443; set APP_COMFY_SCHEME=https and APP_COMFY_FORCE_VIEW_MODE=query.
     """
     payload = override_prompt_inplace(
         body=prompt_dict,
@@ -598,7 +672,6 @@ async def generate_from_prompt_dict(
         seed=seed,
     )
 
-    # Build connection with scheme awareness (env can override)
     conn = ComfyConnection(
         host=host,
         port=port,
@@ -610,7 +683,54 @@ async def generate_from_prompt_dict(
     print(f"[COMFY ENDPOINTS] prompt={base}/prompt history={base}/history/{{prompt_id}} view={'/api/view?...' if view_mode=='query' else '/view/...'}")
 
     async with httpx.AsyncClient(limits=_limits(), timeout=_timeout(max_wait_sec + 30)) as client:
+        # Best-effort: copy bridge artifacts up-front (in case already published)
+        if copy_bridge_artifacts and view_mode == "query" and host not in {"127.0.0.1", "localhost"}:
+            try:
+                await _copy_bridge_artifacts(client, base, view_mode, _LOCAL_BRIDGE_DIR)
+            except Exception as e:
+                print(f"[BRIDGE] pre-copy error: {repr(e)}")
+
         prompt_id = await _post_prompt(client, base, payload)
         history_obj = await _poll_history_ready(client, base, prompt_id, max_wait_sec=max_wait_sec, poll_interval=poll_interval)
+
+        # Try again after generation (common case: artifacts appear during/after runs)
+        if copy_bridge_artifacts and view_mode == "query" and host not in {"127.0.0.1", "localhost"}:
+            try:
+                await _copy_bridge_artifacts(client, base, view_mode, _LOCAL_BRIDGE_DIR)
+            except Exception as e:
+                print(f"[BRIDGE] post-copy error: {repr(e)}")
+
         images = await _download_images(client, base, history_obj, prompt_id, out_dir=Path(out_dir), view_mode=view_mode)
     return images
+
+async def sync_bridge_artifacts(
+    *,
+    host: str,
+    port: int,
+    view_mode: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Explicitly fetch tunnel_url.json and tunnel_url.txt from the active ComfyUI host and
+    save them into outputs/images/bridge/, so the Web UI (/static/bridge/...) can read them.
+
+    Usage:
+      - Call right after switching to remote mode in the UI, on app start, and on reload.
+      - Returns a JSON summary: {"saved": N, "errors": M, "host": "...", "base": "...", "view_mode": "query|path"}.
+
+    Notes:
+      - Enforces host policy (APP_ALLOW_REMOTE_BACKENDS=1 for non-local).
+      - Uses APP_COMFY_SCHEME and APP_COMFY_FORCE_VIEW_MODE to determine base URL and view mode when not provided.
+    """
+    conn = ComfyConnection(
+        host=host,
+        port=port,
+        scheme=(_env_str("APP_COMFY_SCHEME") or None),
+    )
+    base = conn.base
+    vm = view_mode or _select_view_mode(conn.host)
+    print(f"[BRIDGE SYNC] view_mode={vm} host={conn.host} base={base}")
+
+    async with httpx.AsyncClient(limits=_limits(), timeout=_timeout(30.0)) as client:
+        result = await _copy_bridge_artifacts(client, base, vm, _LOCAL_BRIDGE_DIR)
+        result.update({"host": host, "base": base, "view_mode": vm})
+        return result
