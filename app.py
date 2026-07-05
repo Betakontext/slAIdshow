@@ -4,6 +4,7 @@
 # - Style pipeline integrated: style_engine builds style_positive (and reference_text) used in generation
 # - Extended: Runtime switching between Comfy modes (local | remote | auto) and remote target settings
 # - Extended: Debug endpoint to reveal effective image target
+# - NEW: Bridge endpoint to sync remote ComfyUI tunnel artifacts into /static/bridge
 
 from __future__ import annotations
 
@@ -1757,6 +1758,9 @@ async def api_set_comfy_remote(req: ComfyRemoteRequest):
     _set_env("APP_COMFY_REMOTE_SCHEME", req.scheme)
     _set_env("APP_COMFY_REMOTE_HOST", req.host)
     _set_env("APP_COMFY_REMOTE_PORT", str(req.port))
+    # Keep base scheme in sync for components that rely on APP_COMFY_SCHEME
+    _set_env("APP_COMFY_SCHEME", req.scheme)
+
     # Rebuild if in comfyui
     if STATE.image_backend_name == "comfyui":
         try:
@@ -1772,6 +1776,7 @@ async def api_set_comfy_remote(req: ComfyRemoteRequest):
     desc = _describe_backend_target()
     await broadcast("status", "comfy_remote:updated")
     return {"ok": True, "debug": desc.model_dump()}
+
 
 @app.get("/api/debug/image_target", response_model=DebugImageTarget)
 async def api_debug_image_target():
@@ -1859,6 +1864,225 @@ async def comfy_remote_probe(
                 last_error = f"unexpected:{e}"
 
     return {"ok": False, "target": {"scheme": scheme_l, "host": host, "port": port}, "error": last_error or "probe_failed", "status": last_status}
+
+# ---------- NEW: Bridge Sync (tunnel_url.json/txt from remote ComfyUI) ----------
+
+class BridgeSyncRequest(BaseModel):
+    scheme: Optional[Literal["http", "https"]] = None
+    host: Optional[str] = None
+    port: Optional[int] = Field(default=None, ge=1, le=65535)
+    filenames: List[str] = Field(default_factory=lambda: ["tunnel_url.json", "tunnel_url.txt"])
+    view_mode_priority: List[Literal["query", "path"]] = Field(default_factory=lambda: ["query", "path"])
+    path_hints: List[str] = Field(
+        default_factory=lambda: [
+            "ComfyUI/output",
+            "output",
+            "temp",
+            "ComfyUI/temp",
+            "ComfyUI",
+        ]
+    )
+    timeout_s: float = Field(default=4.5, ge=0.5, le=30.0)
+    retries: int = Field(default=2, ge=0, le=6)
+    retry_backoff_s: float = Field(default=0.6, ge=0.1, le=5.0)
+
+class AttemptEntry(BaseModel):
+    url: str
+    mode: Literal["query", "path"]
+    filename: str
+    ok: bool
+    status: Optional[int] = None
+    error: Optional[str] = None
+
+class BridgeSyncResponse(BaseModel):
+    ok: bool
+    saved: List[str]
+    tried: List[AttemptEntry]
+    errors: List[str]
+
+def _bridge_dir() -> Path:
+    return (OUTPUT_DIR / "bridge").resolve()
+
+def _ensure_bridge_dir() -> Path:
+    b = _bridge_dir()
+    b.mkdir(parents=True, exist_ok=True)
+    return b
+
+def _atomic_write(target: Path, data: bytes) -> None:
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(target)
+
+def _remote_base_url2(scheme: str, host: str, port: int) -> str:
+    if host.startswith("[") and host.endswith("]"):
+        return f"{scheme}://{host}:{port}"
+    return f"{scheme}://{host}:{port}"
+
+async def _retry_get_bytes(
+    client: httpx.AsyncClient,
+    url: str,
+    retries: int,
+    base_delay: float,
+    timeout_s: float,
+) -> tuple[Optional[bytes], Optional[int], Optional[str]]:
+    delay = float(base_delay)
+    last_status: Optional[int] = None
+    last_err: Optional[str] = None
+    for attempt in range(0, max(1, int(retries) + 1)):
+        try:
+            r = await client.get(url, timeout=httpx.Timeout(timeout_s))
+            last_status = r.status_code
+            if r.status_code == 200:
+                return r.content, r.status_code, None
+            last_err = f"non_200:{r.status_code}"
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
+            last_err = f"net:{e}"
+        except Exception as e:
+            last_err = f"err:{e}"
+        if attempt < retries:
+            # jittered backoff
+            jitter = (0.2 * delay) * (0.5 - os.urandom(1)[0] / 255.0)
+            await asyncio.sleep(max(0.05, delay + jitter))
+            delay *= 2.0
+    return None, last_status, last_err
+
+async def _fetch_query_view(
+    client: httpx.AsyncClient,
+    base: str,
+    filename: str,
+    timeout_s: float,
+    retries: int,
+    backoff: float,
+) -> tuple[Optional[bytes], AttemptEntry]:
+    url = f"{base}/api/view?filename={httpx.QueryParams({'filename': filename})['filename']}"
+    data, status, err = await _retry_get_bytes(client, url, retries, backoff, timeout_s)
+    return data, AttemptEntry(url=url, mode="query", filename=filename, ok=bool(data), status=status, error=err)
+
+async def _fetch_path_view(
+    client: httpx.AsyncClient,
+    base: str,
+    path_hint: str,
+    filename: str,
+    timeout_s: float,
+    retries: int,
+    backoff: float,
+) -> tuple[Optional[bytes], AttemptEntry]:
+    path_hint = (path_hint or "").strip().strip("/")
+    if not path_hint:
+        # Do not call /api/view with empty path
+        return None, AttemptEntry(url=f"{base}/api/view?path=", mode="path", filename=filename, ok=False, status=None, error="empty_path_hint_skipped")
+    qp = httpx.QueryParams({"path": path_hint, "filename": filename})
+    url = f"{base}/api/view?{str(qp)}"
+    data, status, err = await _retry_get_bytes(client, url, retries, backoff, timeout_s)
+    return data, AttemptEntry(url=url, mode="path", filename=filename, ok=bool(data), status=status, error=err)
+
+def _pick_remote_from_env_or_req(req: BridgeSyncRequest) -> tuple[str, str, int]:
+    scheme = (req.scheme or os.getenv("APP_COMFY_REMOTE_SCHEME", "http")).strip().lower() or "http"
+    host = (req.host or os.getenv("APP_COMFY_REMOTE_HOST", "")).strip()
+    port = int(req.port or int(os.getenv("APP_COMFY_REMOTE_PORT", "8188") or "8188"))
+    if scheme not in {"http", "https"}:
+        scheme = "http"
+    return scheme, host, port
+
+@app.post("/api/bridge/sync_tunnel", response_model=BridgeSyncResponse)
+async def api_bridge_sync_tunnel(payload: BridgeSyncRequest = Body(default_factory=BridgeSyncRequest)):
+    """
+    Best-effort sync of remote ComfyUI tunnel artifacts into /static/bridge/.
+
+    Behavior:
+    - Uses either request overrides or APP_COMFY_REMOTE_{SCHEME,HOST,PORT}.
+    - Tries filenames in order, using view_mode_priority:
+        - query: /api/view?filename=...
+        - path: /api/view?path=HINT&filename=...
+    - For path mode, iterates over path_hints; skips empty hints.
+    - Writes atomically to outputs/images/bridge/{filename} if found.
+    - Returns a detailed report of attempts.
+
+    Typical UI Flow:
+    1) POST /api/bridge/sync_tunnel
+    2) Load /static/bridge/tunnel_url.json or .txt
+    """
+    try:
+        scheme, host, port = _pick_remote_from_env_or_req(payload)
+        if not host:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "saved": [],
+                    "tried": [],
+                    "errors": ["missing_remote_host: Set APP_COMFY_REMOTE_HOST or pass host in request."],
+                },
+                status_code=400,
+            )
+
+        base = _remote_base_url2(scheme, host, port)
+        tried: List[AttemptEntry] = []
+        saved: List[str] = []
+        errors: List[str] = []
+
+        _ensure_bridge_dir()
+
+        async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short_http(), follow_redirects=True) as client:
+            for fname in payload.filenames:
+                fname = (fname or "").strip()
+                if not fname:
+                    continue
+                content: Optional[bytes] = None
+
+                for mode in payload.view_mode_priority or ["query", "path"]:
+                    if mode == "query":
+                        data, att = await _fetch_query_view(
+                            client=client,
+                            base=base,
+                            filename=fname,
+                            timeout_s=float(payload.timeout_s),
+                            retries=int(payload.retries),
+                            backoff=float(payload.retry_backoff_s),
+                        )
+                        tried.append(att)
+                        if data:
+                            content = data
+                            break
+                    elif mode == "path":
+                        # Iterate over provided hints; skip empties
+                        for hint in (payload.path_hints or []):
+                            data, att = await _fetch_path_view(
+                                client=client,
+                                base=base,
+                                path_hint=hint,
+                                filename=fname,
+                                timeout_s=float(payload.timeout_s),
+                                retries=int(payload.retries),
+                                backoff=float(payload.retry_backoff_s),
+                            )
+                            tried.append(att)
+                            if data:
+                                content = data
+                                break
+                        if content:
+                            break
+                    else:
+                        # unsupported mode token; ignore
+                        continue
+
+                if content:
+                    out_path = _bridge_dir() / Path(fname).name
+                    try:
+                        _atomic_write(out_path, content)
+                        saved.append(out_path.name)
+                    except Exception as e:
+                        err = f"write_failed:{e}"
+                        errors.append(err)
+                        print(f"[BRIDGE] save failed for {out_path}: {e}")
+                else:
+                    errors.append(f"not_found:{fname}")
+
+        ok = len(saved) > 0
+        return BridgeSyncResponse(ok=ok, saved=saved, tried=tried, errors=errors)
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[BRIDGE] sync_tunnel crashed: {e}\n{tb}")
+        return JSONResponse({"ok": False, "saved": [], "tried": [], "errors": [str(e)]}, status_code=500)
 
 # ---------- Image size, negative prompt & style prompt settings ----------
 

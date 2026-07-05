@@ -65,8 +65,7 @@
     }
     #current-image {
       max-width: 100%; max-height: 80vh; object-fit: contain; display: block; width: auto; height: auto; cursor: zoom-in;
-      transition: opacity .2s ease;
-      opacity: 0;
+      transition: opacity .2s ease; opacity: 0;
     }
     #current-image.loaded { opacity: 1; }
     #image-viewer .caption {
@@ -78,8 +77,7 @@
     #image-viewer:fullscreen #current-image { max-width: 100vw; max-height: 100vh; cursor: zoom-out; }
     .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     input[type="text"], input[type="number"], textarea, select, input[type="url"], input[type="file"] {
-      background: #0e1118; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
-      outline: none;
+      background: #0e1118; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; outline: none;
     }
     input[type="text"], input[type="url"], textarea { width: 100%; }
     input[type="number"] { width: 110px; }
@@ -107,7 +105,6 @@
     .footer-hud a { color: #9ecbff; text-decoration: none; }
     .footer-hud a:hover { text-decoration: underline; }
 
-    /* Remote config block */
     .remote-block {
       background: var(--panel2);
       border: 1px dashed var(--border);
@@ -122,9 +119,9 @@
       align-items: end;
     }
     .hidden { display: none !important; }
-
-    /* Optional: give the vision hint a slightly warmer color for visibility */
     #vision-hint { color: var(--warn); }
+    .bridge-row { display:flex; gap:8px; align-items:center; margin: 8px 0; }
+    .bridge-status { font-size:12px; color: var(--muted); }
   </style>
 </head>
 <body>
@@ -168,7 +165,6 @@
       <aside class="card">
         <h3 id="title-controls">Steuerung & Logs</h3>
         <div class="body">
-          <!-- Image backend switcher -->
           <div class="row" style="margin-bottom:8px;">
             <label for="backend-select" style="min-width:120px;" id="label-backend">Image-Backend</label>
             <select id="backend-select" title="Image-Backend wählen">
@@ -180,12 +176,18 @@
             <span id="backend-warn" class="warn" style="display:none;"></span>
           </div>
 
-          <!-- Remote ComfyUI configuration (visible only when 'comfyui-remote') -->
           <div id="remote-config" class="remote-block hidden">
             <div class="row" style="margin-bottom:6px;">
               <strong id="remote-title">Remote ComfyUI (Cloudflared)</strong>
               <span id="remote-subtitle" class="subtle">· öffentlich erreichbarer Tunnel-Host</span>
             </div>
+
+            <!-- Bridge actions: read tunnel URL from /static/bridge -->
+            <div class="bridge-row">
+              <button id="btn-bridge-sync" title="Sync tunnel files into outputs/images/bridge/">Read tunnel URL</button>
+              <span id="bridge-status" class="bridge-status"></span>
+            </div>
+
             <div class="remote-grid">
               <div>
                 <label for="remote-host" class="subtle" id="label-remote-host">Remote Host</label>
@@ -207,9 +209,16 @@
               </div>
             </div>
             <div id="remote-test-status" class="subtle" style="margin-top:6px;"></div>
+
+            <div class="row" style="margin-top:6px;">
+              <label style="display:flex; align-items:center; gap:8px;">
+                <input id="toggle-auto-apply" type="checkbox" />
+                <span>Automatisch anwenden</span>
+              </label>
+              <span id="remote-auto-status" class="subtle" style="margin-left:12px;"></span>
+            </div>
           </div>
 
-          <!-- Workflow switcher (only visible when ComfyUI backend is active) -->
           <div id="workflow-block" style="display:none;">
             <div class="row" style="margin-bottom:8px;">
               <label for="workflow-select" style="min-width:120px;" id="label-workflow">Workflow</label>
@@ -225,7 +234,6 @@
             </div>
           </div>
 
-          <!-- Size controls -->
           <div class="row" style="margin-bottom:8px;">
             <label for="width-input" style="min-width:120px;" id="label-width">Breite</label>
             <input id="width-input" type="number" min="64" max="2048" step="64" placeholder="z.B. 768" />
@@ -234,7 +242,6 @@
             <button id="btn-apply-size" title="Größe übernehmen">Übernehmen</button>
           </div>
 
-          <!-- Style Engine controls -->
           <div id="style-block" style="margin-bottom:10px; border-top:1px dashed var(--border); padding-top:10px;">
             <div class="row" style="margin-bottom:6px;">
               <strong id="style-title">Style Controls</strong>
@@ -266,11 +273,9 @@
 
             <div class="log mono" id="style-log" style="max-height:120px;"></div>
           </div>
-          <!-- END Style Engine controls -->
 
-          <!-- Prompt input -->
           <div class="row" style="margin-bottom:6px;">
-              <strong id="prompt_ui_title">Bild Prompt</strong>
+            <strong id="prompt_ui_title">Bild Prompt</strong>
           </div>
 
           <div class="inline-input-line" style="margin-bottom:8px;">
@@ -278,13 +283,11 @@
             <button id="btn-direct">Direct Generate</button>
           </div>
 
-          <!-- Negative Prompt -->
           <div class="inline-input-line" style="margin-bottom:8%;">
             <input id="neg-input" type="text" placeholder="Negative Prompt (z.B. low quality, blurry, extra fingers)">
             <button id="btn-apply-neg" title="Apply negative prompt">Übernehmen</button>
           </div>
 
-          <!-- Send to Ollama -->
           <div class="row" style="margin-bottom:8px;">
             <button id="btn-plan">Senden</button>
           </div>
@@ -373,7 +376,6 @@
         wf_applied_ok: "Workflow übernommen.",
         wf_applied_fail: "Workflow-Übernahme fehlgeschlagen。",
         wf_list_fail: "Workflows konnten nicht geladen werden。",
-        // Style engine - UI labels
         style_ui_title: "Stil-Steuerung",
         style_ui_deactivate: "Alle Stile deaktivieren",
         style_ui_deactivate_title: "Alle Stile deaktivieren",
@@ -386,7 +388,6 @@
         style_ui_load_url_title: "URL als Referenz laden",
         style_ui_toggle_vision: "Ollama Vision verwenden",
         style_ui_vision_hint_off: "Lokale Stilfeatures sind generisch; für bildspezifische Styles bitte Vision aktivieren",
-        // Remote UI
         remote_title: "Remote ComfyUI (Cloudflared)",
         remote_subtitle: "· öffentlich erreichbarer Tunnel-Host",
         remote_label_host: "Remote Host",
@@ -397,6 +398,12 @@
         remote_probe_fail: "Probe fehlgeschlagen.",
         remote_missing_host: "Bitte Remote Host eingeben.",
         remote_probing: "Teste /history …",
+        bridge_read: "Tunnel-URL lesen",
+        bridge_syncing: "Lese Bridge-Dateien…",
+        bridge_ready: "Tunnel-URL geladen",
+        bridge_not_found: "Keine Tunnel-URL gefunden.",
+        bridge_applied: "Übernommen",
+        bridge_apply_failed: "Übernahme fehlgeschlagen",
       },
       en: {
         brand: "slAIdshow | Local Speech-to-Image Pipeline",
@@ -459,7 +466,6 @@
         wf_applied_ok: "Workflow applied.",
         wf_applied_fail: "Failed to apply workflow。",
         wf_list_fail: "Failed to load workflows。",
-        // Style engine - UI labels
         style_ui_title: "Style Controls",
         style_ui_deactivate: "Deactivate all styles",
         style_ui_deactivate_title: "Deactivate all styles",
@@ -472,7 +478,6 @@
         style_ui_load_url_title: "Load URL as reference",
         style_ui_toggle_vision: "Use Ollama vision",
         style_ui_vision_hint_off: "Local style features are generic; enable Vision for image-specific styles",
-        // Remote UI
         remote_title: "Remote ComfyUI (Cloudflared)",
         remote_subtitle: "· publicly accessible tunnel host",
         remote_label_host: "Remote Host",
@@ -483,6 +488,12 @@
         remote_probe_fail: "Probe failed.",
         remote_missing_host: "Please enter a remote host.",
         remote_probing: "Probing /history ...",
+        bridge_read: "Read tunnel URL",
+        bridge_syncing: "Reading bridge files…",
+        bridge_ready: "Tunnel URL loaded",
+        bridge_not_found: "No tunnel URL found.",
+        bridge_applied: "Applied",
+        bridge_apply_failed: "Apply failed",
       }
     };
 
@@ -490,7 +501,7 @@
     const langSelect = document.getElementById('lang-select');
     let LANG = localStorage.getItem('ui_lang') || 'de';
     langSelect.value = LANG;
-    document.documentElement.lang = LANG; // keep <html lang> in sync
+    document.documentElement.lang = LANG;
     function t(key) { return I18N[LANG][key] || key; }
 
     function applyI18N() {
@@ -522,7 +533,6 @@
       document.getElementById('plan-input').placeholder = t('ph_plan');
       document.getElementById('neg-input').placeholder = t('ph_neg');
 
-      // Style Engine UI
       const styleTitle = document.getElementById('style-title');
       if (styleTitle) styleTitle.textContent = t('style_ui_title');
       const styleDeactivate = document.getElementById('style-deactivate-label');
@@ -547,7 +557,6 @@
       const visionHint = document.getElementById('vision-hint');
       if (visionHint) visionHint.textContent = t('style_ui_vision_hint_off');
 
-      // Remote ComfyUI block
       const remoteTitle = document.getElementById('remote-title');
       if (remoteTitle) remoteTitle.textContent = t('remote_title');
       const remoteSubtitle = document.getElementById('remote-subtitle');
@@ -561,12 +570,16 @@
       const btnRemoteTest = document.getElementById('btn-remote-test');
       if (btnRemoteTest) btnRemoteTest.textContent = t('remote_btn_test');
 
+      const btnBridge = document.getElementById('btn-bridge-sync');
+      if (btnBridge) btnBridge.textContent = t('bridge_read');
+
       const statusEl = document.getElementById('status');
       if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
     }
 
-    langSelect.addEventListener('change', () => {
-      LANG = langSelect.value;
+    const langSelectEl = document.getElementById('lang-select');
+    langSelectEl.addEventListener('change', () => {
+      LANG = langSelectEl.value;
       localStorage.setItem('ui_lang', LANG);
       document.documentElement.lang = LANG;
       applyI18N();
@@ -595,6 +608,12 @@
     const btnRemoteTest = $('#btn-remote-test');
     const remoteTestStatus = $('#remote-test-status');
 
+    const toggleAutoApply = document.getElementById('toggle-auto-apply');
+    const remoteAutoStatus = document.getElementById('remote-auto-status');
+
+    const btnBridgeSync = document.getElementById('btn-bridge-sync');
+    const bridgeStatus = document.getElementById('bridge-status');
+
     const workflowBlock = document.getElementById('workflow-block');
     const workflowSelect = $('#workflow-select');
     const workflowPreview = $('#workflow-preview');
@@ -606,7 +625,6 @@
     const btnApplySize = $('#btn-apply-size');
     const sizePill = $('#size-pill');
 
-    // Style controls
     const styleTextInput = $('#style-text');
     const btnApplyStyleText = $('#btn-apply-style-text');
     const btnStyleDeactivate = $('#btn-style-deactivate');
@@ -690,7 +708,6 @@
       backoffMs = Math.min(backoffMs * 2, 15000);
     }
 
-    // Debounced image size sync to server
     let sizeSyncTimer = null;
     function scheduleSizeSync() {
       if (sizeSyncTimer) clearTimeout(sizeSyncTimer);
@@ -893,7 +910,7 @@
       return { width: w, height: h };
     }
 
-    // ---------- Style Engine: local state and helpers ----------
+    // ---------- Style Engine ----------
     const STYLE_STATE = {
       reference_source: 'none',
       reference_id: null,
@@ -1139,7 +1156,7 @@
       }
     });
 
-    // ---------- Cloud allow helper for Pollinations ----------
+    // ---------- Cloud allow helper ----------
     async function ensureCloudAllowed() {
       try {
         const r = await fetch('/api/settings/image_allow_cloud', {
@@ -1151,7 +1168,7 @@
       } catch { return false; }
     }
 
-    // ---------- Backend switch incl. remote mode ----------
+    // ---------- Backend switch ----------
     backendSelect.addEventListener('change', () => {
       const val = backendSelect.value;
       remoteBlock.classList.toggle('hidden', val !== 'comfyui-remote');
@@ -1179,7 +1196,6 @@
             log(statusLog, t('backend_switched_ok'));
           }
         } else if (sel === 'comfyui-local') {
-          // set backend then mode=local
           await fetch('/api/settings/image_backend', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ backend: 'comfyui' })
@@ -1203,15 +1219,10 @@
             backendWarn.style.display = '';
             return;
           }
-
-          // NEW: allow remote/cloud
           await fetch("/api/settings/image_allow_cloud", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
+            method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ allow: true })
           });
-
-          // Order: backend -> comfy_remote -> comfy_mode(remote)
           await fetch('/api/settings/image_backend', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ backend: 'comfyui' })
@@ -1424,13 +1435,11 @@
         $('#poll-pill').textContent = `Images: ${j?.image?.backend || '?'}`;
         $('#sr-pill').textContent = `SR: ${j?.audio?.sample_rate || '?'}`;
 
-        // Reflect backend and comfy mode
         const current = (j?.image?.backend || 'comfyui').toLowerCase();
         const mode = (j?.image?.comfy?.mode || 'local').toLowerCase();
         if (current === 'pollinations') backendSelect.value = 'pollinations';
         else backendSelect.value = (mode === 'remote') ? 'comfyui-remote' : 'comfyui-local';
 
-        // Remote values from config
         const rhost = j?.image?.comfy?.remote?.host || '';
         const rport = j?.image?.comfy?.remote?.port ?? 443;
         const rscheme = (j?.image?.comfy?.remote?.scheme || 'https').toLowerCase();
@@ -1441,9 +1450,7 @@
 
         const w = Number(j?.image?.current_width ?? j?.image?.width_default ?? 512);
         const h = Number(j?.image?.current_height ?? j?.image?.height_default ?? 512);
-        widthInput.value = w;
-        heightInput.value = h;
-        updateSizePill();
+        widthInput.value = w; heightInput.value = h; updateSizePill();
 
         const neg = (j?.image?.negative_prompt || '').trim();
         if (neg) document.getElementById('neg-input').value = neg;
@@ -1484,14 +1491,130 @@
       }
     }
 
+    // ---------- Bridge helpers ----------
+    async function tryFetchJSON(url, timeoutMs = 2000) {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), timeoutMs);
+      try {
+        const r = await fetch(url, { cache: 'no-store', signal: ctl.signal });
+        if (!r.ok) return null;
+        return await r.json().catch(() => null);
+      } catch { return null; }
+      finally { clearTimeout(t); }
+    }
+    async function tryFetchText(url, timeoutMs = 2000) {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), timeoutMs);
+      try {
+        const r = await fetch(url, { cache: 'no-store', signal: ctl.signal });
+        if (!r.ok) return null;
+        return await r.text().catch(() => null);
+      } catch { return null; }
+      finally { clearTimeout(t); }
+    }
+    function extractUrlFromAny(objOrStr) {
+      if (!objOrStr) return null;
+      if (typeof objOrStr === 'string') {
+        const s = objOrStr.trim();
+        if (/^https?:\/\//i.test(s)) return s;
+        try {
+          const j = JSON.parse(s);
+          if (j && typeof j.url === 'string') return j.url;
+        } catch {}
+        return null;
+      }
+      if (typeof objOrStr === 'object' && typeof objOrStr.url === 'string') return objOrStr.url;
+      return null;
+    }
+    function toHostPortScheme(u) {
+      try {
+        const URL_ = new URL(u);
+        const scheme = (URL_.protocol || 'https:').replace(':','') || 'https';
+        const host = URL_.hostname || URL_.host;
+        let port = URL_.port ? parseInt(URL_.port,10) : (scheme === 'https' ? 443 : 80);
+        return { host, port, scheme };
+      } catch { return null; }
+    }
+    async function bridgeSyncThenLoad() {
+      bridgeStatus.textContent = t('bridge_syncing');
+
+      // Optional server-side sync; ignore failure if endpoint missing
+      try { await fetch('/api/bridge/sync_tunnel', { method: 'POST' }); } catch {}
+
+      // Try JSON first
+      const j = await tryFetchJSON('/static/bridge/tunnel_url.json', 2000);
+      let url = extractUrlFromAny(j);
+      if (!url) {
+        // Fallback to text file
+        const txt = await tryFetchText('/static/bridge/tunnel_url.txt', 2000);
+        url = extractUrlFromAny(txt);
+      }
+      if (!url) {
+        bridgeStatus.textContent = t('bridge_not_found');
+        return;
+      }
+
+      const parsed = toHostPortScheme(url);
+      if (!parsed || !parsed.host) {
+        bridgeStatus.textContent = t('bridge_not_found');
+        return;
+      }
+
+      // Fill inputs
+      if (!remoteHost.value || remoteHost.value !== parsed.host) remoteHost.value = parsed.host;
+      if (!remotePort.value || Number(remotePort.value) !== parsed.port) remotePort.value = String(parsed.port);
+      if ((remoteScheme.value || '').toLowerCase() !== parsed.scheme) remoteScheme.value = parsed.scheme;
+
+      bridgeStatus.textContent = t('bridge_ready');
+
+      // Auto-apply if enabled
+      if (toggleAutoApply.checked) {
+        const ok = await applyRemoteToServer(parsed.host, parsed.port, parsed.scheme);
+        if (ok) {
+          backendSelect.value = 'comfyui-remote';
+          remoteBlock.classList.toggle('hidden', false);
+          await refreshConfig().catch(()=>{});
+          remoteAutoStatus.textContent = `${t('bridge_applied')}: ${parsed.host}`;
+        } else {
+          remoteAutoStatus.textContent = `${t('bridge_apply_failed')}: ${parsed.host}`;
+        }
+      }
+    }
+    btnBridgeSync.addEventListener('click', bridgeSyncThenLoad);
+
+    async function applyRemoteToServer(host, port = 443, scheme = 'https') {
+      try {
+        await fetch("/api/settings/image_allow_cloud", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ allow: true })
+        });
+      } catch {}
+      const r1 = await fetch('/api/settings/image_backend', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ backend: 'comfyui' })
+      });
+      const r2 = await fetch('/api/settings/comfy_remote', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host, port, scheme })
+      });
+      const r3 = await fetch('/api/settings/comfy_mode', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'remote' })
+      });
+      return r1.ok && r2.ok && r3.ok;
+    }
+
+    // ---------- Init ----------
     (async function init() {
       applyI18N();
       loadStyleState();
       syncVisionHint();
       await refreshConfig();
+
       function onSizeInputChange() { updateSizePill(); scheduleSizeSync(); }
       widthInput.addEventListener('input', onSizeInputChange);
       heightInput.addEventListener('input', onSizeInputChange);
+
       if (document.getElementById('workflow-block').style.display !== 'none') {
         await refreshWorkflowList();
       }
