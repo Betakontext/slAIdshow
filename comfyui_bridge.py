@@ -58,6 +58,15 @@ from fastapi.responses import JSONResponse
 # -----------------------------
 # Env helpers & host policy
 # -----------------------------
+def _is_private_or_local_host(host: str) -> bool:
+    h = (host or "").strip().lower()
+    if h in {"127.0.0.1", "localhost", "::1"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+        return ip.is_private or ip.is_loopback or ip.is_link_local
+    except ValueError:
+        return False
 
 def _env_str(k: str, d: str = "") -> str:
     return (os.getenv(k, d) or "").strip()
@@ -164,17 +173,20 @@ def _clamp_dim(v: Optional[int]) -> Optional[int]:
     return x - (x % 8)
 
 def _select_view_mode(host: str) -> str:
-    """
-    Decide view mode: 'path' for local, 'query' for remote.
-    Override via APP_COMFY_FORCE_VIEW_MODE in {'auto','path','query'}.
-    """
     override = _env_str("APP_COMFY_FORCE_VIEW_MODE", "auto").lower()
     if override in {"path", "query"}:
         return override
-    # auto
-    if host in {"127.0.0.1", "localhost"}:
-        return "path"
-    return "query"
+    return "path" if _is_private_or_local_host(host) else "query"
+
+def _classify_base_url(base_url: str) -> Tuple[bool, str]:
+    """
+    Returns (host_is_private, scheme) for base_url.
+    """
+    try:
+        parsed = httpx.URL(base_url)
+        return _is_private_or_local_host(parsed.host or ""), (parsed.scheme or "").lower()
+    except Exception:
+        return False, ""
 
 # -----------------------------
 # Prompt manipulation
@@ -265,7 +277,7 @@ async def _post_prompt(
 ) -> str:
     """
     POST /prompt with retries. Classify HTTP 400 as prompt/workflow error (reachable),
-    not as 'unavailable'.
+    not as 'unavailable'. Includes HTTPS→HTTP fallback for LAN/private hosts when TLS is wrong.
     """
     delay = 0.8
     last_exc: Optional[Exception] = None
@@ -287,17 +299,38 @@ async def _post_prompt(
                 raise RuntimeError("comfy_no_prompt_id")
             print(f"DEBUG comfy prompt_id: {pid}")
             return str(pid)
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
+        except Exception as e:
             last_exc = e
+            msg = str(e)
             print(f"DEBUG comfy POST /prompt attempt#{attempt} failed: {repr(e)}")
+            # HTTPS→HTTP fallback for private/LAN hosts if TLS is wrong
+            host_is_private, scheme = _classify_base_url(base_url)
+            if host_is_private and scheme == "https" and "WRONG_VERSION_NUMBER" in msg:
+                http_base = "http://" + base_url.split("://", 1)[1]
+                try:
+                    print(f"DEBUG comfy POST /prompt HTTPS→HTTP fallback: retrying with {http_base}")
+                    r2 = await client.post(f"{http_base}/prompt", json=body)
+                    if r2.status_code == 400:
+                        text = r2.text[:500].replace("\n", " ")
+                        print(f"DEBUG comfy POST /prompt 400 body (fallback): {text}")
+                        raise RuntimeError(f"comfy_prompt_invalid_400: {text}")
+                    r2.raise_for_status()
+                    j = r2.json()
+                    if not isinstance(j, dict):
+                        raise RuntimeError(f"comfy_prompt_non_object: {type(j)}")
+                    pid = j.get("prompt_id") or j.get("promptId") or j.get("id")
+                    if not pid:
+                        raise RuntimeError("comfy_no_prompt_id")
+                    print(f"DEBUG comfy prompt_id (fallback): {pid}")
+                    return str(pid)
+                except Exception as e2:
+                    print(f"DEBUG comfy POST /prompt fallback failed: {repr(e2)}")
+            # Normal retry backoff
             if attempt < 4:
                 await asyncio.sleep(delay)
                 delay *= 1.7
                 continue
             break
-        except Exception as e:
-            print(f"DEBUG comfy POST /prompt unexpected error: {repr(e)}")
-            raise
     raise RuntimeError(f"comfy_post_prompt_failed: {last_exc}")
 
 def _node_maps_from_history_obj(history_json: Dict[str, Any], prompt_id: str) -> List[Dict[str, Any]]:
@@ -344,11 +377,33 @@ async def _poll_history_ready(
     last_payload: Optional[Dict[str, Any]] = None
     while time.time() < deadline:
         url = f"{base_url}/history/{prompt_id}"
-        r = await client.get(url)
-        if r.status_code == 404:
-            await asyncio.sleep(poll_interval)
-            continue
-        r.raise_for_status()
+        try:
+            r = await client.get(url)
+            if r.status_code == 404:
+                await asyncio.sleep(poll_interval)
+                continue
+            r.raise_for_status()
+        except Exception as e:
+            msg = str(e)
+            print(f"DEBUG comfy GET /history error: {repr(e)} url={url}")
+            host_is_private, scheme = _classify_base_url(base_url)
+            if host_is_private and scheme == "https" and "WRONG_VERSION_NUMBER" in msg:
+                http_base = "http://" + base_url.split("://", 1)[1]
+                try:
+                    print(f"DEBUG comfy GET /history HTTPS→HTTP fallback: retrying with {http_base}")
+                    r = await client.get(f"{http_base}/history/{prompt_id}")
+                    if r.status_code == 404:
+                        await asyncio.sleep(poll_interval)
+                        continue
+                    r.raise_for_status()
+                except Exception as e2:
+                    print(f"DEBUG comfy GET /history fallback failed: {repr(e2)}")
+                    await asyncio.sleep(poll_interval)
+                    continue
+            else:
+                await asyncio.sleep(poll_interval)
+                continue
+
         j = r.json()
         if not isinstance(j, dict):
             await asyncio.sleep(poll_interval)
@@ -472,6 +527,13 @@ async def _download_via_view_query(
         "Accept-Encoding": "identity",
     }
 
+    # Classify host once for HTTPS→HTTP fallback decision
+    try:
+        parsed = httpx.URL(base_url)
+        host_is_private = _is_private_or_local_host(parsed.host or "")
+    except Exception:
+        host_is_private = False
+
     for idx, (t, s, f) in enumerate(candidates, start=1):
         params = {"filename": f, "type": (t or "output")}
         s_clean = (s or "").strip().strip("/")
@@ -495,6 +557,20 @@ async def _download_via_view_query(
             except Exception as e:
                 last_exc = e
                 print(f"DEBUG comfy GET[query] error: {repr(e)} (url={url})")
+                # One-shot fallback: WRONG_VERSION_NUMBER when using https against HTTP-only ComfyUI on private/LAN hosts
+                msg = str(e)
+                if host_is_private and base_url.startswith("https://") and "WRONG_VERSION_NUMBER" in msg:
+                    http_base = "http://" + base_url.split("://", 1)[1]
+                    try:
+                        print(f"DEBUG comfy GET[query] HTTPS→HTTP fallback: retrying with {http_base}")
+                        r2 = await client.get(f"{http_base}/api/view?{qs}", headers=headers)
+                        print(f"DEBUG comfy GET[query] fallback status={r2.status_code} bytes={len(r2.content) if r2.content else 0}")
+                        r2.raise_for_status()
+                        data = r2.content
+                        if data and len(data) >= 64:
+                            return data
+                    except Exception as e2:
+                        print(f"DEBUG comfy GET[query] fallback failed: {repr(e2)}")
                 if attempt < len(delays):
                     await asyncio.sleep(delay)
                     continue
@@ -529,26 +605,17 @@ async def _copy_bridge_artifacts(
     view_mode: str,
     out_dir_bridge: Path,
 ) -> Dict[str, int]:
-    """
-    Attempt to fetch ONLY tunnel_url.json from the remote using the same view mechanism
-    and write it into outputs/images/bridge locally.
-    Non-fatal on failure; logs and returns summary counts.
 
-    IMPORTANT: Skip entirely for local mode/hosts. Tunnel artifacts are only meaningful
-    for remote (query-mode) access. This prevents noisy retries in local mode.
-    """
-
-    # Early exit: do not fetch any tunnel artifacts when running in local mode/host.
-    # - Local view_mode is typically 'path'
-    # - Also guard for local hosts explicitly
     try:
         parsed = httpx.URL(base_url)
         host_is_local = (parsed.host in {"127.0.0.1", "localhost"})
+        host_is_private = _is_private_or_local_host(parsed.host or "")
     except Exception:
         host_is_local = False
+        host_is_private = False
 
-    if view_mode != "query" or host_is_local:
-        print(f"[BRIDGE] skip tunnel artifact copy (view_mode={view_mode}, host_is_local={host_is_local})")
+    if view_mode != "query" or host_is_local or host_is_private:
+        print(f"[BRIDGE] skip tunnel artifact copy (view_mode={view_mode}, private={host_is_private}, host_is_local={host_is_local})")
         return {"saved": 0, "errors": 0}
 
     out_dir_bridge.mkdir(parents=True, exist_ok=True)
@@ -697,8 +764,8 @@ async def generate_from_prompt_dict(
     Selects view mode automatically (path for local, query for remote) or via env override.
 
     Caller responsibilities:
-    - Local/LAN: host=127.0.0.1 or LAN IP, port 8188; APP_COMFY_SCHEME unset or 'http'; APP_COMFY_FORCE_VIEW_MODE auto/path.
-    - Remote (Cloudflared): host=<tunnel-host>, port=443; set APP_COMFY_SCHEME=https and APP_COMFY_FORCE_VIEW_MODE=query.
+    - Local/LAN: host=127.0.0.1 oder LAN-IP, Port 8188; APP_COMFY_SCHEME unset oder 'http'; APP_COMFY_FORCE_VIEW_MODE auto/path.
+    - Remote (Cloudflared): host=<tunnel-host>, Port 443; setze APP_COMFY_SCHEME=https und APP_COMFY_FORCE_VIEW_MODE=query.
     """
     payload = override_prompt_inplace(
         body=prompt_dict,
@@ -725,8 +792,14 @@ async def generate_from_prompt_dict(
     print(f"[COMFY ENDPOINTS] prompt={base}/prompt history={base}/history/{{prompt_id}} view={'/api/view?...' if view_mode=='query' else '/view/...'}")
 
     async with httpx.AsyncClient(limits=_limits(), timeout=_timeout(max_wait_sec + 30)) as client:
-        # Best-effort: copy bridge artifacts up-front — only in remote/query mode and non-local host
-        if copy_bridge_artifacts and view_mode == "query" and host not in {"127.0.0.1", "localhost"}:
+        # Best-effort: copy bridge artifacts up-front — only in remote/query mode and for non-private hosts (true tunnels)
+        try:
+            parsed = httpx.URL(base)
+            host_is_private = _is_private_or_local_host(parsed.host or "")
+        except Exception:
+            host_is_private = False
+
+        if copy_bridge_artifacts and view_mode == "query" and not host_is_private:
             try:
                 await _copy_bridge_artifacts(client, base, view_mode, _LOCAL_BRIDGE_DIR)
             except Exception as e:
@@ -736,7 +809,7 @@ async def generate_from_prompt_dict(
         history_obj = await _poll_history_ready(client, base, prompt_id, max_wait_sec=max_wait_sec, poll_interval=poll_interval)
 
         # Try again after generation (common case: artifacts appear during/after runs)
-        if copy_bridge_artifacts and view_mode == "query" and host not in {"127.0.0.1", "localhost"}:
+        if copy_bridge_artifacts and view_mode == "query" and not host_is_private:
             try:
                 await _copy_bridge_artifacts(client, base, view_mode, _LOCAL_BRIDGE_DIR)
             except Exception as e:

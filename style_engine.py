@@ -225,6 +225,24 @@ def _httpx_limits() -> httpx.Limits:
 def _timeout_generic() -> httpx.Timeout:
     return httpx.Timeout(connect=8.0, read=HTTP_TIMEOUT_SEC, write=30.0, pool=8.0)
 
+# Friendly defaults for CDNs (minimal, non-invasive)
+DEFAULT_HEADERS = {
+    "User-Agent": "slAIdshow/1.0 (+https://github.com/neuraplus-ai/slAIdshow)",
+    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
+WIKI_REFERER = "https://de.wikipedia.org/"
+
+def _headers_for_url(url: str, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    h = dict(DEFAULT_HEADERS)
+    if "wikipedia.org" in url or "wikimedia.org" in url:
+        h["Referer"] = WIKI_REFERER
+    if extra:
+        h.update(extra)
+    return h
+
 async def _get_with_retries(
     client: httpx.AsyncClient,
     url: str,
@@ -237,7 +255,16 @@ async def _get_with_retries(
     delay = float(base_delay)
     for attempt in range(1, int(max_retries) + 1):
         try:
-            r = await client.get(url, headers=headers)
+            # Use friendly headers and follow redirects; keep explicit headers additive
+            req_headers = _headers_for_url(url, headers)
+            r = await client.get(url, headers=req_headers, follow_redirects=True)
+            # Special handling for Wikimedia thumbs that sometimes 403 on first GET
+            if r.status_code == 403 and "upload.wikimedia.org" in url:
+                try:
+                    await client.head(url, headers=req_headers, follow_redirects=True)
+                    r = await client.get(url, headers=req_headers, follow_redirects=True)
+                except Exception:
+                    pass
             r.raise_for_status()
             return r
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
@@ -261,7 +288,11 @@ async def _post_json_with_retries(
     delay = float(base_delay)
     for attempt in range(1, int(max_retries) + 1):
         try:
-            r = await client.post(url, json=json, headers=headers)
+            h = dict(headers or {})
+            # Keep default UA to be nice to local/remote services; not strictly required here
+            if "User-Agent" not in h:
+                h["User-Agent"] = DEFAULT_HEADERS["User-Agent"]
+            r = await client.post(url, json=json, headers=h)
             r.raise_for_status()
             return r
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
@@ -366,6 +397,7 @@ async def save_reference_from_url(url: str, filename_hint: Optional[str] = None)
         raise ValueError("invalid url")
 
     async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_generic(), follow_redirects=True, http2=True) as client:
+        # Use robust retries with friendly headers and redirect support
         r = await _get_with_retries(client, url)
         cl = int(r.headers.get("Content-Length", "0") or "0")
         if cl and cl > MAX_DOWNLOAD_BYTES:
