@@ -12,6 +12,65 @@ Drei Bild-Backends, in allen drei Modi
 Weiterentwicklung:
 
 
+    Goal: Add a UI toggle “Direct live”. When enabled, the Whisper streaming transcripts are forwarded directly as image prompts without passing through the Ollama text LLM for prompt-optimization. When disabled, current behavior remains: Whisper → Ollama (optimize) → image backend.
+    Constraints:
+        slAIdshow is FastAPI + Web UI. UI is in web/, root redirects to /web/index.html.
+        Backends switchable via /api/settings/image_backend with three modes: Comfy local (same machine or same LAN), Comfy remote (different network), Pollinations Cloud (always reachable).
+        Ollama vision must still be available for reference image interpretation independent of Direct live (this toggle concerns only text prompt optimization).
+        Async design with streaming Whisper and backpressure-friendly image generation calls. Retry logic preserved.
+        No heavy theory; deliver a precise design and then, on request, a “Komplette Datei” code drop.
+
+Architecture Plan
+
+    UI changes (web/):
+        Add a toggle switch “Direct live” in the control panel.
+        Store its state in the front-end settings store and show its current value.
+        On change, call a new FastAPI endpoint: PATCH /api/settings/direct_live with JSON {enabled: bool}.
+        Extend GET /api/settings to include direct_live flag for initial hydration.
+
+    Backend settings (FastAPI):
+        Persist a boolean setting “direct_live” in the in-memory settings model (and optionally in a JSON config file if you already persist others).
+        Endpoints:
+            GET /api/settings → returns {image_backend, ..., direct_live}
+            PATCH /api/settings/direct_live → validates and sets the flag.
+        This flag is orthogonal to Ollama Vision and image backend selection.
+
+    Realtime pipeline switch:
+        Current pipeline: Whisper stream segments → PromptBuilder.enqueue(raw_segment) → if queue flush or timer → call LLM optimize → send to image backend.
+        Add a branch conditioned on settings.direct_live:
+            If direct_live is true:
+                Bypass LLM call.
+                Maintain the same cadence as before (i.e., same batching/flush policy you use before calling Ollama) by reusing the same aggregator but skipping the optimize() step.
+                Combine recent Whisper segments into a “prompt chain” (e.g., last N seconds or tokens) exactly like the pre-LLM prompt input window, then forward as prompt.
+                Still support Style/Reference merging as usual before dispatch to image backend.
+            If direct_live is false:
+                Keep existing behavior (optimize via Ollama text LLM).
+        Important: Ollama Vision for reference interpretation is independent and must remain available in both modes. Only the text prompt path is toggled.
+
+    Prompt chain definition:
+        Use your existing aggregator that prepares the text to send to Ollama. Put a capability to produce two variants:
+            raw_prompt_chain (concatenated Whisper text with light cleanup)
+            optimized_prompt (what you currently get back from Ollama)
+        Switch selection based on direct_live flag.
+        Keep length guardrails (max tokens/characters) identical to pre-LLM input window to avoid overly long direct prompts.
+        Optional: add a minimal normalizer for direct mode (trim whitespace, remove repeated trailing partial words, strip filler words if you already do that pre-LLM).
+
+    Timing/cadence:
+        Preserve the same dispatch policy: e.g., “send prompt when stable 1.5s no new tokens or segment final flag” or whatever you use before calling Ollama. The idea: only swap the transformation step, not the scheduler cadence.
+
+    Telemetry and UI feedback:
+        In the UI, display an indicator when Direct live is enabled.
+        Optionally show the exact prompt sent to the image backend so users can see un-optimized text.
+
+    Testing plan:
+        Start Whisper, toggle Direct live ON:
+            Speak short phrases; images should trigger at the same intervals, and you should see the raw transcript as prompt in logs.
+        Toggle OFF:
+            Prompts should again route via Ollama text LLM; verify output logs include /api/generate or /api/chat requests.
+        Verify Ollama Vision still works for reference style tags in both modes.
+        Exercise all three image backends; ensure no change to backend routing.
+
+
 Jegliche Code Erstellung auf strikt Englisch und in markdown Blöcken.
 
 Hier die Dateien auf dem derzeitigen Stand:
