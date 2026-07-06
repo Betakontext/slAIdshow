@@ -9,12 +9,10 @@ Drei Bild-Backends, in allen drei Modi
         Pollinations Cloud (mit robustem Fallback, Multipart/URL-Referenzen, Retries)
 
 
-Weiterentwicklung:
-
-
-Jegliche Code Erstellung auf strikt Englisch und in markdown Blöcken.
+# Weiterentwicklung:
 
 Hier die Dateien auf dem derzeitigen Stand:
+
 
 # app.py
 from __future__ import annotations
@@ -287,6 +285,10 @@ WARMUP_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 3)
 WARMUP_RETRY_DELAY = _env_float("APP_OLLAMA_RETRY_DELAY", 1.2)
 WARMUP_GRACE_SEC = _env_float("APP_OLLAMA_GRACE_SEC", 10.0)
 
+# ---------- NEW: Direct-live settings ----------
+
+DIRECT_LIVE_DEFAULT = _env_bool01("APP_DIRECT_LIVE_DEFAULT", 0)
+
 # ---------- Ollama Vision settings (for style_engine to consume) ----------
 
 class OllamaVisionSettings(BaseModel):
@@ -411,6 +413,11 @@ class NegativePromptSettings(BaseModel):
 
 class StylePromptSettings(BaseModel):
     style_positive: str = Field(default="", max_length=4000)
+
+# ---------- NEW: Direct-live settings API models ----------
+
+class DirectLiveSettings(BaseModel):
+    enabled: bool
 
 # Workflows API payloads
 class WorkflowItem(BaseModel):
@@ -695,6 +702,8 @@ class PipelineState:
     audio_stopped_broadcasted: bool = False
     style_positive: Optional[str] = None
     reference_text: Optional[str] = None
+    # NEW: Direct-live toggle
+    direct_live: bool = DIRECT_LIVE_DEFAULT
 
 STATE = PipelineState()
 STOP_DEBOUNCE_SEC = float(os.getenv("APP_STOP_DEBOUNCE_SEC", "2.0") or "2.0")
@@ -774,6 +783,8 @@ def _log_effective_config() -> None:
         f"tick={APP_SSE_TICK_SEC}s",
         "| vision:",
         f"enabled={VISION.enabled} mode={VISION.mode} local={VISION.local_url} remote={VISION.remote_url} cloud={VISION.cloud_url}",
+        "| direct_live:",
+        f"enabled={STATE.direct_live}",
     )
 
 # ---------- Runtime-aware backend wrapper ----------
@@ -954,16 +965,62 @@ async def audio_transcription_loop() -> None:
                         pass
                     else:
                         ctx = update_context_buffer(text)
-                        if not OLLAMA_DISABLED and (time.time() - STATE.last_llm_run_ts) >= float(LLM_INTERVAL_SEC):
+                        # NEW: Direct-live path or existing Ollama path, respecting interval
+                        if (time.time() - STATE.last_llm_run_ts) >= float(LLM_INTERVAL_SEC):
                             if not STATE.running:
                                 break
                             STATE.last_llm_run_ts = time.time()
-                            task = asyncio.create_task(run_llm_and_image(ctx))
-                            STATE.bg_tasks.add(task)
-                            def _done_cb(t: asyncio.Task):
-                                with contextlib.suppress(Exception):
-                                    STATE.bg_tasks.discard(t)
-                            task.add_done_callback(_done_cb)
+                            if STATE.direct_live:
+                                # Direct-live: bypass Ollama. Use Whisper context directly as prompt.
+                                async def _direct_task(prompt_text: str):
+                                    try:
+                                        await broadcast("status", "direct_live:on")
+                                        used = prompt_text.strip()
+                                        if not used:
+                                            return
+                                        # Merge style + reference as in other code paths
+                                        eff_prompt = merge_style_prompt(used, getattr(STATE, "style_positive", None))
+                                        eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
+                                        STATE.last_prompt = eff_prompt
+                                        await broadcast("llm_prompt", eff_prompt)  # reuse event name for UI
+                                        # Generate image with negative/size handling
+                                        try:
+                                            if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
+                                                if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
+                                                    setattr(BACKEND.cfg, "negative", STATE.negative_prompt or "")
+                                            path = await _generate_with_negative_support(
+                                                prompt=eff_prompt,
+                                                width=STATE.image_width,
+                                                height=STATE.image_height,
+                                                negative=STATE.negative_prompt,
+                                            )
+                                            path = ensure_in_output_dir(path)
+                                            rel = rel_for_ui_path(path)
+                                            await broadcast("image", rel)
+                                            await broadcast("status", "direct_generate_ok")
+                                        except Exception as ge:
+                                            tb = traceback.format_exc()
+                                            print(f"[DIRECT] image generation error: {ge}\n{tb}")
+                                            await broadcast("status", f"direct_generate_error:{ge}")
+                                    except Exception as e:
+                                        tb = traceback.format_exc()
+                                        print(f"[DIRECT] pipeline error: {e}\n{tb}")
+                                        await broadcast("status", f"direct_pipeline_error:{e}")
+
+                                task = asyncio.create_task(_direct_task(ctx))
+                                STATE.bg_tasks.add(task)
+                                def _done_cb(t: asyncio.Task):
+                                    with contextlib.suppress(Exception):
+                                        STATE.bg_tasks.discard(t)
+                                task.add_done_callback(_done_cb)
+                            else:
+                                # Existing path: use Ollama optimization + image generation
+                                task = asyncio.create_task(run_llm_and_image(ctx))
+                                STATE.bg_tasks.add(task)
+                                def _done_cb2(t: asyncio.Task):
+                                    with contextlib.suppress(Exception):
+                                        STATE.bg_tasks.discard(t)
+                                task.add_done_callback(_done_cb2)
 
             max_keep = int(SAMPLE_RATE * MAX_SEGMENT_SEC)
             if buf.size > (max_keep * 2):
@@ -1300,6 +1357,7 @@ async def get_config():
             "remote_url": VISION.remote_url,
             "cloud_url": VISION.cloud_url,
         },
+        "direct_live": {"enabled": STATE.direct_live},  # NEW: expose direct-live flag
     }
 
 # ---------- Workflows API ----------
@@ -1446,6 +1504,18 @@ async def shutdown_server():
 async def _exit_after_delay():
     await asyncio.sleep(0.2)
     os._exit(0)
+
+# ---------- NEW: Direct-live settings endpoints ----------
+
+@app.get("/api/settings/direct_live", response_model=DirectLiveSettings)
+async def get_direct_live():
+    return DirectLiveSettings(enabled=bool(STATE.direct_live))
+
+@app.post("/api/settings/direct_live", response_model=DirectLiveSettings)
+async def set_direct_live(cfg: DirectLiveSettings):
+    STATE.direct_live = bool(cfg.enabled)
+    await broadcast("status", f"direct_live:{'on' if STATE.direct_live else 'off'}")
+    return DirectLiveSettings(enabled=STATE.direct_live)
 
 # ---------- Ollama APIs ----------
 
@@ -1920,8 +1990,15 @@ def _pick_remote_from_env_or_req(req: BridgeSyncRequest) -> tuple[str, str, int]
         scheme = "http"
     return scheme, host, port
 
+# Early-exit helper for tunnel sync in this module (used by /api/bridge/sync_tunnel callers)
+def _is_remote_mode() -> bool:
+    return (os.getenv("APP_COMFY_MODE") or "auto").strip().lower() == "remote"
+
 @app.post("/api/bridge/sync_tunnel", response_model=BridgeSyncResponse)
 async def api_bridge_sync_tunnel(payload: BridgeSyncRequest = Body(default_factory=BridgeSyncRequest)):
+    # Early-exit: only perform tunnel sync in remote mode
+    if not _is_remote_mode():
+        return BridgeSyncResponse(ok=False, saved=[], tried=[], errors=["mode_not_remote"])
     try:
         scheme, host, port = _pick_remote_from_env_or_req(payload)
         if not host:
@@ -2432,6 +2509,41 @@ if __name__ == "__main__":
     host = os.getenv("APP_BIND_HOST", "127.0.0.1")
     port = int(os.getenv("APP_BIND_PORT", "8080"))
     uvicorn.run("app:app", host=host, port=port, reload=False)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -3975,6 +4087,26 @@ def inject_negatives_for_final_prompt(prompt: str, negative: str | None) -> str:
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # style_engine.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
@@ -4202,6 +4334,24 @@ def _httpx_limits() -> httpx.Limits:
 def _timeout_generic() -> httpx.Timeout:
     return httpx.Timeout(connect=8.0, read=HTTP_TIMEOUT_SEC, write=30.0, pool=8.0)
 
+# Friendly defaults for CDNs (minimal, non-invasive)
+DEFAULT_HEADERS = {
+    "User-Agent": "slAIdshow/1.0 (+https://github.com/neuraplus-ai/slAIdshow)",
+    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
+WIKI_REFERER = "https://de.wikipedia.org/"
+
+def _headers_for_url(url: str, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    h = dict(DEFAULT_HEADERS)
+    if "wikipedia.org" in url or "wikimedia.org" in url:
+        h["Referer"] = WIKI_REFERER
+    if extra:
+        h.update(extra)
+    return h
+
 async def _get_with_retries(
     client: httpx.AsyncClient,
     url: str,
@@ -4214,7 +4364,16 @@ async def _get_with_retries(
     delay = float(base_delay)
     for attempt in range(1, int(max_retries) + 1):
         try:
-            r = await client.get(url, headers=headers)
+            # Use friendly headers and follow redirects; keep explicit headers additive
+            req_headers = _headers_for_url(url, headers)
+            r = await client.get(url, headers=req_headers, follow_redirects=True)
+            # Special handling for Wikimedia thumbs that sometimes 403 on first GET
+            if r.status_code == 403 and "upload.wikimedia.org" in url:
+                try:
+                    await client.head(url, headers=req_headers, follow_redirects=True)
+                    r = await client.get(url, headers=req_headers, follow_redirects=True)
+                except Exception:
+                    pass
             r.raise_for_status()
             return r
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
@@ -4238,7 +4397,11 @@ async def _post_json_with_retries(
     delay = float(base_delay)
     for attempt in range(1, int(max_retries) + 1):
         try:
-            r = await client.post(url, json=json, headers=headers)
+            h = dict(headers or {})
+            # Keep default UA to be nice to local/remote services; not strictly required here
+            if "User-Agent" not in h:
+                h["User-Agent"] = DEFAULT_HEADERS["User-Agent"]
+            r = await client.post(url, json=json, headers=h)
             r.raise_for_status()
             return r
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
@@ -4343,6 +4506,7 @@ async def save_reference_from_url(url: str, filename_hint: Optional[str] = None)
         raise ValueError("invalid url")
 
     async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_generic(), follow_redirects=True, http2=True) as client:
+        # Use robust retries with friendly headers and redirect support
         r = await _get_with_retries(client, url)
         cl = int(r.headers.get("Content-Length", "0") or "0")
         if cl and cl > MAX_DOWNLOAD_BYTES:
@@ -5017,7 +5181,7 @@ def extract_style_with_label(image_path: Path, debug: bool = False) -> Tuple[str
 
 
 # =========================
-# Ollama Vision integration
+# Ollama Vision integration (enhanced URL routing + policy)
 # =========================
 
 VISION_SYS_PROMPT = (
@@ -5027,12 +5191,80 @@ VISION_SYS_PROMPT = (
     "Avoid meta commentary, avoid long sentences, no punctuation except commas."
 )
 
+def _normalize_url(u: Optional[str]) -> Optional[str]:
+    """
+    Ensure the URL has a scheme (http://) and no trailing slash. Accepts None and returns None.
+    """
+    if not u:
+        return None
+    u = u.strip()
+    if not u:
+        return None
+    if not re.match(r"^https?://", u, flags=re.I):
+        u = "http://" + u
+    return u.rstrip("/")
+
+def _url_is_localhost(u: str) -> bool:
+    """
+    Check whether the netloc is localhost/127.0.0.1/::1 regardless of scheme.
+    """
+    try:
+        # crude but robust: strip scheme, split host:port, ignore userinfo
+        s = re.sub(r"^https?://", "", u, flags=re.I)
+        s = s.split("/", 1)[0]
+        s = s.split("@")[-1]
+        host = s.split(":")[0].strip().lower()
+        return host in {"localhost", "127.0.0.1", "::1"}
+    except Exception:
+        return False
+
 def _validate_vision_policy(url: str) -> None:
+    """
+    Enforce policy: If APP_ALLOW_REMOTE_VISION=0 then only localhost/127.0.0.1/::1 are allowed.
+    Both http and https are accepted for localhost.
+    """
     if APP_ALLOW_REMOTE_VISION:
         return
-    # Enforce localhost if remote vision not allowed
-    if not (url.startswith("http://127.0.0.1:") or url.startswith("http://localhost:")):
+    if not _url_is_localhost(url):
         raise PermissionError("Remote Ollama vision access is disabled by policy (APP_ALLOW_REMOTE_VISION=0).")
+
+def _resolve_vision_url(
+    mode: Optional[str],
+    local_url: Optional[str],
+    remote_url: Optional[str],
+    cloud_url: Optional[str],
+) -> Tuple[str, str]:
+    """
+    Resolve effective (mode_used, base_url) with schema fix and sensible fallbacks.
+    Priority:
+      - If mode in {local,remote,cloud}: use the matching URL if given (normalized)
+      - Else pick the first available among local, remote, cloud (in that order)
+      - Else fallback to OLLAMA_VISION_URL
+    Returns (mode_used, base_url)
+    """
+    mode_norm = (mode or "").strip().lower() or "local"
+    cand_local = _normalize_url(local_url) or _normalize_url(OLLAMA_VISION_URL)
+    cand_remote = _normalize_url(remote_url)
+    cand_cloud = _normalize_url(cloud_url)
+
+    candidates: Dict[str, Optional[str]] = {
+        "local": cand_local,
+        "remote": cand_remote,
+        "cloud": cand_cloud,
+    }
+    chosen_mode = mode_norm if mode_norm in candidates else "local"
+    base = candidates.get(chosen_mode)
+    if not base:
+        # fallback order: local -> remote -> cloud -> env default
+        base = cand_local or cand_remote or cand_cloud or _normalize_url(OLLAMA_VISION_URL)
+        # infer mode from the chosen base if possible
+        if base == cand_remote:
+            chosen_mode = "remote"
+        elif base == cand_cloud:
+            chosen_mode = "cloud"
+        else:
+            chosen_mode = "local"
+    return chosen_mode, str(base)
 
 def _b64_from_file(path: Path) -> str:
     data = path.read_bytes()
@@ -5243,33 +5475,36 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
     else:
         resp.notes.append("No style_text_prompt provided.")
 
-    # 2) Ollama vision
+    # 2) Ollama vision (enhanced routing + policy + notes)
     if req.use_ollama_vision:
         if resolved_path is None:
             resp.notes.append("Ollama vision requested but no reference image resolved.")
         else:
-            ov_mode_url = None
-            mode = (req.ollama_vision_mode or "local").lower()
-            if mode in {"remote", "cloud"}:
-                ov_mode_url = (req.ollama_vision_remote_url or req.ollama_vision_cloud_url or req.ollama_vision_local_url or OLLAMA_VISION_URL)
-            else:
-                ov_mode_url = (req.ollama_vision_local_url or OLLAMA_VISION_URL)
+            # Resolve effective URL based on mode and per-mode URLs
+            mode_used, base_url = _resolve_vision_url(
+                req.ollama_vision_mode,
+                req.ollama_vision_local_url,
+                req.ollama_vision_remote_url,
+                req.ollama_vision_cloud_url,
+            )
             try:
-                print(f"[STYLE][vision] mode={mode} url={ov_mode_url} allow_remote={APP_ALLOW_REMOTE_VISION} ref={resolved_path}")
-                txt = await _ollama_vision_describe(resolved_path, mode_url=ov_mode_url)
+                print(f"[STYLE][vision] mode={mode_used} url={base_url} allow_remote={APP_ALLOW_REMOTE_VISION} ref={resolved_path}")
+                txt = await _ollama_vision_describe(resolved_path, mode_url=base_url)
                 print(f"[STYLE][vision] response_len={len(txt) if txt else 0} sample='{(txt or '')[:160]}'")
                 if txt:
                     resp.vision_text_used = _retokenize_limit(txt, MAX_TOKENS_VISION)
                     style_parts_in_order.append(resp.vision_text_used)
-                    resp.notes.append(f"Ollama vision used via {ov_mode_url} (mode={mode}, max {MAX_TOKENS_VISION} tokens).")
+                    resp.notes.append(f"Ollama vision used via {base_url} (mode={mode_used}, max {MAX_TOKENS_VISION} tokens).")
                 else:
                     resp.notes.append("Ollama vision returned empty text.")
             except PermissionError as pe:
                 print(f"[STYLE][vision][policy] {pe}")
                 resp.warnings.append(str(pe))
+                resp.notes.append(f"Ollama vision blocked by policy (mode={mode_used}, url={base_url}).")
             except Exception as e:
                 print(f"[STYLE][vision][error] {e}")
                 resp.warnings.append(f"ollama vision failed: {e}")
+                resp.notes.append(f"Ollama vision failed (mode={mode_used}, url={base_url}).")
     else:
         resp.notes.append("Ollama vision disabled by request.")
 
@@ -5395,6 +5630,10 @@ if __name__ == "__main__":
         print("B apply style_positive:", out_apply.style_positive, "| notes:", out_apply.notes, "| warnings:", out_apply.warnings)
 
     asyncio.run(_quick_test())
+
+
+
+
 
 
 
@@ -6513,6 +6752,15 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
 
 
 
+
+
+
+
+
+
+
+
+
 #web/index.html
 <!DOCTYPE html>
 <html lang="de">
@@ -6638,7 +6886,6 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
     #vision-hint { color: var(--warn); }
     .bridge-status { font-size:12px; color: var(--muted); }
 
-    /* New: header row for cloudflared section */
     .remote-head {
       display:flex; align-items:center; justify-content: space-between;
       gap: 8px; margin-bottom: 6px;
@@ -6649,6 +6896,14 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
     .remote-head .actions {
       display:flex; align-items:center; gap:8px;
     }
+
+    /* NEW: inline toggle look */
+    .toggle {
+      display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+      padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: #10141b;
+    }
+    .toggle input { transform: scale(1.05); }
+    .muted { color: var(--muted); }
   </style>
 </head>
 <body>
@@ -6796,6 +7051,7 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
 
           <div class="inline-input-line" style="margin-bottom:8px;">
             <input id="plan-input" type="text" placeholder="Text prompt to generate an image" />
+            <!-- Existing direct generate -->
             <button id="btn-direct">Direct Generate</button>
           </div>
 
@@ -6805,7 +7061,12 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
           </div>
 
           <div class="row" style="margin-bottom:8px;">
+            <!-- "Send to Ollama" (left) ... and NEW Direct live toggle (right next to it) -->
             <button id="btn-plan">Senden</button>
+            <label class="toggle right" title="Bypass text LLM; use raw Whisper transcripts">
+              <input type="checkbox" id="toggle-direct-live" />
+              <span id="label-direct-live">Direct live</span>
+            </label>
           </div>
 
           <div>
@@ -6920,6 +7181,9 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
         pull_fetching: "Hole PULL_URL …",
         pull_ok: "Remote angewendet",
         pull_fail: "PULL_URL fehlgeschlagen",
+        direct_live_label: "Direkt live",
+        direct_live_title: "LLM-Optimierung umgehen; rohe Whisper-Transkripte verwenden",
+        direct_live_on_hint: "Direktmodus aktiv: Rohtranskripte (ohne LLM)",
       },
       en: {
         brand: "slAIdshow | Local Speech-to-Image Pipeline",
@@ -7010,6 +7274,9 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
         pull_fetching: "Fetching PULL_URL …",
         pull_ok: "Remote applied",
         pull_fail: "PULL_URL failed",
+        direct_live_label: "Direct live",
+        direct_live_title: "Bypass text LLM; use raw Whisper transcripts",
+        direct_live_on_hint: "Direct mode active: raw transcripts (no LLM)",
       }
     };
 
@@ -7089,6 +7356,14 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       const btnPull = document.getElementById('btn-bridge-pull');
       if (btnPull) { btnPull.textContent = t('pull_btn_short'); btnPull.title = t('pull_btn_short'); }
 
+      // NEW: Direct live toggle label and title should follow language
+      const lblDirect = document.getElementById('label-direct-live');
+      if (lblDirect) lblDirect.textContent = t('direct_live_label');
+      const toggleDirect = document.getElementById('toggle-direct-live');
+      if (toggleDirect && toggleDirect.parentElement) {
+        toggleDirect.parentElement.title = t('direct_live_title');
+      }
+
       const statusEl = document.getElementById('status');
       if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
     }
@@ -7100,6 +7375,7 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       document.documentElement.lang = LANG;
       applyI18N();
       syncVisionHint();
+      syncDirectLiveHint();
     });
 
     // ---------- Utility ----------
@@ -7146,6 +7422,10 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
     const btnLoadUrl = $('#btn-load-url');
     const toggleVision = $('#toggle-vision');
     const visionHintEl = document.getElementById('vision-hint');
+
+    // NEW: Direct live toggle
+    const toggleDirectLive = document.getElementById('toggle-direct-live');
+    const labelDirectLive = document.getElementById('label-direct-live');
 
     let LAST_STYLE_POSITIVE = null;
 
@@ -7687,7 +7967,6 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       remoteBlock.classList.toggle('hidden', val !== 'comfyui-remote');
     });
 
-    // Apply from server PULL_URL (env-driven)
     async function applyFromPullEnv() {
       bridgeStatus.textContent = t('pull_fetching');
       try { await ensureCloudAllowed(); } catch {}
@@ -7699,7 +7978,7 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
           return null;
         }
       } catch {
-        // continue; backend may still use env internally
+        // continue
       }
       try {
         const r = await fetch('/api/bridge/apply_from_pull', {
@@ -7990,6 +8269,36 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       } catch {}
     });
 
+    // ---------- Direct live toggle wiring ----------
+    async function setDirectLive(enabled) {
+      try {
+        const r = await fetch('/api/settings/direct_live', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled })
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        log(statusLog, `direct_live → ${enabled ? 'on' : 'off'}`);
+        syncDirectLiveHint();
+      } catch (e) {
+        log(statusLog, `direct_live update failed: ${e}`);
+        // revert UI on error
+        toggleDirectLive.checked = !enabled;
+        syncDirectLiveHint();
+      }
+    }
+    function syncDirectLiveHint() {
+      if (toggleDirectLive.checked) {
+        // Show localized "Direct mode active" hint
+        statusEl.textContent = t('direct_live_on_hint');
+      } else {
+        // Do not overwrite current status when toggled off; only set to "Ready" if we are not actively connected state text
+        if (!statusEl.dataset.state || statusEl.dataset.state === 'connecting') {
+          statusEl.textContent = t('status_ready');
+        }
+      }
+    }
+
     // ---------- Initial config ----------
     async function refreshConfig() {
       try {
@@ -8050,6 +8359,23 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
           saveStyleState();
         }
 
+        // Hydrate direct_live toggle from server
+        // Honor explicit true from server only if user hasn't manually interacted yet.
+        // Default stays OFF unless server says true.
+        // Only set to true if serverDirect === true AND user hasn't explicitly toggled it yet.
+        const serverDirect = j?.direct_live === true;
+        const userInteracted = toggleDirectLive.dataset.userInteracted === '1';
+
+        // Default remains OFF unless explicitly true from server and no prior user override.
+        if (serverDirect && !userInteracted) {
+          toggleDirectLive.checked = true;
+        } else if (!userInteracted) {
+          toggleDirectLive.checked = false;
+        }
+        // if userInteracted, keep whatever the user set.
+
+        syncDirectLiveHint();
+
         if (statusEl.dataset.state !== 'connected') statusEl.textContent = t('status_ready');
       } catch (e) {
         log(statusLog, `config error: ${e}`);
@@ -8057,9 +8383,16 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       }
     }
 
-    // Wire the new PULL_URL button
+    // Wire the PULL_URL button
     btnBridgePull.addEventListener('click', async () => {
       await applyFromPullEnv();
+    });
+
+    // Toggle handler
+    toggleDirectLive.addEventListener('change', () => {
+      // Mark that the user explicitly changed the setting
+      toggleDirectLive.dataset.userInteracted = '1';
+      setDirectLive(toggleDirectLive.checked);
     });
 
     // ---------- Init ----------
@@ -8067,6 +8400,12 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       applyI18N();
       loadStyleState();
       syncVisionHint();
+
+      // Force UI default OFF before hydrating from server
+      toggleDirectLive.checked = false;
+      toggleDirectLive.dataset.uiDefaultApplied = '1';
+      syncDirectLiveHint();
+
       await refreshConfig();
 
       function onSizeInputChange() { updateSizePill(); scheduleSizeSync(); }
@@ -8085,6 +8424,15 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
   </div>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
 
 
 
