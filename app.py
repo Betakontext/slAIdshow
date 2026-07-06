@@ -1,4 +1,3 @@
-# app.py
 # -*- coding: utf-8 -*-
 # Production-ready FastAPI app for slAIdshow:
 # - Real-time audio → Whisper.cpp (pywhispercpp) → Ollama prompt → Image backend (ComfyUI or Pollinations)
@@ -1915,8 +1914,15 @@ def _pick_remote_from_env_or_req(req: BridgeSyncRequest) -> tuple[str, str, int]
         scheme = "http"
     return scheme, host, port
 
+# Early-exit helper for tunnel sync in this module (used by /api/bridge/sync_tunnel callers)
+def _is_remote_mode() -> bool:
+    return (os.getenv("APP_COMFY_MODE") or "auto").strip().lower() == "remote"
+
 @app.post("/api/bridge/sync_tunnel", response_model=BridgeSyncResponse)
 async def api_bridge_sync_tunnel(payload: BridgeSyncRequest = Body(default_factory=BridgeSyncRequest)):
+    # Early-exit: only perform tunnel sync in remote mode
+    if not _is_remote_mode():
+        return BridgeSyncResponse(ok=False, saved=[], tried=[], errors=["mode_not_remote"])
     try:
         scheme, host, port = _pick_remote_from_env_or_req(payload)
         if not host:
