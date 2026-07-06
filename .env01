@@ -12,7 +12,6 @@ APP_DISABLE_VAD=1
 APP_USE_WEBRTC_VAD=0
 APP_VAD_AGGRESSIVENESS=0
 APP_RMS_VAD_THRESHOLD=0.02
-# APP_RMS_VAD_THRESHOLD=0.015
 
 # Snapshot / segmentation
 APP_SNAPSHOT_SEC=4.0
@@ -21,7 +20,7 @@ APP_MAX_SILENCE_MS=1500
 APP_MAX_SEGMENT_SEC=15.0
 APP_FIRST_SNAPSHOT_DEADLINE_SEC=0.8
 
-# Frontend text filter
+# Frontend text filter (display-only; LLM triggering is separate below)
 APP_TEXT_MIN_CHARS=6
 APP_TEXT_MIN_WORDS=2
 APP_FORCE_MEANINGFUL_CHECK=1
@@ -37,7 +36,7 @@ APP_WHISPER_MIN_SEC=0.35
 APP_WHISPER_MIN_PEAK=0.0015
 
 # =========================
-# LLM prompt optimization via Ollama (local REST)
+# Image prompts via Ollama
 # =========================
 APP_CONTEXT_MAX_SEGMENTS=5
 APP_CONTEXT_MAX_CHARS=480
@@ -59,69 +58,54 @@ APP_OLLAMA_WARMUP_ENABLE=1
 APP_OLLAMA_WARMUP_TIMEOUT_SEC=45
 APP_OLLAMA_WARMUP_RETRY_DELAY=1.2
 
-# System prompt for prompt optimization
 APP_OLLAMA_SYS_PROMPT=Du bist Expertin/Experte für Bild-Prompting. Formuliere prägnante, anschauliche Prompts für Bildgeneratoren (z. B. SDXL), ohne Meta-Kommentare. Bevorzuge konkrete Motive, Stil, Licht, Komposition und Schlüsselattribute. Halte die Antwort kurz (1–2 Sätze). Antworte in der Sprache des Nutzers.
 
-# Choose ONE local-friendly model by default
+# Choose exactly one LLM model (local)
 APP_OLLAMA_MODEL=gemma3:1b
 # APP_OLLAMA_MODEL=phi3:mini
 # APP_OLLAMA_MODEL=llama3.2:latest
 # APP_OLLAMA_MODEL=qwen2.5:1.5b-instruct-q4_0
-# Cloud via Ollama (prompts may leave your machine):
+# Cloud model (optional)
 # APP_OLLAMA_MODEL=glm-4.7:cloud
 
 # =========================
-# Style analysis via Ollama vision
+# Style analysis via Ollama vision + local style engine
 # =========================
 APP_OLLAMA_VISION_MODEL=gemma3:27b-cloud
 APP_ALLOW_REMOTE_VISION=1
 FEATURE_OLLAMA_VISION_DEFAULT=1
-# FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON=1
 STYLE_ENGINE_MAX_TOKENS_STYLE_TEXT=40
 STYLE_ENGINE_MAX_TOKENS_VISION=24
 STYLE_ENGINE_MAX_TOKENS_DESCRIPTORS=12
 STYLE_ENGINE_MAX_TOKENS_FINAL=40
 
 # =========================
-# Image generation backend selection (UI can switch)
+# Image generation via ComfyUI (local/remote) or Pollinations (cloud)
 # =========================
-IMAGE_BACKEND=comfyui                 # comfyui | pollinations
-ALLOW_CLOUD_IMAGE_BACKEND=1
-APP_ALLOW_REMOTE_BACKENDS=1
-
-# Default output image size (applies to all backends if UI omits width/height)
+IMAGE_BACKEND=comfyui
 APP_IMAGE_WIDTH=1280
 APP_IMAGE_HEIGHT=720
 
-# Optional subnet restriction for LAN discovery
-APP_ALLOWED_SUBNETS=192.168.188.0/24
+# Allow cloud backends and remote ComfyUI
+ALLOW_CLOUD_IMAGE_BACKEND=1
+APP_ALLOW_REMOTE_BACKENDS=1
 
-# =========================
-# ComfyUI mode (UI can switch)
-# =========================
-# auto | local | remote
-APP_COMFY_MODE=auto
+# ComfyUI connection (cloudflared tunnel host or LAN host)
+# For cloudflared: use the tunnel hostname without scheme, and set SCHEME=https and PORT=443 for local and same LAN IP of Comfy host device SCHEME=http and PORT=8188
+APP_COMFY_HOST=empirical-columnists-deborah-careful.trycloudflare.com
+APP_COMFY_PORT=443
+APP_COMFY_SCHEME=https
+APP_COMFY_FORCE_VIEW_MODE=query
 
-# --- Local/LAN Comfy preset (same machine or LAN host) ---
-APP_COMFY_HOST=127.0.0.1              # Use LAN IP if ComfyUI runs on another device (e.g., 192.168.188.24)
-APP_COMFY_PORT=8188
+# Optional LAN discovery config
 APP_COMFY_FALLBACK_HOSTS=192.168.188.24
+APP_ALLOWED_SUBNETS=192.168.188.0/24
 AUTO_DISCOVERY_ENABLE=1
 AUTO_DISCOVERY_SUBNETS=192.168.188.0/24
 
-# --- Remote/Cloud Comfy preset (Cloudflared / other network) ---
-APP_COMFY_REMOTE_HOST=
-APP_COMFY_REMOTE_PORT=443
-APP_COMFY_REMOTE_SCHEME=https
-APP_COMFY_FORCE_VIEW_MODE=query
-# URL to ComfyUI endpoint to get the quick tunnel url from a Cloudflared remote ComfyUI
-PULL_URL=https://dev.betakontext.de/slAIdshow/bridge/tunnel_url.json
-
-# =========================
-# Pollinations (cloud image backend; always reachable)
-# =========================
+# Pollinations (cloud backend; only used if selected)
 POLLINATIONS_API_BASE=https://gen.pollinations.ai
-POLLINATIONS_SECRET=
+POLLINATIONS_SECRET=sk_iFIDaZ4xsL0v4cUwV2JMDBxnEk5dfm9l
 POLLINATIONS_MODEL=flux
 POLLINATIONS_NOLOGO=1
 POLLINATIONS_SEED=1234
@@ -130,26 +114,25 @@ POLLINATIONS_WIDTH=
 POLLINATIONS_HEIGHT=
 POLLINATIONS_INLINE_NEG=1
 
-# =========================
-# ComfyUI workflow and common settings
-# =========================
+# ComfyUI workflow + timeouts
 APP_COMFY_WORKFLOW=./workflows/text2img_SD15-FP16.json
 APP_DISABLE_COMFYUI=0
 APP_COMFY_TIMEOUT_SEC=240
 APP_COMFY_WIDTH=
 APP_COMFY_HEIGHT=
+
+# App HTTP server bind
+APP_BIND_HOST=127.0.0.1
+APP_BIND_PORT=8080
+
+# Style node mapping/weights
 APP_COMFY_NODE_STYLE_POS=8
 APP_COMFY_NODE_COND_COMBINE=9
 APP_COMFY_STYLE_WEIGHT=1.8
 
 # =========================
-# Server bind (this FastAPI app)
-# =========================
-APP_BIND_HOST=127.0.0.1               # 127.0.0.1 = local only; 0.0.0.0 = expose to LAN
-APP_BIND_PORT=8080
-
-# =========================
 # Outputs
 # =========================
+# If using local ComfyUI outputs on the same machine, point to its output folder
 APP_COMFY_OUTPUT_DIR=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/output/
 APP_OUTPUT_DIR=./outputs/images

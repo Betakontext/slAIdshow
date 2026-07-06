@@ -1,7 +1,43 @@
-#comfyui_bridge.py
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
+# --------------------------------------------------------------------------------------
+# Production-grade ComfyUI bridge with robust remote (tunnel) handling + bridge artifacts.
+#
+# JSON-only variant:
+# - Fetches only 'tunnel_url.json' from remote ComfyUI. Any previous TXT handling is removed.
+# - Keeps existing behavior: pre/post artifact copy around image generation in remote/query mode.
+# - Uses the SAME download mechanism as images (ComfyUI /api/view or /view), with retries.
+# - Adds FS fallback for artifacts when APP_COMFY_OUTPUT_DIR is set.
+# - Tests common subfolders for artifacts ("", "tunnels", "bridge") in addition to folder_type.
+#
+# FastAPI router exposing:
+#   GET  /api/settings/pull_url            -> returns the PULL_URL from env (for UI prefill/debug)
+#   POST /api/bridge/apply_from_pull       -> fetches JSON at PULL_URL (or body override), parses "url",
+#                                             computes scheme/host/port, applies remote settings server-side
+#
+# Internal application of settings via local API calls (idempotent):
+#   POST /api/settings/image_allow_cloud
+#   POST /api/settings/image_backend      {backend:"comfyui"}
+#   POST /api/settings/comfy_remote       {host,port,scheme}
+#   POST /api/settings/comfy_mode         {mode:"remote"}
+#
+# Public API:
+#   - override_prompt_inplace(...)
+#   - generate_from_prompt_dict(..., copy_bridge_artifacts: bool = True)
+#   - sync_bridge_artifacts(host: str, port: int, *, view_mode: Optional[str] = None) -> Dict[str, int]
+#   - bridge_router (FastAPI APIRouter): register via app.include_router(bridge_router, prefix="/api")
+#
+# Env expectations for remote:
+#   APP_ALLOW_REMOTE_BACKENDS=1
+#   APP_COMFY_SCHEME=https
+#   APP_COMFY_FORCE_VIEW_MODE=query
+#   (host is non-local, port likely 443)
+#
+# Env for pull/apply:
+#   PULL_URL=https://.../tunnel_url.json
+#   APP_PULL_TIMEOUT_SEC=3
+#   APP_PULL_RETRIES=3
+#   APP_INTERNAL_API_BASE=http://127.0.0.1:8080   # Base used to call local settings endpoints
+# --------------------------------------------------------------------------------------
+# comfyui_bridge.py
 from __future__ import annotations
 
 import asyncio
@@ -12,14 +48,25 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Iterable
-from urllib.parse import urlencode, quote
+from urllib.parse import urlencode, quote, urlparse
 
 import httpx
 from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Body
+from fastapi.responses import JSONResponse
 
 # -----------------------------
 # Env helpers & host policy
 # -----------------------------
+def _is_private_or_local_host(host: str) -> bool:
+    h = (host or "").strip().lower()
+    if h in {"127.0.0.1", "localhost", "::1"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+        return ip.is_private or ip.is_loopback or ip.is_link_local
+    except ValueError:
+        return False
 
 def _env_str(k: str, d: str = "") -> str:
     return (os.getenv(k, d) or "").strip()
@@ -27,6 +74,12 @@ def _env_str(k: str, d: str = "") -> str:
 def _env_bool01(k: str, d: int = 0) -> bool:
     v = (os.getenv(k, str(d)) or "").strip().lower()
     return v in {"1", "true", "yes", "on"}
+
+def _env_int(k: str, d: int) -> int:
+    try:
+        return int((os.getenv(k, str(d)) or "").strip())
+    except Exception:
+        return d
 
 def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
     try:
@@ -45,9 +98,10 @@ def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
 
 def _assert_image_backend_host_policy(host: str) -> None:
     """
-    Privacy policy:
+    Privacy/safety policy:
     - Always allow loopback.
-    - Remote only if APP_ALLOW_REMOTE_BACKENDS=1 and optional subnets allowlist matches.
+    - Remote only if APP_ALLOW_REMOTE_BACKENDS=1 and, if provided, APP_ALLOWED_SUBNETS allows the IP.
+      Hostnames (e.g., Cloudflared hosts) bypass subnet check because we cannot pre-resolve safely here.
     """
     if host in {"127.0.0.1", "localhost"}:
         return
@@ -57,6 +111,7 @@ def _assert_image_backend_host_policy(host: str) -> None:
     subnets = _env_str("APP_ALLOWED_SUBNETS", "")
     if not subnets:
         return
+    # If host is an IP, enforce subnet allowlist; if hostname, skip (cannot reliably map CNAMEs here).
     try:
         ipaddress.ip_address(host)
     except ValueError:
@@ -67,6 +122,12 @@ def _assert_image_backend_host_policy(host: str) -> None:
 # Optional filesystem fallback when /view is unavailable or unsuitable (mounted output dir).
 _COMFY_OUTPUT_DIR: Optional[Path] = Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).resolve() if _env_str("APP_COMFY_OUTPUT_DIR", "") else None
 
+# Local bridge dir for discovery artifacts exposed under /static/bridge/ by the server
+_LOCAL_BRIDGE_DIR: Path = Path("outputs/images/bridge").resolve()
+
+# Internal API base (self calls to apply settings)
+_INTERNAL_API_BASE: str = _env_str("APP_INTERNAL_API_BASE", "http://127.0.0.1:8080").rstrip("/")
+
 # -----------------------------
 # Connection / helpers
 # -----------------------------
@@ -74,18 +135,35 @@ _COMFY_OUTPUT_DIR: Optional[Path] = Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).r
 class ComfyConnection(BaseModel):
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=8188)
+    scheme: Optional[str] = Field(default=None)  # 'http' or 'https'; if None, auto by port or env
 
     @property
     def base(self) -> str:
+        """
+        Build base URL with proper scheme.
+        - Prefer explicit APP_COMFY_SCHEME if provided.
+        - Else use provided scheme.
+        - Else auto-select https when port == 443, otherwise http.
+        """
         _assert_image_backend_host_policy(self.host)
-        return f"http://{self.host}:{self.port}"
+        env_scheme = (_env_str("APP_COMFY_SCHEME") or "").lower()
+        scheme = (self.scheme or env_scheme or "").strip()
+        if scheme not in {"http", "https"}:
+            scheme = "https" if int(self.port) == 443 else "http"
+        base = f"{scheme}://{self.host}:{self.port}"
+        print(f"[COMFY BASE] {base}")
+        return base
 
 def _limits() -> httpx.Limits:
+    # Keep connections warm but conservative
     return httpx.Limits(max_keepalive_connections=8, max_connections=16, keepalive_expiry=30.0)
 
 def _timeout(total: float = 150.0) -> httpx.Timeout:
+    # Boundaries to prevent runaway timeouts; adds headroom for long generations
     total = max(30.0, min(total, 300.0))
-    return httpx.Timeout(connect=5.0, read=total, write=8.0, pool=8.0)
+    connect = float(_env_str("APP_COMFY_CONNECT_TIMEOUT_SEC", "5") or "5")
+    connect = max(2.0, min(connect, 30.0))
+    return httpx.Timeout(connect=connect, read=total, write=12.0, pool=8.0)
 
 def _clamp_dim(v: Optional[int]) -> Optional[int]:
     if v is None:
@@ -95,17 +173,20 @@ def _clamp_dim(v: Optional[int]) -> Optional[int]:
     return x - (x % 8)
 
 def _select_view_mode(host: str) -> str:
-    """
-    Decide view mode: 'path' for local, 'query' for remote.
-    Override via APP_COMFY_FORCE_VIEW_MODE in {'auto','path','query'}.
-    """
     override = _env_str("APP_COMFY_FORCE_VIEW_MODE", "auto").lower()
     if override in {"path", "query"}:
         return override
-    # auto
-    if host in {"127.0.0.1", "localhost"}:
-        return "path"
-    return "query"
+    return "path" if _is_private_or_local_host(host) else "query"
+
+def _classify_base_url(base_url: str) -> Tuple[bool, str]:
+    """
+    Returns (host_is_private, scheme) for base_url.
+    """
+    try:
+        parsed = httpx.URL(base_url)
+        return _is_private_or_local_host(parsed.host or ""), (parsed.scheme or "").lower()
+    except Exception:
+        return False, ""
 
 # -----------------------------
 # Prompt manipulation
@@ -186,7 +267,7 @@ def override_prompt_inplace(
     return payload
 
 # -----------------------------
-# HTTP calls
+# HTTP calls to ComfyUI
 # -----------------------------
 
 async def _post_prompt(
@@ -194,14 +275,21 @@ async def _post_prompt(
     base_url: str,
     body: Dict[str, Any],
 ) -> str:
+    """
+    POST /prompt with retries. Classify HTTP 400 as prompt/workflow error (reachable),
+    not as 'unavailable'. Includes HTTPS→HTTP fallback for LAN/private hosts when TLS is wrong.
+    """
     delay = 0.8
     last_exc: Optional[Exception] = None
     for attempt in range(1, 5):
         try:
-            r = await client.post(f"{base_url}/prompt", json=body)
+            url = f"{base_url}/prompt"
+            print(f"DEBUG comfy POST {url} attempt#{attempt}")
+            r = await client.post(url, json=body)
             if r.status_code == 400:
-                text = r.text[:300].replace("\n", " ")
-                raise RuntimeError(f"comfy_400: {text}")
+                text = r.text[:500].replace("\n", " ")
+                print(f"DEBUG comfy POST /prompt 400 body: {text}")
+                raise RuntimeError(f"comfy_prompt_invalid_400: {text}")
             r.raise_for_status()
             j = r.json()
             if not isinstance(j, dict):
@@ -211,15 +299,38 @@ async def _post_prompt(
                 raise RuntimeError("comfy_no_prompt_id")
             print(f"DEBUG comfy prompt_id: {pid}")
             return str(pid)
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
+        except Exception as e:
             last_exc = e
+            msg = str(e)
+            print(f"DEBUG comfy POST /prompt attempt#{attempt} failed: {repr(e)}")
+            # HTTPS→HTTP fallback for private/LAN hosts if TLS is wrong
+            host_is_private, scheme = _classify_base_url(base_url)
+            if host_is_private and scheme == "https" and "WRONG_VERSION_NUMBER" in msg:
+                http_base = "http://" + base_url.split("://", 1)[1]
+                try:
+                    print(f"DEBUG comfy POST /prompt HTTPS→HTTP fallback: retrying with {http_base}")
+                    r2 = await client.post(f"{http_base}/prompt", json=body)
+                    if r2.status_code == 400:
+                        text = r2.text[:500].replace("\n", " ")
+                        print(f"DEBUG comfy POST /prompt 400 body (fallback): {text}")
+                        raise RuntimeError(f"comfy_prompt_invalid_400: {text}")
+                    r2.raise_for_status()
+                    j = r2.json()
+                    if not isinstance(j, dict):
+                        raise RuntimeError(f"comfy_prompt_non_object: {type(j)}")
+                    pid = j.get("prompt_id") or j.get("promptId") or j.get("id")
+                    if not pid:
+                        raise RuntimeError("comfy_no_prompt_id")
+                    print(f"DEBUG comfy prompt_id (fallback): {pid}")
+                    return str(pid)
+                except Exception as e2:
+                    print(f"DEBUG comfy POST /prompt fallback failed: {repr(e2)}")
+            # Normal retry backoff
             if attempt < 4:
                 await asyncio.sleep(delay)
                 delay *= 1.7
                 continue
             break
-        except Exception:
-            raise
     raise RuntimeError(f"comfy_post_prompt_failed: {last_exc}")
 
 def _node_maps_from_history_obj(history_json: Dict[str, Any], prompt_id: str) -> List[Dict[str, Any]]:
@@ -265,11 +376,34 @@ async def _poll_history_ready(
     deadline = time.time() + max_wait_sec
     last_payload: Optional[Dict[str, Any]] = None
     while time.time() < deadline:
-        r = await client.get(f"{base_url}/history/{prompt_id}")
-        if r.status_code == 404:
-            await asyncio.sleep(poll_interval)
-            continue
-        r.raise_for_status()
+        url = f"{base_url}/history/{prompt_id}"
+        try:
+            r = await client.get(url)
+            if r.status_code == 404:
+                await asyncio.sleep(poll_interval)
+                continue
+            r.raise_for_status()
+        except Exception as e:
+            msg = str(e)
+            print(f"DEBUG comfy GET /history error: {repr(e)} url={url}")
+            host_is_private, scheme = _classify_base_url(base_url)
+            if host_is_private and scheme == "https" and "WRONG_VERSION_NUMBER" in msg:
+                http_base = "http://" + base_url.split("://", 1)[1]
+                try:
+                    print(f"DEBUG comfy GET /history HTTPS→HTTP fallback: retrying with {http_base}")
+                    r = await client.get(f"{http_base}/history/{prompt_id}")
+                    if r.status_code == 404:
+                        await asyncio.sleep(poll_interval)
+                        continue
+                    r.raise_for_status()
+                except Exception as e2:
+                    print(f"DEBUG comfy GET /history fallback failed: {repr(e2)}")
+                    await asyncio.sleep(poll_interval)
+                    continue
+            else:
+                await asyncio.sleep(poll_interval)
+                continue
+
         j = r.json()
         if not isinstance(j, dict):
             await asyncio.sleep(poll_interval)
@@ -356,8 +490,8 @@ async def _download_via_view_path(
                 print(f"DEBUG comfy GET[path] status={r.status_code} bytes={len(r.content) if r.content else 0}")
                 r.raise_for_status()
                 data = r.content
-                if not data or len(data) < 256:
-                    raise RuntimeError("image_download_too_small")
+                if not data or len(data) < 64:
+                    raise RuntimeError("download_too_small")
                 return data
             except Exception as e:
                 last_exc = e
@@ -368,7 +502,7 @@ async def _download_via_view_path(
                     break
     if last_exc:
         raise last_exc
-    raise RuntimeError("image_download_failed_unknown_path")
+    raise RuntimeError("download_failed_unknown_path")
 
 async def _download_via_view_query(
     client: httpx.AsyncClient,
@@ -379,40 +513,72 @@ async def _download_via_view_query(
 ) -> bytes:
     """
     Download via query style: /api/view?filename=...&type=...&subfolder=...
-    Tries multiple (type,subfolder,filename) candidates; parameters are URL-encoded via urlencode.
+    Tries multiple (type, subfolder, filename) candidates.
+    IMPORTANT: Do NOT include 'subfolder' when it is empty, as some tunnels/proxies mishandle empty params.
     """
     filename = (filename or "").strip().lstrip("/")
     candidates = _build_view_candidates(folder_type, subfolder, filename)
     last_exc: Optional[Exception] = None
+
+    headers = {
+        "Accept": "*/*",
+        "Cache-Control": "no-cache",
+        "Connection": "close",
+        "Accept-Encoding": "identity",
+    }
+
+    # Classify host once for HTTPS→HTTP fallback decision
+    try:
+        parsed = httpx.URL(base_url)
+        host_is_private = _is_private_or_local_host(parsed.host or "")
+    except Exception:
+        host_is_private = False
+
     for idx, (t, s, f) in enumerate(candidates, start=1):
-        params = {
-            "filename": f,
-            "type": (t or "output"),
-            "subfolder": (s or ""),
-        }
-        qs = urlencode(params, safe="/")
+        params = {"filename": f, "type": (t or "output")}
+        s_clean = (s or "").strip().strip("/")
+        if s_clean:
+            params["subfolder"] = s_clean
+
+        qs = urlencode(params, quote_via=quote, safe="")
         url = f"{base_url}/api/view?{qs}"
-        delay = 0.2
-        for attempt in range(1, 3):
+
+        delays = [0.2, 0.4, 0.8, 1.2]
+        for attempt, delay in enumerate(delays, start=1):
             try:
                 print(f"DEBUG comfy GET[query] try#{attempt} cand#{idx}: {url}")
-                r = await client.get(url)
+                r = await client.get(url, headers=headers)
                 print(f"DEBUG comfy GET[query] status={r.status_code} bytes={len(r.content) if r.content else 0}")
                 r.raise_for_status()
                 data = r.content
-                if not data or len(data) < 256:
-                    raise RuntimeError("image_download_too_small")
+                if not data or len(data) < 64:
+                    raise RuntimeError(f"download_too_small (url={url})")
                 return data
             except Exception as e:
                 last_exc = e
-                if attempt < 2:
+                print(f"DEBUG comfy GET[query] error: {repr(e)} (url={url})")
+                # One-shot fallback: WRONG_VERSION_NUMBER when using https against HTTP-only ComfyUI on private/LAN hosts
+                msg = str(e)
+                if host_is_private and base_url.startswith("https://") and "WRONG_VERSION_NUMBER" in msg:
+                    http_base = "http://" + base_url.split("://", 1)[1]
+                    try:
+                        print(f"DEBUG comfy GET[query] HTTPS→HTTP fallback: retrying with {http_base}")
+                        r2 = await client.get(f"{http_base}/api/view?{qs}", headers=headers)
+                        print(f"DEBUG comfy GET[query] fallback status={r2.status_code} bytes={len(r2.content) if r2.content else 0}")
+                        r2.raise_for_status()
+                        data = r2.content
+                        if data and len(data) >= 64:
+                            return data
+                    except Exception as e2:
+                        print(f"DEBUG comfy GET[query] fallback failed: {repr(e2)}")
+                if attempt < len(delays):
                     await asyncio.sleep(delay)
-                    delay *= 2.0
+                    continue
                 else:
                     break
     if last_exc:
         raise last_exc
-    raise RuntimeError("image_download_failed_unknown_query")
+    raise RuntimeError("download_failed_unknown_query")
 
 def _fs_fallback_read(folder_type: str, subfolder: str, filename: str) -> Optional[bytes]:
     if _COMFY_OUTPUT_DIR is None:
@@ -428,6 +594,76 @@ def _fs_fallback_read(folder_type: str, subfolder: str, filename: str) -> Option
     except Exception:
         return None
     return None
+
+# -----------------------------
+# Artifact copy (bridge) — JSON-only
+# -----------------------------
+
+async def _copy_bridge_artifacts(
+    client: httpx.AsyncClient,
+    base_url: str,
+    view_mode: str,
+    out_dir_bridge: Path,
+) -> Dict[str, int]:
+
+    try:
+        parsed = httpx.URL(base_url)
+        host_is_local = (parsed.host in {"127.0.0.1", "localhost"})
+        host_is_private = _is_private_or_local_host(parsed.host or "")
+    except Exception:
+        host_is_local = False
+        host_is_private = False
+
+    if view_mode != "query" or host_is_local or host_is_private:
+        print(f"[BRIDGE] skip tunnel artifact copy (view_mode={view_mode}, private={host_is_private}, host_is_local={host_is_local})")
+        return {"saved": 0, "errors": 0}
+
+    out_dir_bridge.mkdir(parents=True, exist_ok=True)
+
+    async def _try_fetch_json(filename: str) -> Optional[bytes]:
+        # Try candidates across folder types and common subfolders
+        subfolders = ["", "tunnels", "bridge"]
+        for folder_type in ("output", "temp"):
+            for sub in subfolders:
+                try:
+                    if view_mode == "query":
+                        return await _download_via_view_query(client, base_url, folder_type, sub, filename)
+                    else:
+                        return await _download_via_view_path(client, base_url, folder_type, sub, filename)
+                except Exception as e:
+                    print(f"DEBUG bridge artifact fetch failed for {filename} type={folder_type} sub='{sub}': {repr(e)}")
+                    continue
+        # FS fallback attempts with same subfolders
+        for sub in ["", "tunnels", "bridge"]:
+            data = _fs_fallback_read("output", sub, filename) or _fs_fallback_read("temp", sub, filename)
+            if data:
+                return data
+        return None
+
+    saved = 0
+    errors = 0
+
+    # JSON-only handling
+    fname = "tunnel_url.json"
+    try:
+        data = await _try_fetch_json(fname)
+        if data and len(data) >= 3:
+            target = out_dir_bridge / fname
+            target.write_bytes(data)
+            saved += 1
+            print(f"[BRIDGE] saved {fname} bytes={len(data)} -> {target}")
+        else:
+            print(f"[BRIDGE] not found or too small: {fname}")
+            errors += 1
+    except Exception as e:
+        errors += 1
+        print(f"[BRIDGE] error saving {fname}: {repr(e)}")
+
+    return {"saved": saved, "errors": errors}
+
+# -----------------------------
+# Image downloads
+# -----------------------------
 
 async def _download_images(
     client: httpx.AsyncClient,
@@ -458,6 +694,8 @@ async def _download_images(
             if not filename:
                 continue
 
+            print(f"[HISTORY] chosen file='{filename}' type='{folder_type}' subfolder='{subfolder if subfolder else '(empty)'}'")
+
             delay = 0.8
             data: Optional[bytes] = None
             for attempt in range(1, 3):
@@ -467,14 +705,14 @@ async def _download_images(
                     else:
                         data = await _download_via_view_path(client, base_url, folder_type, subfolder, filename)
                     break
-                except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError):
+                except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
+                    print(f"DEBUG comfy download attempt#{attempt} failed: {repr(e)}")
                     if attempt < 2:
                         await asyncio.sleep(delay)
                         delay *= 1.7
                         continue
-                except Exception:
-                    # Fall through to FS fallback
-                    pass
+                except Exception as e:
+                    print(f"DEBUG comfy download unexpected error (will try FS fallback): {repr(e)}")
 
             if data is None:
                 data = _fs_fallback_read(folder_type, subfolder, filename)
@@ -486,6 +724,7 @@ async def _download_images(
             suffix = Path(filename).suffix or ".png"
             target = out_dir / f"img_{uuid.uuid4().hex}{suffix}"
             target.write_bytes(data)
+            print(f"DEBUG comfy saved image: {target.name} bytes={len(data)}")
             saved.append(target)
 
     if not found_any:
@@ -494,7 +733,7 @@ async def _download_images(
     return saved
 
 # -----------------------------
-# Public entry point
+# Public entry points (Comfy job)
 # -----------------------------
 
 async def generate_from_prompt_dict(
@@ -515,10 +754,18 @@ async def generate_from_prompt_dict(
     port: int = 8188,
     max_wait_sec: float = 150.0,
     poll_interval: float = 1.0,
+    copy_bridge_artifacts: bool = True,
 ) -> List[Path]:
     """
     Submit a ComfyUI API prompt dict, poll history, and download images to out_dir.
+    Additionally (when copy_bridge_artifacts=True), copy discovery artifacts
+    (tunnel_url.json) from the remote into outputs/images/bridge/ for the Web UI.
+
     Selects view mode automatically (path for local, query for remote) or via env override.
+
+    Caller responsibilities:
+    - Local/LAN: host=127.0.0.1 oder LAN-IP, Port 8188; APP_COMFY_SCHEME unset oder 'http'; APP_COMFY_FORCE_VIEW_MODE auto/path.
+    - Remote (Cloudflared): host=<tunnel-host>, Port 443; setze APP_COMFY_SCHEME=https und APP_COMFY_FORCE_VIEW_MODE=query.
     """
     payload = override_prompt_inplace(
         body=prompt_dict,
@@ -534,13 +781,246 @@ async def generate_from_prompt_dict(
         seed=seed,
     )
 
-    conn = ComfyConnection(host=host, port=port)
+    conn = ComfyConnection(
+        host=host,
+        port=port,
+        scheme=(_env_str("APP_COMFY_SCHEME") or None)
+    )
     base = conn.base
     view_mode = _select_view_mode(conn.host)
     print(f"[COMFY VIEW MODE] {view_mode} (host={conn.host})")
+    print(f"[COMFY ENDPOINTS] prompt={base}/prompt history={base}/history/{{prompt_id}} view={'/api/view?...' if view_mode=='query' else '/view/...'}")
 
     async with httpx.AsyncClient(limits=_limits(), timeout=_timeout(max_wait_sec + 30)) as client:
+        # Best-effort: copy bridge artifacts up-front — only in remote/query mode and for non-private hosts (true tunnels)
+        try:
+            parsed = httpx.URL(base)
+            host_is_private = _is_private_or_local_host(parsed.host or "")
+        except Exception:
+            host_is_private = False
+
+        if copy_bridge_artifacts and view_mode == "query" and not host_is_private:
+            try:
+                await _copy_bridge_artifacts(client, base, view_mode, _LOCAL_BRIDGE_DIR)
+            except Exception as e:
+                print(f"[BRIDGE] pre-copy error (ignored): {repr(e)}")
+
         prompt_id = await _post_prompt(client, base, payload)
         history_obj = await _poll_history_ready(client, base, prompt_id, max_wait_sec=max_wait_sec, poll_interval=poll_interval)
+
+        # Try again after generation (common case: artifacts appear during/after runs)
+        if copy_bridge_artifacts and view_mode == "query" and not host_is_private:
+            try:
+                await _copy_bridge_artifacts(client, base, view_mode, _LOCAL_BRIDGE_DIR)
+            except Exception as e:
+                print(f"[BRIDGE] post-copy error (ignored): {repr(e)}")
+
         images = await _download_images(client, base, history_obj, prompt_id, out_dir=Path(out_dir), view_mode=view_mode)
     return images
+
+async def sync_bridge_artifacts(
+    *,
+    host: str,
+    port: int,
+    view_mode: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Explicitly fetch tunnel_url.json from the active ComfyUI host and
+    save it into outputs/images/bridge/, so the Web UI (/static/bridge/...) can read it.
+
+    Usage:
+      - Call right after switching to remote mode in the UI, on app start, and on reload.
+      - Returns a JSON summary: {"saved": N, "errors": M, "host": "...", "base": "...", "view_mode": "query|path"}.
+
+    Notes:
+      - Enforces host policy (APP_ALLOW_REMOTE_BACKENDS=1 for non-local).
+      - Uses APP_COMFY_SCHEME and APP_COMFY_FORCE_VIEW_MODE to determine base URL and view mode when not provided.
+    """
+    conn = ComfyConnection(
+        host=host,
+        port=port,
+        scheme=(_env_str("APP_COMFY_SCHEME") or None),
+    )
+    base = conn.base
+    vm = view_mode or _select_view_mode(conn.host)
+    print(f"[BRIDGE SYNC] view_mode={vm} host={conn.host} base={base}")
+
+    async with httpx.AsyncClient(limits=_limits(), timeout=_timeout(30.0)) as client:
+        result = await _copy_bridge_artifacts(client, base, vm, _LOCAL_BRIDGE_DIR)
+        result.update({"host": host, "base": base, "view_mode": vm})
+        return result
+
+# -----------------------------
+# PULL_URL router (GET pull_url, POST apply_from_pull)
+# -----------------------------
+
+bridge_router = APIRouter()
+
+class ApplyFromPullIn(BaseModel):
+    pull_url: Optional[str] = None  # overrides env PULL_URL if provided
+
+class ApplyFromPullOut(BaseModel):
+    applied: bool
+    url: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    scheme: Optional[str] = None
+    error: Optional[str] = None
+    detail: Optional[str] = None
+
+def _short_timeout() -> httpx.Timeout:
+    # Short pulls to keep UI snappy; configurable via env
+    t = float(_env_int("APP_PULL_TIMEOUT_SEC", 3))
+    t = max(1.0, min(t, 15.0))
+    return httpx.Timeout(connect=2.0, read=t, write=2.0, pool=2.0)
+
+async def _pull_json_with_retries(url: str) -> Dict[str, Any]:
+    """
+    Fetch JSON from 'url' with retries and a cache-busting query param.
+    Expected structure: {"url": "https://<tunnel-host>[:port]"} or {"public_url": "..."} or {"comfy_url": "..."}.
+    """
+    retries = int(_env_int("APP_PULL_RETRIES", 3))
+    base_delay = 0.5
+    # add cachebuster
+    sep = "&" if "?" in url else "?"
+    url_cb = f"{url}{sep}t={int(time.time()*1000)}"
+    last_exc: Optional[Exception] = None
+    async with httpx.AsyncClient(limits=_limits(), timeout=_short_timeout(), follow_redirects=True) as client:
+        for attempt in range(1, retries + 1):
+            try:
+                r = await client.get(url_cb)
+                r.raise_for_status()
+                j = r.json()
+                if not isinstance(j, dict):
+                    raise ValueError("pull_json_not_object")
+                return j
+            except Exception as e:
+                last_exc = e
+                if attempt >= retries:
+                    break
+                await asyncio.sleep(base_delay)
+                base_delay *= 1.7
+    raise RuntimeError(f"pull_failed: {last_exc}")
+
+def _extract_url_field(j: Dict[str, Any]) -> Optional[str]:
+    """
+    Accept multiple possible keys to be tolerant: 'url', 'public_url', 'comfy_url'.
+    """
+    for k in ("url", "public_url", "comfy_url"):
+        val = j.get(k)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+def _parse_url_host_port_scheme(u: str) -> Tuple[str, int, str]:
+    """
+    Parse a URL into (host, port, scheme) with defaults (https→443, http→80).
+    """
+    up = urlparse(u)
+    scheme = (up.scheme or "https").lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError("unsupported_scheme")
+    host = (up.hostname or up.netloc or "").strip()
+    if not host:
+        raise ValueError("missing_host")
+    if up.port:
+        port = int(up.port)
+    else:
+        port = 443 if scheme == "https" else 80
+    if port < 1 or port > 65535:
+        raise ValueError("invalid_port")
+    return host, port, scheme
+
+async def _apply_remote_settings(host: str, port: int, scheme: str) -> None:
+    """
+    Apply settings by calling the local FastAPI endpoints in-order.
+    - image_allow_cloud -> true
+    - image_backend -> comfyui
+    - comfy_remote -> host/port/scheme
+    - comfy_mode -> remote
+    """
+    base = _INTERNAL_API_BASE
+    async with httpx.AsyncClient(limits=_limits(), timeout=_short_timeout()) as client:
+        # 1) allow cloud
+        r1 = await client.post(f"{base}/api/settings/image_allow_cloud", json={"allow": True})
+        if r1.status_code >= 300:
+            raise RuntimeError(f"image_allow_cloud_failed:{r1.status_code}")
+        # 2) switch backend
+        r2 = await client.post(f"{base}/api/settings/image_backend", json={"backend": "comfyui"})
+        if r2.status_code >= 300:
+            raise RuntimeError(f"image_backend_failed:{r2.status_code} {r2.text[:200]}")
+        # 3) set remote target
+        r3 = await client.post(f"{base}/api/settings/comfy_remote", json={"host": host, "port": port, "scheme": scheme})
+        if r3.status_code >= 300:
+            raise RuntimeError(f"comfy_remote_failed:{r3.status_code} {r3.text[:200]}")
+        # 4) set mode
+        r4 = await client.post(f"{base}/api/settings/comfy_mode", json={"mode": "remote"})
+        if r4.status_code >= 300:
+            raise RuntimeError(f"comfy_mode_failed:{r4.status_code} {r4.text[:200]}")
+
+@bridge_router.get("/settings/pull_url")
+async def get_pull_url():
+    """
+    Return the configured PULL_URL for UI diagnostics.
+    """
+    pull = _env_str("PULL_URL", "")
+    return {"pull_url": pull or ""}
+
+@bridge_router.post("/bridge/apply_from_pull", response_model=ApplyFromPullOut)
+async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyFromPullIn)):
+    """
+    Server-side "one-click" apply:
+    - Determine pull_url (body.pull_url or env PULL_URL)
+    - Fetch JSON with timeout/retries (expects a field 'url' or compatible)
+    - Parse host/port/scheme
+    - Apply via local settings endpoints (idempotent)
+    - Return applied parameters for UI to display
+    """
+    pull_url = (payload.pull_url or _env_str("PULL_URL", "")).strip()
+    if not pull_url:
+        return JSONResponse(
+            status_code=400,
+            content=ApplyFromPullOut(applied=False, error="missing_pull_url", detail="Configure PULL_URL in .env or pass in body").model_dump()
+        )
+
+    try:
+        doc = await _pull_json_with_retries(pull_url)
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content=ApplyFromPullOut(applied=False, error="pull_fetch_failed", detail=str(e)).model_dump()
+        )
+
+    url_val = _extract_url_field(doc)
+    if not url_val or not (url_val.startswith("http://") or url_val.startswith("https://")):
+        return JSONResponse(
+            status_code=400,
+            content=ApplyFromPullOut(applied=False, error="invalid_pull_payload", detail="Missing or invalid 'url' field").model_dump()
+        )
+
+    try:
+        host, port, scheme = _parse_url_host_port_scheme(url_val)
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content=ApplyFromPullOut(applied=False, error="parse_error", detail=str(e)).model_dump()
+        )
+
+    # Policy check (warn but do not block here; settings endpoint may enforce further)
+    try:
+        _assert_image_backend_host_policy(host)
+    except AssertionError as e:
+        # Continue to apply; policy for image backend selection is enforced elsewhere as well.
+        print(f"[PULL][policy] warning: {e}")
+
+    try:
+        await _apply_remote_settings(host, port, scheme)
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content=ApplyFromPullOut(applied=False, url=url_val, host=host, port=port, scheme=scheme, error="apply_failed", detail=str(e)).model_dump()
+        )
+
+    return ApplyFromPullOut(applied=True, url=url_val, host=host, port=port, scheme=scheme)
+
+# End router
