@@ -1,26 +1,23 @@
-# comfyui_bridge.py
 # --------------------------------------------------------------------------------------
 # Production-grade ComfyUI bridge with robust remote (tunnel) handling + bridge artifacts.
 #
-# This version adds:
-# - Deterministic remote artifact sync helper: sync_bridge_artifacts(host, port, ...)
-#   so the UI can fetch tunnel_url.json/txt immediately after switching to remote.
+# JSON-only variant:
+# - Fetches only 'tunnel_url.json' from remote ComfyUI. Any previous TXT handling is removed.
 # - Keeps existing behavior: pre/post artifact copy around image generation in remote/query mode.
 # - Uses the SAME download mechanism as images (ComfyUI /api/view or /view), with retries.
 # - Adds FS fallback for artifacts when APP_COMFY_OUTPUT_DIR is set.
 # - Tests common subfolders for artifacts ("", "tunnels", "bridge") in addition to folder_type.
 #
-# New in this revision:
-# - FastAPI router exposing:
-#     GET  /api/settings/pull_url            -> returns the PULL_URL from env (for UI prefill/debug)
-#     POST /api/bridge/apply_from_pull       -> fetches JSON at PULL_URL (or body override), parses "url",
-#                                               computes scheme/host/port, applies remote settings server-side
-# - Async httpx fetch with timeout/retries and a cachebuster.
-# - Internal application of settings via local API calls (idempotent):
-#     POST /api/settings/image_allow_cloud
-#     POST /api/settings/image_backend      {backend:"comfyui"}
-#     POST /api/settings/comfy_remote       {host,port,scheme}
-#     POST /api/settings/comfy_mode         {mode:"remote"}
+# FastAPI router exposing:
+#   GET  /api/settings/pull_url            -> returns the PULL_URL from env (for UI prefill/debug)
+#   POST /api/bridge/apply_from_pull       -> fetches JSON at PULL_URL (or body override), parses "url",
+#                                             computes scheme/host/port, applies remote settings server-side
+#
+# Internal application of settings via local API calls (idempotent):
+#   POST /api/settings/image_allow_cloud
+#   POST /api/settings/image_backend      {backend:"comfyui"}
+#   POST /api/settings/comfy_remote       {host,port,scheme}
+#   POST /api/settings/comfy_mode         {mode:"remote"}
 #
 # Public API:
 #   - override_prompt_inplace(...)
@@ -40,7 +37,7 @@
 #   APP_PULL_RETRIES=3
 #   APP_INTERNAL_API_BASE=http://127.0.0.1:8080   # Base used to call local settings endpoints
 # --------------------------------------------------------------------------------------
-
+# comfyui_bridge.py
 from __future__ import annotations
 
 import asyncio
@@ -523,7 +520,7 @@ def _fs_fallback_read(folder_type: str, subfolder: str, filename: str) -> Option
     return None
 
 # -----------------------------
-# Artifact copy (bridge)
+# Artifact copy (bridge) — JSON-only
 # -----------------------------
 
 async def _copy_bridge_artifacts(
@@ -533,18 +530,30 @@ async def _copy_bridge_artifacts(
     out_dir_bridge: Path,
 ) -> Dict[str, int]:
     """
-    Attempt to fetch tunnel_url.{json,txt} from the remote using the same view mechanism
-    and write them into outputs/images/bridge locally.
+    Attempt to fetch ONLY tunnel_url.json from the remote using the same view mechanism
+    and write it into outputs/images/bridge locally.
     Non-fatal on failure; logs and returns summary counts.
 
-    Improvements:
-    - Also tries common artifact subfolders: "", "tunnels", "bridge"
-    - Accepts smaller thresholds: JSON/TXT >= 3 bytes
-    - Uses FS fallback when APP_COMFY_OUTPUT_DIR is set
+    IMPORTANT: Skip entirely for local mode/hosts. Tunnel artifacts are only meaningful
+    for remote (query-mode) access. This prevents noisy retries in local mode.
     """
+
+    # Early exit: do not fetch any tunnel artifacts when running in local mode/host.
+    # - Local view_mode is typically 'path'
+    # - Also guard for local hosts explicitly
+    try:
+        parsed = httpx.URL(base_url)
+        host_is_local = (parsed.host in {"127.0.0.1", "localhost"})
+    except Exception:
+        host_is_local = False
+
+    if view_mode != "query" or host_is_local:
+        print(f"[BRIDGE] skip tunnel artifact copy (view_mode={view_mode}, host_is_local={host_is_local})")
+        return {"saved": 0, "errors": 0}
+
     out_dir_bridge.mkdir(parents=True, exist_ok=True)
 
-    async def _try_fetch_one(filename: str) -> Optional[bytes]:
+    async def _try_fetch_json(filename: str) -> Optional[bytes]:
         # Try candidates across folder types and common subfolders
         subfolders = ["", "tunnels", "bridge"]
         for folder_type in ("output", "temp"):
@@ -566,20 +575,23 @@ async def _copy_bridge_artifacts(
 
     saved = 0
     errors = 0
-    for fname in ("tunnel_url.json", "tunnel_url.txt"):
-        try:
-            data = await _try_fetch_one(fname)
-            if data and len(data) >= 3:
-                target = out_dir_bridge / fname
-                target.write_bytes(data)
-                saved += 1
-                print(f"[BRIDGE] saved {fname} bytes={len(data)} -> {target}")
-            else:
-                print(f"[BRIDGE] not found or too small: {fname}")
-                errors += 1
-        except Exception as e:
+
+    # JSON-only handling
+    fname = "tunnel_url.json"
+    try:
+        data = await _try_fetch_json(fname)
+        if data and len(data) >= 3:
+            target = out_dir_bridge / fname
+            target.write_bytes(data)
+            saved += 1
+            print(f"[BRIDGE] saved {fname} bytes={len(data)} -> {target}")
+        else:
+            print(f"[BRIDGE] not found or too small: {fname}")
             errors += 1
-            print(f"[BRIDGE] error saving {fname}: {repr(e)}")
+    except Exception as e:
+        errors += 1
+        print(f"[BRIDGE] error saving {fname}: {repr(e)}")
+
     return {"saved": saved, "errors": errors}
 
 # -----------------------------
@@ -680,7 +692,7 @@ async def generate_from_prompt_dict(
     """
     Submit a ComfyUI API prompt dict, poll history, and download images to out_dir.
     Additionally (when copy_bridge_artifacts=True), copy discovery artifacts
-    (tunnel_url.json/.txt) from the remote into outputs/images/bridge/ for the Web UI.
+    (tunnel_url.json) from the remote into outputs/images/bridge/ for the Web UI.
 
     Selects view mode automatically (path for local, query for remote) or via env override.
 
@@ -713,12 +725,12 @@ async def generate_from_prompt_dict(
     print(f"[COMFY ENDPOINTS] prompt={base}/prompt history={base}/history/{{prompt_id}} view={'/api/view?...' if view_mode=='query' else '/view/...'}")
 
     async with httpx.AsyncClient(limits=_limits(), timeout=_timeout(max_wait_sec + 30)) as client:
-        # Best-effort: copy bridge artifacts up-front (in case already published)
+        # Best-effort: copy bridge artifacts up-front — only in remote/query mode and non-local host
         if copy_bridge_artifacts and view_mode == "query" and host not in {"127.0.0.1", "localhost"}:
             try:
                 await _copy_bridge_artifacts(client, base, view_mode, _LOCAL_BRIDGE_DIR)
             except Exception as e:
-                print(f"[BRIDGE] pre-copy error: {repr(e)}")
+                print(f"[BRIDGE] pre-copy error (ignored): {repr(e)}")
 
         prompt_id = await _post_prompt(client, base, payload)
         history_obj = await _poll_history_ready(client, base, prompt_id, max_wait_sec=max_wait_sec, poll_interval=poll_interval)
@@ -728,7 +740,7 @@ async def generate_from_prompt_dict(
             try:
                 await _copy_bridge_artifacts(client, base, view_mode, _LOCAL_BRIDGE_DIR)
             except Exception as e:
-                print(f"[BRIDGE] post-copy error: {repr(e)}")
+                print(f"[BRIDGE] post-copy error (ignored): {repr(e)}")
 
         images = await _download_images(client, base, history_obj, prompt_id, out_dir=Path(out_dir), view_mode=view_mode)
     return images
@@ -740,8 +752,8 @@ async def sync_bridge_artifacts(
     view_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Explicitly fetch tunnel_url.json and tunnel_url.txt from the active ComfyUI host and
-    save them into outputs/images/bridge/, so the Web UI (/static/bridge/...) can read them.
+    Explicitly fetch tunnel_url.json from the active ComfyUI host and
+    save it into outputs/images/bridge/, so the Web UI (/static/bridge/...) can read it.
 
     Usage:
       - Call right after switching to remote mode in the UI, on app start, and on reload.
@@ -766,7 +778,7 @@ async def sync_bridge_artifacts(
         return result
 
 # -----------------------------
-# New: PULL_URL router (GET pull_url, POST apply_from_pull)
+# PULL_URL router (GET pull_url, POST apply_from_pull)
 # -----------------------------
 
 bridge_router = APIRouter()

@@ -17,19 +17,6 @@ Jegliche Code Erstellung auf strikt Englisch und in markdown Blöcken.
 Hier die Dateien auf dem derzeitigen Stand:
 
 # app.py
-# -*- coding: utf-8 -*-
-# Production-ready FastAPI app for slAIdshow:
-# - Real-time audio → Whisper.cpp (pywhispercpp) → Ollama prompt → Image backend (ComfyUI or Pollinations)
-# - Style pipeline integrated: style_engine builds style_positive (and reference_text) used in generation
-# - Extended: Runtime switching between Comfy modes (local | remote | auto) and remote target settings
-# - Extended: Debug endpoint to reveal effective image target
-# - NEW: Bridge endpoint to sync remote ComfyUI tunnel artifacts into /static/bridge
-#
-# This version integrates comfyui_bridge.bridge_router providing:
-#   - GET  /api/settings/pull_url
-#   - POST /api/bridge/apply_from_pull
-# and keeps all existing endpoints intact for backward compatibility.
-
 from __future__ import annotations
 
 import asyncio
@@ -2461,7 +2448,33 @@ if __name__ == "__main__":
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # image_backend.py
+
 
 from __future__ import annotations
 
@@ -3877,6 +3890,73 @@ def inject_negatives_for_final_prompt(prompt: str, negative: str | None) -> str:
         return prompt
     new_prompt, _preview = _inject_negatives_into_prompt_keyword(prompt, negative)
     return new_prompt
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -5337,6 +5417,44 @@ if __name__ == "__main__":
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # comfyui_bridge.py
 # --------------------------------------------------------------------------------------
 # Production-grade ComfyUI bridge with robust remote (tunnel) handling + bridge artifacts.
@@ -5349,16 +5467,35 @@ if __name__ == "__main__":
 # - Adds FS fallback for artifacts when APP_COMFY_OUTPUT_DIR is set.
 # - Tests common subfolders for artifacts ("", "tunnels", "bridge") in addition to folder_type.
 #
+# New in this revision:
+# - FastAPI router exposing:
+#     GET  /api/settings/pull_url            -> returns the PULL_URL from env (for UI prefill/debug)
+#     POST /api/bridge/apply_from_pull       -> fetches JSON at PULL_URL (or body override), parses "url",
+#                                               computes scheme/host/port, applies remote settings server-side
+# - Async httpx fetch with timeout/retries and a cachebuster.
+# - Internal application of settings via local API calls (idempotent):
+#     POST /api/settings/image_allow_cloud
+#     POST /api/settings/image_backend      {backend:"comfyui"}
+#     POST /api/settings/comfy_remote       {host,port,scheme}
+#     POST /api/settings/comfy_mode         {mode:"remote"}
+#
 # Public API:
 #   - override_prompt_inplace(...)
 #   - generate_from_prompt_dict(..., copy_bridge_artifacts: bool = True)
 #   - sync_bridge_artifacts(host: str, port: int, *, view_mode: Optional[str] = None) -> Dict[str, int]
+#   - bridge_router (FastAPI APIRouter): register via app.include_router(bridge_router, prefix="/api")
 #
 # Env expectations for remote:
 #   APP_ALLOW_REMOTE_BACKENDS=1
 #   APP_COMFY_SCHEME=https
 #   APP_COMFY_FORCE_VIEW_MODE=query
 #   (host is non-local, port likely 443)
+#
+# Env for pull/apply:
+#   PULL_URL=https://.../tunnel_url.json
+#   APP_PULL_TIMEOUT_SEC=3
+#   APP_PULL_RETRIES=3
+#   APP_INTERNAL_API_BASE=http://127.0.0.1:8080   # Base used to call local settings endpoints
 # --------------------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -5371,10 +5508,12 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Iterable
-from urllib.parse import urlencode, quote
+from urllib.parse import urlencode, quote, urlparse
 
 import httpx
 from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Body
+from fastapi.responses import JSONResponse
 
 # -----------------------------
 # Env helpers & host policy
@@ -5386,6 +5525,12 @@ def _env_str(k: str, d: str = "") -> str:
 def _env_bool01(k: str, d: int = 0) -> bool:
     v = (os.getenv(k, str(d)) or "").strip().lower()
     return v in {"1", "true", "yes", "on"}
+
+def _env_int(k: str, d: int) -> int:
+    try:
+        return int((os.getenv(k, str(d)) or "").strip())
+    except Exception:
+        return d
 
 def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
     try:
@@ -5430,6 +5575,9 @@ _COMFY_OUTPUT_DIR: Optional[Path] = Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).r
 
 # Local bridge dir for discovery artifacts exposed under /static/bridge/ by the server
 _LOCAL_BRIDGE_DIR: Path = Path("outputs/images/bridge").resolve()
+
+# Internal API base (self calls to apply settings)
+_INTERNAL_API_BASE: str = _env_str("APP_INTERNAL_API_BASE", "http://127.0.0.1:8080").rstrip("/")
 
 # -----------------------------
 # Connection / helpers
@@ -5567,7 +5715,7 @@ def override_prompt_inplace(
     return payload
 
 # -----------------------------
-# HTTP calls
+# HTTP calls to ComfyUI
 # -----------------------------
 
 async def _post_prompt(
@@ -5846,11 +5994,24 @@ async def _copy_bridge_artifacts(
     and write them into outputs/images/bridge locally.
     Non-fatal on failure; logs and returns summary counts.
 
-    Improvements:
-    - Also tries common artifact subfolders: "", "tunnels", "bridge"
-    - Accepts smaller thresholds: JSON/TXT >= 3 bytes
-    - Uses FS fallback when APP_COMFY_OUTPUT_DIR is set
+    IMPORTANT: Skip entirely for local mode/hosts. Tunnel artifacts are only meaningful
+    for remote (query-mode) access. This prevents noisy retries in local mode.
     """
+
+    # Early exit: do not fetch any tunnel artifacts when running in local mode/host.
+    # - Local view_mode is typically 'path'
+    # - Also guard for local hosts explicitly
+    try:
+        parsed = httpx.URL(base_url)
+        host_is_local = (parsed.host in {"127.0.0.1", "localhost"})
+    except Exception:
+        host_is_local = False
+
+    if view_mode != "query" or host_is_local:
+        # Explicitly state why we skip to reduce confusion in logs
+        print(f"[BRIDGE] skip tunnel artifact copy (view_mode={view_mode}, host_is_local={host_is_local})")
+        return {"saved": 0, "errors": 0}
+
     out_dir_bridge.mkdir(parents=True, exist_ok=True)
 
     async def _try_fetch_one(filename: str) -> Optional[bytes]:
@@ -5963,7 +6124,7 @@ async def _download_images(
     return saved
 
 # -----------------------------
-# Public entry points
+# Public entry points (Comfy job)
 # -----------------------------
 
 async def generate_from_prompt_dict(
@@ -6074,6 +6235,180 @@ async def sync_bridge_artifacts(
         result.update({"host": host, "base": base, "view_mode": vm})
         return result
 
+# -----------------------------
+# New: PULL_URL router (GET pull_url, POST apply_from_pull)
+# -----------------------------
+
+bridge_router = APIRouter()
+
+class ApplyFromPullIn(BaseModel):
+    pull_url: Optional[str] = None  # overrides env PULL_URL if provided
+
+class ApplyFromPullOut(BaseModel):
+    applied: bool
+    url: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    scheme: Optional[str] = None
+    error: Optional[str] = None
+    detail: Optional[str] = None
+
+def _short_timeout() -> httpx.Timeout:
+    # Short pulls to keep UI snappy; configurable via env
+    t = float(_env_int("APP_PULL_TIMEOUT_SEC", 3))
+    t = max(1.0, min(t, 15.0))
+    return httpx.Timeout(connect=2.0, read=t, write=2.0, pool=2.0)
+
+async def _pull_json_with_retries(url: str) -> Dict[str, Any]:
+    """
+    Fetch JSON from 'url' with retries and a cache-busting query param.
+    Expected structure: {"url": "https://<tunnel-host>[:port]"} or {"public_url": "..."} or {"comfy_url": "..."}.
+    """
+    retries = int(_env_int("APP_PULL_RETRIES", 3))
+    base_delay = 0.5
+    # add cachebuster
+    sep = "&" if "?" in url else "?"
+    url_cb = f"{url}{sep}t={int(time.time()*1000)}"
+    last_exc: Optional[Exception] = None
+    async with httpx.AsyncClient(limits=_limits(), timeout=_short_timeout(), follow_redirects=True) as client:
+        for attempt in range(1, retries + 1):
+            try:
+                r = await client.get(url_cb)
+                r.raise_for_status()
+                j = r.json()
+                if not isinstance(j, dict):
+                    raise ValueError("pull_json_not_object")
+                return j
+            except Exception as e:
+                last_exc = e
+                if attempt >= retries:
+                    break
+                await asyncio.sleep(base_delay)
+                base_delay *= 1.7
+    raise RuntimeError(f"pull_failed: {last_exc}")
+
+def _extract_url_field(j: Dict[str, Any]) -> Optional[str]:
+    """
+    Accept multiple possible keys to be tolerant: 'url', 'public_url', 'comfy_url'.
+    """
+    for k in ("url", "public_url", "comfy_url"):
+        val = j.get(k)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+def _parse_url_host_port_scheme(u: str) -> Tuple[str, int, str]:
+    """
+    Parse a URL into (host, port, scheme) with defaults (https→443, http→80).
+    """
+    up = urlparse(u)
+    scheme = (up.scheme or "https").lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError("unsupported_scheme")
+    host = (up.hostname or up.netloc or "").strip()
+    if not host:
+        raise ValueError("missing_host")
+    if up.port:
+        port = int(up.port)
+    else:
+        port = 443 if scheme == "https" else 80
+    if port < 1 or port > 65535:
+        raise ValueError("invalid_port")
+    return host, port, scheme
+
+async def _apply_remote_settings(host: str, port: int, scheme: str) -> None:
+    """
+    Apply settings by calling the local FastAPI endpoints in-order.
+    - image_allow_cloud -> true
+    - image_backend -> comfyui
+    - comfy_remote -> host/port/scheme
+    - comfy_mode -> remote
+    """
+    base = _INTERNAL_API_BASE
+    async with httpx.AsyncClient(limits=_limits(), timeout=_short_timeout()) as client:
+        # 1) allow cloud
+        r1 = await client.post(f"{base}/api/settings/image_allow_cloud", json={"allow": True})
+        if r1.status_code >= 300:
+            raise RuntimeError(f"image_allow_cloud_failed:{r1.status_code}")
+        # 2) switch backend
+        r2 = await client.post(f"{base}/api/settings/image_backend", json={"backend": "comfyui"})
+        if r2.status_code >= 300:
+            raise RuntimeError(f"image_backend_failed:{r2.status_code} {r2.text[:200]}")
+        # 3) set remote target
+        r3 = await client.post(f"{base}/api/settings/comfy_remote", json={"host": host, "port": port, "scheme": scheme})
+        if r3.status_code >= 300:
+            raise RuntimeError(f"comfy_remote_failed:{r3.status_code} {r3.text[:200]}")
+        # 4) set mode
+        r4 = await client.post(f"{base}/api/settings/comfy_mode", json={"mode": "remote"})
+        if r4.status_code >= 300:
+            raise RuntimeError(f"comfy_mode_failed:{r4.status_code} {r4.text[:200]}")
+
+@bridge_router.get("/settings/pull_url")
+async def get_pull_url():
+    """
+    Return the configured PULL_URL for UI diagnostics.
+    """
+    pull = _env_str("PULL_URL", "")
+    return {"pull_url": pull or ""}
+
+@bridge_router.post("/bridge/apply_from_pull", response_model=ApplyFromPullOut)
+async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyFromPullIn)):
+    """
+    Server-side "one-click" apply:
+    - Determine pull_url (body.pull_url or env PULL_URL)
+    - Fetch JSON with timeout/retries (expects a field 'url' or compatible)
+    - Parse host/port/scheme
+    - Apply via local settings endpoints (idempotent)
+    - Return applied parameters for UI to display
+    """
+    pull_url = (payload.pull_url or _env_str("PULL_URL", "")).strip()
+    if not pull_url:
+        return JSONResponse(
+            status_code=400,
+            content=ApplyFromPullOut(applied=False, error="missing_pull_url", detail="Configure PULL_URL in .env or pass in body").model_dump()
+        )
+
+    try:
+        doc = await _pull_json_with_retries(pull_url)
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content=ApplyFromPullOut(applied=False, error="pull_fetch_failed", detail=str(e)).model_dump()
+        )
+
+    url_val = _extract_url_field(doc)
+    if not url_val or not (url_val.startswith("http://") or url_val.startswith("https://")):
+        return JSONResponse(
+            status_code=400,
+            content=ApplyFromPullOut(applied=False, error="invalid_pull_payload", detail="Missing or invalid 'url' field").model_dump()
+        )
+
+    try:
+        host, port, scheme = _parse_url_host_port_scheme(url_val)
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content=ApplyFromPullOut(applied=False, error="parse_error", detail=str(e)).model_dump()
+        )
+
+    # Policy check (warn but do not block here; settings endpoint may enforce further)
+    try:
+        _assert_image_backend_host_policy(host)
+    except AssertionError as e:
+        # Continue to apply; policy for image backend selection is enforced elsewhere as well.
+        print(f"[PULL][policy] warning: {e}")
+
+    try:
+        await _apply_remote_settings(host, port, scheme)
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content=ApplyFromPullOut(applied=False, url=url_val, host=host, port=port, scheme=scheme, error="apply_failed", detail=str(e)).model_dump()
+        )
+
+    return ApplyFromPullOut(applied=True, url=url_val, host=host, port=port, scheme=scheme)
+
+# End router
 
 
 
@@ -6087,6 +6422,65 @@ async def sync_bridge_artifacts(
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#web/index.html
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -6209,8 +6603,19 @@ async def sync_bridge_artifacts(
     }
     .hidden { display: none !important; }
     #vision-hint { color: var(--warn); }
-    .bridge-row { display:flex; gap:8px; align-items:center; margin: 8px 0; }
     .bridge-status { font-size:12px; color: var(--muted); }
+
+    /* New: header row for cloudflared section */
+    .remote-head {
+      display:flex; align-items:center; justify-content: space-between;
+      gap: 8px; margin-bottom: 6px;
+    }
+    .remote-head .title {
+      display:flex; align-items:center; gap:8px; font-weight:600; color:#cfd6e6;
+    }
+    .remote-head .actions {
+      display:flex; align-items:center; gap:8px;
+    }
   </style>
 </head>
 <body>
@@ -6266,16 +6671,11 @@ async def sync_bridge_artifacts(
           </div>
 
           <div id="remote-config" class="remote-block hidden">
-            <div class="row" style="margin-bottom:6px;">
-              <strong id="remote-title">Remote ComfyUI (Cloudflared)</strong>
-              <span id="remote-subtitle" class="subtle">· öffentlich erreichbarer Tunnel-Host</span>
-            </div>
-
-            <!-- Bridge actions: read tunnel URL locally or via server PULL_URL -->
-            <div class="bridge-row">
-              <button id="btn-bridge-sync" title="Sync tunnel files into outputs/images/bridge/">Read tunnel URL</button>
-              <button id="btn-bridge-pull" title="Fetch from server PULL_URL and auto-apply">Load from PULL_URL</button>
-              <span id="bridge-status" class="bridge-status"></span>
+            <div class="remote-head">
+              <div class="title"><strong id="remote-title">ComfyUI (cloudflared)</strong><span id="remote-subtitle" class="subtle"></span></div>
+              <div class="actions">
+                <button id="btn-bridge-pull" title="Load from PULL_URL">PULL-URL</button>
+              </div>
             </div>
 
             <div class="remote-grid">
@@ -6299,14 +6699,7 @@ async def sync_bridge_artifacts(
               </div>
             </div>
             <div id="remote-test-status" class="subtle" style="margin-top:6px;"></div>
-
-            <div class="row" style="margin-top:6px;">
-              <label style="display:flex; align-items:center; gap:8px;">
-                <input id="toggle-auto-apply" type="checkbox" />
-                <span>Automatisch anwenden</span>
-              </label>
-              <span id="remote-auto-status" class="subtle" style="margin-left:12px;"></span>
-            </div>
+            <div id="bridge-status" class="bridge-status" style="margin-top:6px;"></div>
           </div>
 
           <div id="workflow-block" style="display:none;">
@@ -6478,7 +6871,7 @@ async def sync_bridge_artifacts(
         style_ui_load_url_title: "URL als Referenz laden",
         style_ui_toggle_vision: "Ollama Vision verwenden",
         style_ui_vision_hint_off: "Lokale Stilfeatures sind generisch; für bildspezifische Styles bitte Vision aktivieren",
-        remote_title: "Remote ComfyUI (Cloudflared)",
+        remote_title_cloudflared: "ComfyUI (cloudflared)",
         remote_subtitle: "· öffentlich erreichbarer Tunnel-Host",
         remote_label_host: "Remote Host",
         remote_label_port: "Port",
@@ -6488,13 +6881,9 @@ async def sync_bridge_artifacts(
         remote_probe_fail: "Probe fehlgeschlagen.",
         remote_missing_host: "Bitte Remote Host eingeben.",
         remote_probing: "Teste /history …",
-        bridge_read: "Tunnel-URL lesen",
-        bridge_syncing: "Lese Bridge-Dateien…",
-        bridge_ready: "Tunnel-URL geladen",
-        bridge_not_found: "Keine Tunnel-URL gefunden.",
         bridge_applied: "Übernommen",
         bridge_apply_failed: "Übernahme fehlgeschlagen",
-        pull_btn: "Aus PULL_URL laden",
+        pull_btn_short: "PULL-URL",
         pull_fetching: "Hole PULL_URL …",
         pull_ok: "Remote angewendet",
         pull_fail: "PULL_URL fehlgeschlagen",
@@ -6572,7 +6961,7 @@ async def sync_bridge_artifacts(
         style_ui_load_url_title: "Load URL as reference",
         style_ui_toggle_vision: "Use Ollama vision",
         style_ui_vision_hint_off: "Local style features are generic; enable Vision for image-specific styles",
-        remote_title: "Remote ComfyUI (Cloudflared)",
+        remote_title_cloudflared: "ComfyUI (cloudflared)",
         remote_subtitle: "· publicly accessible tunnel host",
         remote_label_host: "Remote Host",
         remote_label_port: "Port",
@@ -6582,13 +6971,9 @@ async def sync_bridge_artifacts(
         remote_probe_fail: "Probe failed.",
         remote_missing_host: "Please enter a remote host.",
         remote_probing: "Probing /history ...",
-        bridge_read: "Read tunnel URL",
-        bridge_syncing: "Reading bridge files…",
-        bridge_ready: "Tunnel URL loaded",
-        bridge_not_found: "No tunnel URL found.",
         bridge_applied: "Applied",
         bridge_apply_failed: "Apply failed",
-        pull_btn: "Load from PULL_URL",
+        pull_btn_short: "PULL-URL",
         pull_fetching: "Fetching PULL_URL …",
         pull_ok: "Remote applied",
         pull_fail: "PULL_URL failed",
@@ -6656,7 +7041,7 @@ async def sync_bridge_artifacts(
       if (visionHint) visionHint.textContent = t('style_ui_vision_hint_off');
 
       const remoteTitle = document.getElementById('remote-title');
-      if (remoteTitle) remoteTitle.textContent = t('remote_title');
+      if (remoteTitle) remoteTitle.textContent = t('remote_title_cloudflared');
       const remoteSubtitle = document.getElementById('remote-subtitle');
       if (remoteSubtitle) remoteSubtitle.textContent = t('remote_subtitle');
       const labelRemoteHost = document.getElementById('label-remote-host');
@@ -6668,11 +7053,8 @@ async def sync_bridge_artifacts(
       const btnRemoteTest = document.getElementById('btn-remote-test');
       if (btnRemoteTest) btnRemoteTest.textContent = t('remote_btn_test');
 
-      const btnBridge = document.getElementById('btn-bridge-sync');
-      if (btnBridge) btnBridge.textContent = t('bridge_read');
-
       const btnPull = document.getElementById('btn-bridge-pull');
-      if (btnPull) btnPull.textContent = t('pull_btn');
+      if (btnPull) { btnPull.textContent = t('pull_btn_short'); btnPull.title = t('pull_btn_short'); }
 
       const statusEl = document.getElementById('status');
       if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
@@ -6709,10 +7091,6 @@ async def sync_bridge_artifacts(
     const btnRemoteTest = $('#btn-remote-test');
     const remoteTestStatus = $('#remote-test-status');
 
-    const toggleAutoApply = document.getElementById('toggle-auto-apply');
-    const remoteAutoStatus = document.getElementById('remote-auto-status');
-
-    const btnBridgeSync = document.getElementById('btn-bridge-sync');
     const btnBridgePull = document.getElementById('btn-bridge-pull');
     const bridgeStatus = document.getElementById('bridge-status');
 
@@ -7276,14 +7654,11 @@ async def sync_bridge_artifacts(
       remoteBlock.classList.toggle('hidden', val !== 'comfyui-remote');
     });
 
-    // New helper: apply from server PULL_URL (env-driven)
+    // Apply from server PULL_URL (env-driven)
     async function applyFromPullEnv() {
-      // UI feedback start
       bridgeStatus.textContent = t('pull_fetching');
-      // Optional: make sure cloud is allowed before switching
       try { await ensureCloudAllowed(); } catch {}
       try {
-        // Optional: discover pull_url (for diagnostics); not required to send
         const rGet = await fetch('/api/settings/pull_url', { cache: 'no-store' });
         const jGet = await rGet.json().catch(()=> ({}));
         if (!rGet.ok || !jGet?.pull_url) {
@@ -7291,15 +7666,13 @@ async def sync_bridge_artifacts(
           return null;
         }
       } catch {
-        // proceed; backend endpoint may still use its own env
+        // continue; backend may still use env internally
       }
-
-      // Ask backend to fetch the JSON, parse, and apply settings server-side
       try {
         const r = await fetch('/api/bridge/apply_from_pull', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}) // backend defaults to env PULL_URL
+          body: JSON.stringify({})
         });
         const j = await r.json().catch(()=> ({}));
         if (!r.ok || !j?.applied) {
@@ -7307,23 +7680,15 @@ async def sync_bridge_artifacts(
           bridgeStatus.textContent = `${t('pull_fail')}: ${reason}`;
           return null;
         }
-
-        // Prefill UI fields with returned values
         if (j.host) remoteHost.value = j.host;
         if (j.port) remotePort.value = String(j.port);
         if (j.scheme) remoteScheme.value = j.scheme;
 
-        // Ensure the UI reflects remote mode
         backendSelect.value = 'comfyui-remote';
         remoteBlock.classList.toggle('hidden', false);
 
-        // Refresh visible config
         await refreshConfig().catch(()=>{});
-
-        // Status success
         bridgeStatus.textContent = `${t('pull_ok')}: ${j.url || j.host}`;
-        remoteAutoStatus.textContent = `${t('bridge_applied')}: ${j.host || ''}`;
-
         return j;
       } catch (e) {
         bridgeStatus.textContent = `${t('pull_fail')}: ${e}`;
@@ -7368,7 +7733,6 @@ async def sync_bridge_artifacts(
           });
           log(statusLog, t('backend_switched_ok'));
         } else if (sel === 'comfyui-remote') {
-          // If no host is filled, auto-apply from PULL_URL first
           const hostExisting = (remoteHost.value || '').trim();
           if (!hostExisting) {
             const applied = await applyFromPullEnv();
@@ -7378,7 +7742,6 @@ async def sync_bridge_artifacts(
               btnApplyBackend.disabled = false;
               return;
             }
-            // after server applied, do not resend duplicate settings; just refresh config
             log(statusLog, t('backend_switched_ok'));
             await refreshConfig().catch(()=>{});
             btnApplyBackend.disabled = false;
@@ -7661,119 +8024,6 @@ async def sync_bridge_artifacts(
       }
     }
 
-    // ---------- Bridge helpers ----------
-    async function tryFetchJSON(url, timeoutMs = 2000) {
-      const ctl = new AbortController();
-      const t = setTimeout(() => ctl.abort(), timeoutMs);
-      try {
-        const r = await fetch(url, { cache: 'no-store', signal: ctl.signal });
-        if (!r.ok) return null;
-        return await r.json().catch(() => null);
-      } catch { return null; }
-      finally { clearTimeout(t); }
-    }
-    async function tryFetchText(url, timeoutMs = 2000) {
-      const ctl = new AbortController();
-      const t = setTimeout(() => ctl.abort(), timeoutMs);
-      try {
-        const r = await fetch(url, { cache: 'no-store', signal: ctl.signal });
-        if (!r.ok) return null;
-        return await r.text().catch(() => null);
-      } catch { return null; }
-      finally { clearTimeout(t); }
-    }
-    function extractUrlFromAny(objOrStr) {
-      if (!objOrStr) return null;
-      if (typeof objOrStr === 'string') {
-        const s = objOrStr.trim();
-        if (/^https?:\/\//i.test(s)) return s;
-        try {
-          const j = JSON.parse(s);
-          if (j && typeof j.url === 'string') return j.url;
-        } catch {}
-        return null;
-      }
-      if (typeof objOrStr === 'object' && typeof objOrStr.url === 'string') return objOrStr.url;
-      return null;
-    }
-    function toHostPortScheme(u) {
-      try {
-        const URL_ = new URL(u);
-        const scheme = (URL_.protocol || 'https:').replace(':','') || 'https';
-        const host = URL_.hostname || URL_.host;
-        let port = URL_.port ? parseInt(URL_.port,10) : (scheme === 'https' ? 443 : 80);
-        return { host, port, scheme };
-      } catch { return null; }
-    }
-    async function bridgeSyncThenLoad() {
-      bridgeStatus.textContent = t('bridge_syncing');
-
-      // Optional server-side sync; ignore failure if endpoint missing
-      try { await fetch('/api/bridge/sync_tunnel', { method: 'POST' }); } catch {}
-
-      // Try JSON first
-      const j = await tryFetchJSON('/static/bridge/tunnel_url.json', 2000);
-      let url = extractUrlFromAny(j);
-      if (!url) {
-        // Fallback to text file
-        const txt = await tryFetchText('/static/bridge/tunnel_url.txt', 2000);
-        url = extractUrlFromAny(txt);
-      }
-      if (!url) {
-        bridgeStatus.textContent = t('bridge_not_found');
-        return;
-      }
-
-      const parsed = toHostPortScheme(url);
-      if (!parsed || !parsed.host) {
-        bridgeStatus.textContent = t('bridge_not_found');
-        return;
-      }
-
-      // Fill inputs
-      if (!remoteHost.value || remoteHost.value !== parsed.host) remoteHost.value = parsed.host;
-      if (!remotePort.value || Number(remotePort.value) !== parsed.port) remotePort.value = String(parsed.port);
-      if ((remoteScheme.value || '').toLowerCase() !== parsed.scheme) remoteScheme.value = parsed.scheme;
-
-      bridgeStatus.textContent = t('bridge_ready');
-
-      // Auto-apply if enabled
-      if (toggleAutoApply.checked) {
-        const ok = await applyRemoteToServer(parsed.host, parsed.port, parsed.scheme);
-        if (ok) {
-          backendSelect.value = 'comfyui-remote';
-          remoteBlock.classList.toggle('hidden', false);
-          await refreshConfig().catch(()=>{});
-          remoteAutoStatus.textContent = `${t('bridge_applied')}: ${parsed.host}`;
-        } else {
-          remoteAutoStatus.textContent = `${t('bridge_apply_failed')}: ${parsed.host}`;
-        }
-      }
-    }
-    btnBridgeSync.addEventListener('click', bridgeSyncThenLoad);
-
-    async function applyRemoteToServer(host, port = 443, scheme = 'https') {
-      try {
-        await fetch("/api/settings/image_allow_cloud", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ allow: true })
-        });
-      } catch {}
-      const r1 = await fetch('/api/settings/image_backend', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ backend: 'comfyui' })
-      });
-      const r2 = await fetch('/api/settings/comfy_remote', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host, port, scheme })
-      });
-      const r3 = await fetch('/api/settings/comfy_mode', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: 'remote' })
-      });
-      return r1.ok && r2.ok && r3.ok;
-    }
-
     // Wire the new PULL_URL button
     btnBridgePull.addEventListener('click', async () => {
       await applyFromPullEnv();
@@ -7817,7 +8067,51 @@ async def sync_bridge_artifacts(
 
 
 
-Aktuelle .env für diesen Stand:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# .env :
 
 # =========================
 # Base settings (local & cloud)
@@ -7974,6 +8268,15 @@ APP_BIND_PORT=8080
 # =========================
 APP_COMFY_OUTPUT_DIR=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/output/
 APP_OUTPUT_DIR=./outputs/images
+
+
+
+
+
+
+
+
+
 
 
 

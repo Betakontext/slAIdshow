@@ -1040,7 +1040,7 @@ def extract_style_with_label(image_path: Path, debug: bool = False) -> Tuple[str
 
 
 # =========================
-# Ollama Vision integration
+# Ollama Vision integration (enhanced URL routing + policy)
 # =========================
 
 VISION_SYS_PROMPT = (
@@ -1050,12 +1050,80 @@ VISION_SYS_PROMPT = (
     "Avoid meta commentary, avoid long sentences, no punctuation except commas."
 )
 
+def _normalize_url(u: Optional[str]) -> Optional[str]:
+    """
+    Ensure the URL has a scheme (http://) and no trailing slash. Accepts None and returns None.
+    """
+    if not u:
+        return None
+    u = u.strip()
+    if not u:
+        return None
+    if not re.match(r"^https?://", u, flags=re.I):
+        u = "http://" + u
+    return u.rstrip("/")
+
+def _url_is_localhost(u: str) -> bool:
+    """
+    Check whether the netloc is localhost/127.0.0.1/::1 regardless of scheme.
+    """
+    try:
+        # crude but robust: strip scheme, split host:port, ignore userinfo
+        s = re.sub(r"^https?://", "", u, flags=re.I)
+        s = s.split("/", 1)[0]
+        s = s.split("@")[-1]
+        host = s.split(":")[0].strip().lower()
+        return host in {"localhost", "127.0.0.1", "::1"}
+    except Exception:
+        return False
+
 def _validate_vision_policy(url: str) -> None:
+    """
+    Enforce policy: If APP_ALLOW_REMOTE_VISION=0 then only localhost/127.0.0.1/::1 are allowed.
+    Both http and https are accepted for localhost.
+    """
     if APP_ALLOW_REMOTE_VISION:
         return
-    # Enforce localhost if remote vision not allowed
-    if not (url.startswith("http://127.0.0.1:") or url.startswith("http://localhost:")):
+    if not _url_is_localhost(url):
         raise PermissionError("Remote Ollama vision access is disabled by policy (APP_ALLOW_REMOTE_VISION=0).")
+
+def _resolve_vision_url(
+    mode: Optional[str],
+    local_url: Optional[str],
+    remote_url: Optional[str],
+    cloud_url: Optional[str],
+) -> Tuple[str, str]:
+    """
+    Resolve effective (mode_used, base_url) with schema fix and sensible fallbacks.
+    Priority:
+      - If mode in {local,remote,cloud}: use the matching URL if given (normalized)
+      - Else pick the first available among local, remote, cloud (in that order)
+      - Else fallback to OLLAMA_VISION_URL
+    Returns (mode_used, base_url)
+    """
+    mode_norm = (mode or "").strip().lower() or "local"
+    cand_local = _normalize_url(local_url) or _normalize_url(OLLAMA_VISION_URL)
+    cand_remote = _normalize_url(remote_url)
+    cand_cloud = _normalize_url(cloud_url)
+
+    candidates: Dict[str, Optional[str]] = {
+        "local": cand_local,
+        "remote": cand_remote,
+        "cloud": cand_cloud,
+    }
+    chosen_mode = mode_norm if mode_norm in candidates else "local"
+    base = candidates.get(chosen_mode)
+    if not base:
+        # fallback order: local -> remote -> cloud -> env default
+        base = cand_local or cand_remote or cand_cloud or _normalize_url(OLLAMA_VISION_URL)
+        # infer mode from the chosen base if possible
+        if base == cand_remote:
+            chosen_mode = "remote"
+        elif base == cand_cloud:
+            chosen_mode = "cloud"
+        else:
+            chosen_mode = "local"
+    return chosen_mode, str(base)
 
 def _b64_from_file(path: Path) -> str:
     data = path.read_bytes()
@@ -1266,33 +1334,36 @@ async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEF
     else:
         resp.notes.append("No style_text_prompt provided.")
 
-    # 2) Ollama vision
+    # 2) Ollama vision (enhanced routing + policy + notes)
     if req.use_ollama_vision:
         if resolved_path is None:
             resp.notes.append("Ollama vision requested but no reference image resolved.")
         else:
-            ov_mode_url = None
-            mode = (req.ollama_vision_mode or "local").lower()
-            if mode in {"remote", "cloud"}:
-                ov_mode_url = (req.ollama_vision_remote_url or req.ollama_vision_cloud_url or req.ollama_vision_local_url or OLLAMA_VISION_URL)
-            else:
-                ov_mode_url = (req.ollama_vision_local_url or OLLAMA_VISION_URL)
+            # Resolve effective URL based on mode and per-mode URLs
+            mode_used, base_url = _resolve_vision_url(
+                req.ollama_vision_mode,
+                req.ollama_vision_local_url,
+                req.ollama_vision_remote_url,
+                req.ollama_vision_cloud_url,
+            )
             try:
-                print(f"[STYLE][vision] mode={mode} url={ov_mode_url} allow_remote={APP_ALLOW_REMOTE_VISION} ref={resolved_path}")
-                txt = await _ollama_vision_describe(resolved_path, mode_url=ov_mode_url)
+                print(f"[STYLE][vision] mode={mode_used} url={base_url} allow_remote={APP_ALLOW_REMOTE_VISION} ref={resolved_path}")
+                txt = await _ollama_vision_describe(resolved_path, mode_url=base_url)
                 print(f"[STYLE][vision] response_len={len(txt) if txt else 0} sample='{(txt or '')[:160]}'")
                 if txt:
                     resp.vision_text_used = _retokenize_limit(txt, MAX_TOKENS_VISION)
                     style_parts_in_order.append(resp.vision_text_used)
-                    resp.notes.append(f"Ollama vision used via {ov_mode_url} (mode={mode}, max {MAX_TOKENS_VISION} tokens).")
+                    resp.notes.append(f"Ollama vision used via {base_url} (mode={mode_used}, max {MAX_TOKENS_VISION} tokens).")
                 else:
                     resp.notes.append("Ollama vision returned empty text.")
             except PermissionError as pe:
                 print(f"[STYLE][vision][policy] {pe}")
                 resp.warnings.append(str(pe))
+                resp.notes.append(f"Ollama vision blocked by policy (mode={mode_used}, url={base_url}).")
             except Exception as e:
                 print(f"[STYLE][vision][error] {e}")
                 resp.warnings.append(f"ollama vision failed: {e}")
+                resp.notes.append(f"Ollama vision failed (mode={mode_used}, url={base_url}).")
     else:
         resp.notes.append("Ollama vision disabled by request.")
 

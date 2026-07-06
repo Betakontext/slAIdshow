@@ -7,6 +7,10 @@ Enhanced to support:
 No changes to Comfy negative prompt inheritance (per request).
 """
 
+
+# image_backend.py
+
+
 from __future__ import annotations
 
 import asyncio
@@ -1421,3 +1425,4 @@ def inject_negatives_for_final_prompt(prompt: str, negative: str | None) -> str:
         return prompt
     new_prompt, _preview = _inject_negatives_into_prompt_keyword(prompt, negative)
     return new_prompt
+
