@@ -5,12 +5,14 @@
 # - Extended: Runtime switching between Comfy modes (local | remote | auto) and remote target settings
 # - Extended: Debug endpoint to reveal effective image target
 # - NEW: Bridge endpoint to sync remote ComfyUI tunnel artifacts into /static/bridge
+# - NEW: Direct-live mode to bypass Ollama text optimization and use Whisper transcript directly for image generation
 #
 # This version integrates comfyui_bridge.bridge_router providing:
 #   - GET  /api/settings/pull_url
 #   - POST /api/bridge/apply_from_pull
 # and keeps all existing endpoints intact for backward compatibility.
 
+# app.py
 from __future__ import annotations
 
 import asyncio
@@ -281,6 +283,10 @@ WARMUP_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 3)
 WARMUP_RETRY_DELAY = _env_float("APP_OLLAMA_RETRY_DELAY", 1.2)
 WARMUP_GRACE_SEC = _env_float("APP_OLLAMA_GRACE_SEC", 10.0)
 
+# ---------- NEW: Direct-live settings ----------
+
+DIRECT_LIVE_DEFAULT = _env_bool01("APP_DIRECT_LIVE_DEFAULT", 0)
+
 # ---------- Ollama Vision settings (for style_engine to consume) ----------
 
 class OllamaVisionSettings(BaseModel):
@@ -405,6 +411,11 @@ class NegativePromptSettings(BaseModel):
 
 class StylePromptSettings(BaseModel):
     style_positive: str = Field(default="", max_length=4000)
+
+# ---------- NEW: Direct-live settings API models ----------
+
+class DirectLiveSettings(BaseModel):
+    enabled: bool
 
 # Workflows API payloads
 class WorkflowItem(BaseModel):
@@ -689,6 +700,8 @@ class PipelineState:
     audio_stopped_broadcasted: bool = False
     style_positive: Optional[str] = None
     reference_text: Optional[str] = None
+    # NEW: Direct-live toggle
+    direct_live: bool = DIRECT_LIVE_DEFAULT
 
 STATE = PipelineState()
 STOP_DEBOUNCE_SEC = float(os.getenv("APP_STOP_DEBOUNCE_SEC", "2.0") or "2.0")
@@ -768,6 +781,8 @@ def _log_effective_config() -> None:
         f"tick={APP_SSE_TICK_SEC}s",
         "| vision:",
         f"enabled={VISION.enabled} mode={VISION.mode} local={VISION.local_url} remote={VISION.remote_url} cloud={VISION.cloud_url}",
+        "| direct_live:",
+        f"enabled={STATE.direct_live}",
     )
 
 # ---------- Runtime-aware backend wrapper ----------
@@ -948,16 +963,62 @@ async def audio_transcription_loop() -> None:
                         pass
                     else:
                         ctx = update_context_buffer(text)
-                        if not OLLAMA_DISABLED and (time.time() - STATE.last_llm_run_ts) >= float(LLM_INTERVAL_SEC):
+                        # NEW: Direct-live path or existing Ollama path, respecting interval
+                        if (time.time() - STATE.last_llm_run_ts) >= float(LLM_INTERVAL_SEC):
                             if not STATE.running:
                                 break
                             STATE.last_llm_run_ts = time.time()
-                            task = asyncio.create_task(run_llm_and_image(ctx))
-                            STATE.bg_tasks.add(task)
-                            def _done_cb(t: asyncio.Task):
-                                with contextlib.suppress(Exception):
-                                    STATE.bg_tasks.discard(t)
-                            task.add_done_callback(_done_cb)
+                            if STATE.direct_live:
+                                # Direct-live: bypass Ollama. Use Whisper context directly as prompt.
+                                async def _direct_task(prompt_text: str):
+                                    try:
+                                        await broadcast("status", "direct_live:on")
+                                        used = prompt_text.strip()
+                                        if not used:
+                                            return
+                                        # Merge style + reference as in other code paths
+                                        eff_prompt = merge_style_prompt(used, getattr(STATE, "style_positive", None))
+                                        eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
+                                        STATE.last_prompt = eff_prompt
+                                        await broadcast("llm_prompt", eff_prompt)  # reuse event name for UI
+                                        # Generate image with negative/size handling
+                                        try:
+                                            if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
+                                                if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
+                                                    setattr(BACKEND.cfg, "negative", STATE.negative_prompt or "")
+                                            path = await _generate_with_negative_support(
+                                                prompt=eff_prompt,
+                                                width=STATE.image_width,
+                                                height=STATE.image_height,
+                                                negative=STATE.negative_prompt,
+                                            )
+                                            path = ensure_in_output_dir(path)
+                                            rel = rel_for_ui_path(path)
+                                            await broadcast("image", rel)
+                                            await broadcast("status", "direct_generate_ok")
+                                        except Exception as ge:
+                                            tb = traceback.format_exc()
+                                            print(f"[DIRECT] image generation error: {ge}\n{tb}")
+                                            await broadcast("status", f"direct_generate_error:{ge}")
+                                    except Exception as e:
+                                        tb = traceback.format_exc()
+                                        print(f"[DIRECT] pipeline error: {e}\n{tb}")
+                                        await broadcast("status", f"direct_pipeline_error:{e}")
+
+                                task = asyncio.create_task(_direct_task(ctx))
+                                STATE.bg_tasks.add(task)
+                                def _done_cb(t: asyncio.Task):
+                                    with contextlib.suppress(Exception):
+                                        STATE.bg_tasks.discard(t)
+                                task.add_done_callback(_done_cb)
+                            else:
+                                # Existing path: use Ollama optimization + image generation
+                                task = asyncio.create_task(run_llm_and_image(ctx))
+                                STATE.bg_tasks.add(task)
+                                def _done_cb2(t: asyncio.Task):
+                                    with contextlib.suppress(Exception):
+                                        STATE.bg_tasks.discard(t)
+                                task.add_done_callback(_done_cb2)
 
             max_keep = int(SAMPLE_RATE * MAX_SEGMENT_SEC)
             if buf.size > (max_keep * 2):
@@ -1294,6 +1355,7 @@ async def get_config():
             "remote_url": VISION.remote_url,
             "cloud_url": VISION.cloud_url,
         },
+        "direct_live": {"enabled": STATE.direct_live},  # NEW: expose direct-live flag
     }
 
 # ---------- Workflows API ----------
@@ -1440,6 +1502,18 @@ async def shutdown_server():
 async def _exit_after_delay():
     await asyncio.sleep(0.2)
     os._exit(0)
+
+# ---------- NEW: Direct-live settings endpoints ----------
+
+@app.get("/api/settings/direct_live", response_model=DirectLiveSettings)
+async def get_direct_live():
+    return DirectLiveSettings(enabled=bool(STATE.direct_live))
+
+@app.post("/api/settings/direct_live", response_model=DirectLiveSettings)
+async def set_direct_live(cfg: DirectLiveSettings):
+    STATE.direct_live = bool(cfg.enabled)
+    await broadcast("status", f"direct_live:{'on' if STATE.direct_live else 'off'}")
+    return DirectLiveSettings(enabled=STATE.direct_live)
 
 # ---------- Ollama APIs ----------
 
