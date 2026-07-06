@@ -1,17 +1,3 @@
-# -*- coding: utf-8 -*-
-# Production-ready FastAPI app for slAIdshow:
-# - Real-time audio → Whisper.cpp (pywhispercpp) → Ollama prompt → Image backend (ComfyUI or Pollinations)
-# - Style pipeline integrated: style_engine builds style_positive (and reference_text) used in generation
-# - Extended: Runtime switching between Comfy modes (local | remote | auto) and remote target settings
-# - Extended: Debug endpoint to reveal effective image target
-# - NEW: Bridge endpoint to sync remote ComfyUI tunnel artifacts into /static/bridge
-# - NEW: Direct-live mode to bypass Ollama text optimization and use Whisper transcript directly for image generation
-#
-# This version integrates comfyui_bridge.bridge_router providing:
-#   - GET  /api/settings/pull_url
-#   - POST /api/bridge/apply_from_pull
-# and keeps all existing endpoints intact for backward compatibility.
-
 # app.py
 from __future__ import annotations
 

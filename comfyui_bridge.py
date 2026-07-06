@@ -1,43 +1,5 @@
-# --------------------------------------------------------------------------------------
-# Production-grade ComfyUI bridge with robust remote (tunnel) handling + bridge artifacts.
-#
-# JSON-only variant:
-# - Fetches only 'tunnel_url.json' from remote ComfyUI. Any previous TXT handling is removed.
-# - Keeps existing behavior: pre/post artifact copy around image generation in remote/query mode.
-# - Uses the SAME download mechanism as images (ComfyUI /api/view or /view), with retries.
-# - Adds FS fallback for artifacts when APP_COMFY_OUTPUT_DIR is set.
-# - Tests common subfolders for artifacts ("", "tunnels", "bridge") in addition to folder_type.
-#
-# FastAPI router exposing:
-#   GET  /api/settings/pull_url            -> returns the PULL_URL from env (for UI prefill/debug)
-#   POST /api/bridge/apply_from_pull       -> fetches JSON at PULL_URL (or body override), parses "url",
-#                                             computes scheme/host/port, applies remote settings server-side
-#
-# Internal application of settings via local API calls (idempotent):
-#   POST /api/settings/image_allow_cloud
-#   POST /api/settings/image_backend      {backend:"comfyui"}
-#   POST /api/settings/comfy_remote       {host,port,scheme}
-#   POST /api/settings/comfy_mode         {mode:"remote"}
-#
-# Public API:
-#   - override_prompt_inplace(...)
-#   - generate_from_prompt_dict(..., copy_bridge_artifacts: bool = True)
-#   - sync_bridge_artifacts(host: str, port: int, *, view_mode: Optional[str] = None) -> Dict[str, int]
-#   - bridge_router (FastAPI APIRouter): register via app.include_router(bridge_router, prefix="/api")
-#
-# Env expectations for remote:
-#   APP_ALLOW_REMOTE_BACKENDS=1
-#   APP_COMFY_SCHEME=https
-#   APP_COMFY_FORCE_VIEW_MODE=query
-#   (host is non-local, port likely 443)
-#
-# Env for pull/apply:
-#   PULL_URL=https://.../tunnel_url.json
-#   APP_PULL_TIMEOUT_SEC=3
-#   APP_PULL_RETRIES=3
-#   APP_INTERNAL_API_BASE=http://127.0.0.1:8080   # Base used to call local settings endpoints
-# --------------------------------------------------------------------------------------
 # comfyui_bridge.py
+
 from __future__ import annotations
 
 import asyncio

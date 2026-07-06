@@ -1,12 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Production-ready image backend adapters for ComfyUI (local/LAN/remote) and Pollinations (cloud)
-Enhanced to support:
-- APP_COMFY_MODE=auto (prefer remote when configured, fallback to local)
-- Remote health probe before generation (consistent comfy_unavailable handling)
-No changes to Comfy negative prompt inheritance (per request).
-"""
-
 
 # image_backend.py
 
