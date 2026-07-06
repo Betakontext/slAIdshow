@@ -1,6 +1,15 @@
-# image_backend.py
 # -*- coding: utf-8 -*-
-# Production-ready image backend adapters for ComfyUI (local/LAN/remote) and Pollinations (cloud)
+"""
+Production-ready image backend adapters for ComfyUI (local/LAN/remote) and Pollinations (cloud)
+Enhanced to support:
+- APP_COMFY_MODE=auto (prefer remote when configured, fallback to local)
+- Remote health probe before generation (consistent comfy_unavailable handling)
+No changes to Comfy negative prompt inheritance (per request).
+"""
+
+
+# image_backend.py
+
 
 from __future__ import annotations
 
@@ -12,6 +21,7 @@ import re
 import shutil
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Set, Tuple, List, Dict
 
@@ -28,11 +38,13 @@ from comfyui_bridge import generate_from_prompt_dict
 def _env_str(k: str, d: str) -> str:
     return (os.getenv(k, d) or "").strip()
 
+
 def _env_int(k: str, d: int) -> int:
     try:
         return int(os.getenv(k, str(d)))
     except Exception:
         return d
+
 
 def _env_float(k: str, d: float) -> float:
     try:
@@ -40,24 +52,30 @@ def _env_float(k: str, d: float) -> float:
     except Exception:
         return d
 
+
 def _env_bool01(k: str, d: int = 0) -> bool:
     v = (os.getenv(k, str(d)) or "").strip().lower()
     return v in {"1", "true", "yes", "on"}
 
+
 def _httpx_limits() -> httpx.Limits:
     return httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=30.0)
+
 
 def _timeout_short() -> httpx.Timeout:
     # General quick calls (health/object_info)
     return httpx.Timeout(connect=2.5, read=5.0, write=4.0, pool=4.0)
 
+
 def _timeout_probe() -> httpx.Timeout:
-    # Very short probes for discovery
+    # Very short probes for discovery/health
     return httpx.Timeout(connect=1.2, read=2.0, write=1.5, pool=1.5)
+
 
 def _timeout_long(total: float) -> httpx.Timeout:
     total = max(10.0, min(total, 240.0))
     return httpx.Timeout(connect=8.0, read=total, write=8.0, pool=8.0)
+
 
 def _clamp_dim(v: Optional[int]) -> Optional[int]:
     if v is None:
@@ -65,11 +83,14 @@ def _clamp_dim(v: Optional[int]) -> Optional[int]:
     x = max(64, min(2048, int(v)))
     return x - (x % 8)
 
+
 def _now() -> float:
     return time.time()
 
+
 def _is_loopback(host: str) -> bool:
     return host in {"127.0.0.1", "localhost"}
+
 
 def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
     try:
@@ -86,16 +107,22 @@ def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
             continue
     return False
 
+
 def _assert_image_backend_host_policy(host: str) -> None:
     """
     Image backend host policy:
     - Always allow loopback.
     - Remote only if APP_ALLOW_REMOTE_BACKENDS=1.
     - If APP_ALLOWED_SUBNETS is set and host is an IP, it must match.
+    Hostnames (remote tunnels) may skip subnet check; global remote allow is sufficient.
     """
     if _is_loopback(host):
         return
-    allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
+    # Accept both static env flag and runtime flag set by build_image_backend_rt()
+    allow_remote = (
+        _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
+        or _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0)
+    )
     if not allow_remote:
         raise AssertionError(f"Only localhost allowed, got {host}")
     subnets = _env_str("APP_ALLOWED_SUBNETS", "")
@@ -104,6 +131,7 @@ def _assert_image_backend_host_policy(host: str) -> None:
     try:
         ipaddress.ip_address(host)
     except ValueError:
+        # Hostname (e.g., Cloudflare) – skip subnet check
         return
     if not _is_in_allowed_subnets(host, subnets):
         raise AssertionError(f"Remote host {host} not in allowed subnets ({subnets})")
@@ -117,6 +145,7 @@ def _clamp8(v: int) -> int:
     v = max(64, min(4096, int(v)))
     return v - (v % 8)
 
+
 def _env_opt_int(name: str) -> Optional[int]:
     raw = (os.getenv(name) or "").strip()
     if not raw:
@@ -125,6 +154,7 @@ def _env_opt_int(name: str) -> Optional[int]:
         return int(raw)
     except ValueError:
         return None
+
 
 def _resolve_size_for_backend(backend_name: str, req_w: Optional[int], req_h: Optional[int]) -> tuple[Optional[int], Optional[int]]:
     # 1) Request overrides
@@ -166,11 +196,12 @@ class ImageBackend:
 # Pollinations (Cloud) with Keyword-Style Negative Injection
 # ============================================================
 
-INJECTION_MODE = "append"        # 'append' or 'prepend'
+INJECTION_MODE = "append"  # 'append' or 'prepend'
 INJECTION_SEPARATOR = " "
 MAX_NEG_TERMS = 24
 MAX_CONSTRAINT_CHARS = 240
 DEFAULT_COLOR_BIAS = True
+
 
 def _is_german_text(text: str) -> bool:
     if not text:
@@ -188,6 +219,7 @@ def _is_german_text(text: str) -> bool:
     matches = sum(1 for token in german_markers if token in padded)
     return matches >= 2
 
+
 def _normalize_negative_terms(neg_text: str) -> List[str]:
     if not neg_text:
         return []
@@ -202,9 +234,10 @@ def _normalize_negative_terms(neg_text: str) -> List[str]:
         if key not in seen:
             cleaned.append(term)
             seen.add(key)
-    if len(cleaned) > MAX_NEG_TERMS:
-        cleaned = cleaned[:MAX_NEG_TERMS]
+        if len(cleaned) > MAX_NEG_TERMS:
+            cleaned = cleaned[:MAX_NEG_TERMS]
     return cleaned
+
 
 def _term_in_prompt(term: str, prompt: str) -> bool:
     t = term.lower().strip()
@@ -214,6 +247,7 @@ def _term_in_prompt(term: str, prompt: str) -> bool:
     if " " in t:
         return t in p
     return re.search(rf"(^|[^a-z0-9]){re.escape(t)}([^a-z0-9]|$)", p) is not None
+
 
 RED_PRODUCE_EN = [
     "red vegetables", "red fruits",
@@ -226,6 +260,7 @@ RED_PRODUCE_EN = [
 RED_COLOR_TOKENS_EN = [
     "warm red tones", "high saturation reds", "crimson", "scarlet", "vermilion",
 ]
+
 
 def _expand_semantic_negatives(neg_terms: List[str]) -> List[str]:
     if not neg_terms:
@@ -262,6 +297,7 @@ def _expand_semantic_negatives(neg_terms: List[str]) -> List[str]:
         compact = compact[:MAX_NEG_TERMS]
     return compact
 
+
 def _build_keyword_constraints(neg_terms: List[str], add_cool_bias: bool = DEFAULT_COLOR_BIAS) -> str:
     if not neg_terms:
         return ""
@@ -281,6 +317,7 @@ def _build_keyword_constraints(neg_terms: List[str], add_cool_bias: bool = DEFAU
             sentence = "; ".join(parts) + (";" if parts else "")
     return sentence
 
+
 def _inject_negatives_into_prompt_keyword(prompt: str, negative_prompt: str) -> tuple[str, str]:
     raw_terms = _normalize_negative_terms(negative_prompt)
     if not raw_terms:
@@ -293,8 +330,7 @@ def _inject_negatives_into_prompt_keyword(prompt: str, negative_prompt: str) -> 
     if not constraints:
         return prompt, ""
     sep = "" if prompt.endswith((" ", "\n")) else INJECTION_SEPARATOR
-    if INJECTION_MODE == "prepend":
-        return (constraints + INJECTION_SEPARATOR + prompt).strip(), constraints
+    # Always append mode for Pollinations
     return (prompt + sep + constraints).strip(), constraints
 
 
@@ -302,9 +338,11 @@ class _PollinationsV1Datum(BaseModel):
     b64_json: str
     revised_prompt: Optional[str] = None
 
+
 class _PollinationsV1Response(BaseModel):
     created: int
     data: list[_PollinationsV1Datum]
+
 
 class PollinationsConfig(BaseModel):
     api_base: str = Field(default_factory=lambda: _env_str("POLLINATIONS_API_BASE", "https://gen.pollinations.ai").rstrip("/"))
@@ -333,14 +371,22 @@ class PollinationsConfig(BaseModel):
         if not self.secret and self.use_v1:
             raise RuntimeError("POLLINATIONS_SECRET missing in environment for v1 API")
 
+
 def _size_from_wh(width: int, height: int) -> str:
     if width > 0 and height > 0:
         return f"{width}x{height}"
     return "1024x1024"
 
-def _build_pollinations_image_url(api_base: str, prompt: str, model: Optional[str],
-                                  width: Optional[int], height: Optional[int],
-                                  nologo: bool, seed: Optional[int]) -> str:
+
+def _build_pollinations_image_url(
+    api_base: str,
+    prompt: str,
+    model: Optional[str],
+    width: Optional[int],
+    height: Optional[int],
+    nologo: bool,
+    seed: Optional[int],
+) -> str:
     from urllib.parse import quote, urlencode
     base = (api_base or "").rstrip("/")
     encoded_prompt = quote(prompt, safe="")
@@ -419,8 +465,10 @@ class PollinationsBackend(ImageBackend):
         if neg_field:
             payload["negative_prompt"] = neg_field
 
-        print(f"[POLLINATIONS V1] url={url} model={payload.get('model')} size={payload.get('size')} "
-              f"has_negative_field={'negative_prompt' in payload} inline_neg=1")
+        print(
+            f"[POLLINATIONS V1] url={url} model={payload.get('model')} size={payload.get('size')} "
+            f"has_negative_field={'negative_prompt' in payload} inline_neg=1"
+        )
         timeout = _timeout_long(120.0)
         delay = 1.0
         last_exc: Optional[Exception] = None
@@ -462,8 +510,10 @@ class PollinationsBackend(ImageBackend):
         if self.cfg.secret:
             params["key"] = self.cfg.secret
 
-        print(f"[POLLINATIONS GET] url_base={self.cfg.api_base} model={self.cfg.model or 'flux'} "
-              f"size={w}x{h} inline_neg=1 nologo={self.cfg.nologo}")
+        print(
+            f"[POLLINATIONS GET] url_base={self.cfg.api_base} model={self.cfg.model or 'flux'} "
+            f"size={w}x{h} inline_neg=1 nologo={self.cfg.nologo}"
+        )
         timeout = _timeout_long(120.0)
         delay = 1.0
         last_exc: Optional[Exception] = None
@@ -546,8 +596,8 @@ class ComfyConfig(BaseModel):
     def fallback_hosts(self) -> List[str]:
         items = [x.strip() for x in self.fallback_hosts_raw.replace(";", ",").split(",") if x.strip()]
         # Deduplicate while preserving order
-        out = []
-        seen = set()
+        out: List[str] = []
+        seen: Set[str] = set()
         for h in items:
             if h not in seen:
                 seen.add(h)
@@ -557,7 +607,7 @@ class ComfyConfig(BaseModel):
     @property
     def discovery_subnets(self) -> List[str]:
         items = [x.strip() for x in self.discovery_subnets_raw.replace(",", " ").split() if x.strip()]
-        out = []
+        out: List[str] = []
         for cidr in items:
             try:
                 ipaddress.ip_network(cidr, strict=False)
@@ -595,7 +645,7 @@ class LocalComfyBackend(ImageBackend):
         if self._discovery_done and self._active_host:
             return
 
-        # 1) Try configured host first (works for local 127.0.0.1 and also if explicitly set to LAN IP)
+        # 1) Try configured host first
         host = (self.cfg.host or "127.0.0.1").strip()
         port = int(self.cfg.port)
         try:
@@ -609,10 +659,10 @@ class LocalComfyBackend(ImageBackend):
                 print(f"[DISCOVERY] using configured ComfyUI host {host}:{port}")
                 return
 
-        # 2) Optionally try fallback hosts and subnets (only if remote backends are allowed)
+        # 2) Optionally try fallback/discovery (only if remote backends are allowed)
         allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
         if not allow_remote or not self.cfg.auto_discovery_enable:
-            # Fallback to configured host; errors will be raised later if unavailable
+            # Keep configured host; errors will be raised later if unavailable
             self._active_host = host
             self._discovery_done = True
             print("[DISCOVERY] auto-discovery disabled or remote not allowed; keeping configured host")
@@ -631,7 +681,7 @@ class LocalComfyBackend(ImageBackend):
                 print(f"[DISCOVERY] selected fallback ComfyUI host {fb}:{port}")
                 return
 
-        # 2b) Parallel scan of fallback hosts (if many provided)
+        # 2b) Parallel scan of fallback hosts
         if self.cfg.fallback_hosts and len(self.cfg.fallback_hosts) > 1:
             sem = asyncio.Semaphore(self.cfg.discovery_max_parallel)
 
@@ -672,7 +722,6 @@ class LocalComfyBackend(ImageBackend):
                 net = ipaddress.ip_network(cidr, strict=False)
             except Exception:
                 continue
-            # We only scan host addresses, skip loopback/link-local automatically
             ips = [str(ip) for ip in net.hosts()]
             if not ips:
                 continue
@@ -711,13 +760,12 @@ class LocalComfyBackend(ImageBackend):
                 except asyncio.CancelledError:
                     pass
 
-        # 3) As last resort, stick to configured host (may be unreachable; generate() will fail gracefully)
+        # 3) Last resort
         self._active_host = host
         self._discovery_done = True
         print(f"[DISCOVERY] no reachable ComfyUI found; keeping configured host {host}:{port}")
 
     async def _available_active(self) -> bool:
-        # Ensure discovery (or configured host) is set
         await self._ensure_host()
         host = self._active_host or self.cfg.host
         port = self.cfg.port
@@ -762,10 +810,6 @@ class LocalComfyBackend(ImageBackend):
         return nodes
 
     def _override_text_nodes(self, prompt_dict: dict, positive: str, negative: str) -> tuple[bool, bool]:
-        """
-        Legacy single-encode mapping: set positive into node_id_positive and negative into node_id_negative;
-        fallback: first two CLIPTextEncode nodes if configured IDs are absent.
-        """
         pos_set = False
         neg_set = False
 
@@ -783,7 +827,6 @@ class LocalComfyBackend(ImageBackend):
                 inputs["text"] = negative
                 neg_set = True
 
-        # Fallback by scanning first two CLIP nodes
         if not (pos_set and neg_set):
             clip_nodes = self._find_clip_nodes(prompt_dict)
             if not clip_nodes:
@@ -802,12 +845,6 @@ class LocalComfyBackend(ImageBackend):
         return pos_set, neg_set
 
     def _override_style_nodes(self, prompt_dict: dict, style_text: Optional[str]) -> tuple[bool, Optional[str]]:
-        """
-        Style-aware mapping:
-        - If node_id_style_positive exists and is CLIPTextEncode: set its 'text' to style_text (if provided).
-        - If node_id_conditioning_combine exists and has 'strength', optionally set it to style_weight/request override.
-        Returns (style_set, info_message).
-        """
         if not style_text:
             return False, None
 
@@ -823,7 +860,6 @@ class LocalComfyBackend(ImageBackend):
         else:
             return False, "style_node_missing"
 
-        # Optional ConditioningCombine weight
         node_combine = prompt_dict.get(self.cfg.node_id_conditioning_combine)
         if isinstance(node_combine, dict) and (node_combine.get("class_type") or "").lower().startswith("conditioning"):
             combine_inputs = node_combine.get("inputs", {})
@@ -869,9 +905,6 @@ class LocalComfyBackend(ImageBackend):
                         inputs["height"] = height
 
     def _override_sampling_params(self, prompt_dict: dict, steps: Optional[int], cfg: Optional[float], sampler_name: Optional[str]) -> None:
-        """
-        Best-effort override of KSampler inputs if present in workflow.
-        """
         for node in prompt_dict.values():
             if not isinstance(node, dict):
                 continue
@@ -894,7 +927,7 @@ class LocalComfyBackend(ImageBackend):
         src_dir = self.cfg.comfy_output_dir
         if not src_dir or not src_dir.exists():
             return None
-        candidates = []
+        candidates: List[Path] = []
         for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
             candidates.extend(src_dir.rglob(ext))
         if not candidates:
@@ -923,13 +956,6 @@ class LocalComfyBackend(ImageBackend):
         style_text: Optional[str] = None,
         style_weight: Optional[float] = None
     ) -> Path:
-        """
-        Generate via ComfyUI.
-        - prompt: content prompt (required)
-        - negative: negative prompt (optional; env fallback exists)
-        - style_text: optional separate style prompt to inject into a dedicated CLIPTextEncode (Style) node, if present
-        - style_weight: optional override for ConditioningCombine.strength
-        """
         if self.cfg.disabled:
             raise RuntimeError("ComfyUI disabled (APP_DISABLE_COMFYUI=1)")
         if not self.cfg.workflow_path.exists():
@@ -943,7 +969,6 @@ class LocalComfyBackend(ImageBackend):
         host = self._active_host or self.cfg.host
         port = int(self.cfg.port)
 
-        # Final availability check before job
         if not await self._probe_history(host, port, _timeout_probe()):
             raise RuntimeError("comfy_unavailable")
 
@@ -979,11 +1004,9 @@ class LocalComfyBackend(ImageBackend):
             if style_info:
                 style_info_log = style_info
 
-        # Fallback: if no style node, append style to positive prompt (to not lose user intent)
+        # Fallback: append style to positive if no dedicated node
         if self.request_style_text and not style_set:
-            # Inject only if not already included
             if self.request_style_text.lower() not in pos_text.lower():
-                # Try to locate the actual positive node used and append; else just update node_id_positive
                 node_pos = prompt_dict.get(self.cfg.node_id_positive)
                 style_suffix = f" Style: {self.request_style_text}"
                 if isinstance(node_pos, dict) and node_pos.get("class_type") == "CLIPTextEncode":
@@ -992,7 +1015,6 @@ class LocalComfyBackend(ImageBackend):
                         inputs["text"] = (inputs["text"] or "") + style_suffix
                         pos_set = True
                 else:
-                    # as last resort, scan first CLIP
                     clip_nodes = self._find_clip_nodes(prompt_dict)
                     if clip_nodes:
                         inputs = clip_nodes[0].get("inputs", {})
@@ -1002,10 +1024,12 @@ class LocalComfyBackend(ImageBackend):
             style_info_log = style_info_log or "style_appended_to_positive"
 
         clip_count = len(clip_nodes_before)
-        print(f"[COMFY WORKFLOW] host={host} pos_set={pos_set} neg_set={neg_set} style_set={style_set} "
-              f"clip_nodes={clip_count} size={w}x{h} sampler={sampler} "
-              f"pos_sample='{pos_text[:96]}' style_text='{(self.request_style_text or '')[:72]}' "
-              f"neg_sample='{neg_text[:96]}' style_info='{style_info_log or ''}'")
+        print(
+            f"[COMFY WORKFLOW] host={host} pos_set={pos_set} neg_set={neg_set} style_set={style_set} "
+            f"clip_nodes={clip_count} size={w}x{h} sampler={sampler} "
+            f"pos_sample='{pos_text[:96]}' style_text='{(self.request_style_text or '')[:72]}' "
+            f"neg_sample='{neg_text[:96]}' style_info='{style_info_log or ''}'"
+        )
 
         if clip_count == 0:
             raise RuntimeError("workflow_missing_CLIPTextEncode_nodes: no CLIPTextEncode nodes found; cannot set positive/negative/style text")
@@ -1022,9 +1046,9 @@ class LocalComfyBackend(ImageBackend):
             negative_text=None,   # already injected into nodes
             width=None,           # already set on latent nodes
             height=None,          # already set on latent nodes
-            steps=None,           # already overridden in graph if possible
-            cfg=None,             # already overridden in graph if possible
-            sampler_name=None,    # already overridden in graph if possible
+            steps=None,           # already overridden in graph
+            cfg=None,             # already overridden in graph
+            sampler_name=None,    # already overridden in graph
             scheduler=None,
             denoise=None,
             seed=None,
@@ -1044,6 +1068,281 @@ class LocalComfyBackend(ImageBackend):
         raise RuntimeError("comfy_no_images")
 
 
+# ============================================================
+# ComfyUI (Remote via Cloudflared)
+# ============================================================
+
+class RemoteComfyConfig(BaseModel):
+    # Dedicated remote parameters (do not affect LocalComfyBackend)
+    host: str = Field(default_factory=lambda: _env_str("APP_COMFY_REMOTE_HOST", ""))
+    port: int = Field(default_factory=lambda: _env_int("APP_COMFY_REMOTE_PORT", 443))
+    scheme: str = Field(default_factory=lambda: (_env_str("APP_COMFY_REMOTE_SCHEME", "https") or "https").lower())
+    force_view_mode: str = Field(default_factory=lambda: _env_str("APP_COMFY_REMOTE_FORCE_VIEW_MODE", "query").lower())
+
+    # Reuse common workflow/dim settings, independent from local .env defaults
+    workflow_path: Path = Field(default_factory=lambda: Path(_env_str("APP_COMFY_WORKFLOW", "./workflows/text2img_SD15-FP16.json")).resolve())
+    width: int = Field(default_factory=lambda: _env_int("APP_COMFY_WIDTH", int(_env_str("APP_IMAGE_WIDTH", "512") or "512")))
+    height: int = Field(default_factory=lambda: _env_int("APP_COMFY_HEIGHT", int(_env_str("APP_IMAGE_HEIGHT", "512") or "512")))
+    steps: int = Field(default_factory=lambda: _env_int("APP_COMFY_STEPS", 20))
+    cfg: float = Field(default_factory=lambda: _env_float("APP_COMFY_CFG", 6.5))
+    sampler: str = Field(default_factory=lambda: _env_str("APP_COMFY_SAMPLER", "euler"))
+    timeout_sec: float = Field(default_factory=lambda: _env_float("APP_COMFY_TIMEOUT_SEC", 180.0))
+    disabled: bool = Field(default_factory=lambda: _env_bool01("APP_DISABLE_COMFYUI", 1))
+    negative: str = Field(default_factory=lambda: _env_str("APP_COMFY_NEGATIVE", "text, watermark, logo, low quality, blurry, bad anatomy"))
+
+    # Node IDs
+    node_id_positive: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_POS", "2"))
+    node_id_negative: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_NEG", "3"))
+    node_id_latent: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_LATENT", "4"))
+    node_id_ksampler: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_KSAMPLER", "5"))
+
+    node_id_style_positive: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_STYLE_POS", "8"))
+    node_id_conditioning_combine: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_COND_COMBINE", "9"))
+    style_weight: float = Field(default_factory=lambda: _env_float("APP_COMFY_STYLE_WEIGHT", 1.8))
+
+    def assert_policy(self, host: str) -> None:
+        _assert_image_backend_host_policy(host)
+
+
+@contextmanager
+def _remote_env_ctx(scheme: str, force_view_mode: str):
+    """
+    Temporarily enforce comfyui_bridge behavior for remote:
+    - APP_COMFY_SCHEME=https
+    - APP_COMFY_FORCE_VIEW_MODE=query
+    This avoids touching global/local defaults permanently.
+    """
+    old_scheme = os.environ.get("APP_COMFY_SCHEME")
+    old_view = os.environ.get("APP_COMFY_FORCE_VIEW_MODE")
+    try:
+        os.environ["APP_COMFY_SCHEME"] = scheme
+        os.environ["APP_COMFY_FORCE_VIEW_MODE"] = force_view_mode
+        yield
+    finally:
+        if old_scheme is None:
+            os.environ.pop("APP_COMFY_SCHEME", None)
+        else:
+            os.environ["APP_COMFY_SCHEME"] = old_scheme
+        if old_view is None:
+            os.environ.pop("APP_COMFY_FORCE_VIEW_MODE", None)
+        else:
+            os.environ["APP_COMFY_FORCE_VIEW_MODE"] = old_view
+
+
+class RemoteComfyBackend(ImageBackend):
+    def __init__(self, out_dir: Path, cfg: Optional[RemoteComfyConfig] = None) -> None:
+        self.out_dir = Path(out_dir).resolve()
+        self.cfg = cfg or RemoteComfyConfig()
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Optional per-request overrides
+        self.request_style_text: Optional[str] = None
+        self.request_style_weight: Optional[float] = None
+
+        if not self.cfg.host:
+            raise RuntimeError("remote_host_missing: set APP_COMFY_REMOTE_HOST")
+
+        try:
+            self.cfg.assert_policy(self.cfg.host)
+        except AssertionError as e:
+            raise RuntimeError(f"remote_host_policy_blocked: {e}") from None
+
+    def _load_prompt_file(self) -> dict:
+        data = json.loads(self.cfg.workflow_path.read_text(encoding="utf-8"))
+        if "prompt" in data and isinstance(data["prompt"], dict):
+            return data["prompt"]
+        return data
+
+    def _find_clip_nodes(self, prompt_dict: dict) -> list[dict]:
+        nodes = []
+        for node in prompt_dict.values():
+            if isinstance(node, dict) and node.get("class_type") == "CLIPTextEncode":
+                nodes.append(node)
+        return nodes
+
+    def _override_text_nodes(self, prompt_dict: dict, positive: str, negative: str) -> tuple[bool, bool]:
+        pos_set = False
+        neg_set = False
+        node_pos = prompt_dict.get(self.cfg.node_id_positive)
+        if isinstance(node_pos, dict) and node_pos.get("class_type") == "CLIPTextEncode":
+            inputs = node_pos.get("inputs")
+            if isinstance(inputs, dict) and "text" in inputs:
+                inputs["text"] = positive
+                pos_set = True
+        node_neg = prompt_dict.get(self.cfg.node_id_negative)
+        if isinstance(node_neg, dict) and node_neg.get("class_type") == "CLIPTextEncode":
+            inputs = node_neg.get("inputs")
+            if isinstance(inputs, dict) and "text" in inputs:
+                inputs["text"] = negative
+                neg_set = True
+        if not (pos_set and neg_set):
+            clips = self._find_clip_nodes(prompt_dict)
+            if clips and not pos_set:
+                ins = clips[0].get("inputs", {})
+                if isinstance(ins, dict) and "text" in ins:
+                    ins["text"] = positive
+                    pos_set = True
+            if len(clips) > 1 and not neg_set:
+                ins = clips[1].get("inputs", {})
+                if isinstance(ins, dict) and "text" in ins:
+                    ins["text"] = negative
+                    neg_set = True
+        return pos_set, neg_set
+
+    def _override_dimensions(self, prompt_dict: dict, width: int, height: int) -> None:
+        for node in prompt_dict.values():
+            if not isinstance(node, dict):
+                continue
+            cls = str(node.get("class_type") or node.get("class", "")).strip()
+            if cls in {"EmptyLatentImage", "EmptyLatentImageBatch", "LatentImage", "CreateLatentImage"}:
+                ins = node.get("inputs", {})
+                if isinstance(ins, dict):
+                    if "width" in ins:
+                        ins["width"] = width
+                    if "height" in ins:
+                        ins["height"] = height
+            if cls.startswith("KSampler"):
+                ins = node.get("inputs", {})
+                if isinstance(ins, dict):
+                    if "width" in ins:
+                        ins["width"] = width
+                    if "height" in ins:
+                        ins["height"] = height
+
+    def _override_sampling(self, prompt_dict: dict, steps: Optional[int], cfg: Optional[float], sampler_name: Optional[str]) -> None:
+        for node in prompt_dict.values():
+            if not isinstance(node, dict):
+                continue
+            cls = str(node.get("class_type") or node.get("class", "")).strip().lower()
+            if "ksampler" in cls:
+                ins = node.get("inputs", {})
+                if not isinstance(ins, dict):
+                    continue
+                if steps is not None and "steps" in ins:
+                    ins["steps"] = int(steps)
+                if cfg is not None and "cfg" in ins:
+                    try:
+                        ins["cfg"] = float(cfg)
+                    except Exception:
+                        pass
+                if sampler_name and "sampler_name" in ins:
+                    ins["sampler_name"] = sampler_name
+
+    async def _probe_history_remote(self) -> bool:
+        """
+        Quick health probe against remote /history using https (or configured scheme).
+        """
+        url = f"{self.cfg.scheme}://{self.cfg.host}:{self.cfg.port}/history"
+        try:
+            async with httpx.AsyncClient(timeout=_timeout_probe(), limits=_httpx_limits()) as c:
+                r = await c.get(url)
+                r.raise_for_status()
+                return True
+        except Exception as e:
+            print(f"[COMFY REMOTE] health probe failed: {type(e).__name__}: {e}")
+            return False
+
+    async def generate(
+        self,
+        prompt: str,
+        width: int | None = None,
+        height: int | None = None,
+        negative: str | None = None,
+        style_text: Optional[str] = None,
+        style_weight: Optional[float] = None
+    ) -> Path:
+        """
+        Generate via ComfyUI (Remote over Cloudflared).
+        - No discovery, host/port/scheme enforced from RemoteComfyConfig.
+        - Forces comfyui_bridge to https + query view mode via temporary env.
+        - Performs a quick health probe before the job to surface 'comfy_unavailable'.
+        """
+        if self.cfg.disabled:
+            raise RuntimeError("ComfyUI disabled (APP_DISABLE_COMFYUI=1)")
+        if not self.cfg.workflow_path.exists():
+            raise RuntimeError(f"workflow_not_found: {self.cfg.workflow_path}")
+
+        # Quick health probe
+        if not await self._probe_history_remote():
+            raise RuntimeError("comfy_unavailable")
+
+        # Build workflow
+        prompt_dict = self._load_prompt_file()
+
+        # Sizes
+        rw, rh = _resolve_size_for_backend("comfyui", width, height)
+        w_eff = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
+        h_eff = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
+        w = _clamp_dim(w_eff)
+        h = _clamp_dim(h_eff)
+        self._override_dimensions(prompt_dict, width=w, height=h)
+
+        # Sampling
+        sampler = self.cfg.sampler
+        self._override_sampling(prompt_dict, steps=self.cfg.steps, cfg=self.cfg.cfg, sampler_name=sampler)
+
+        # Texts
+        pos_text = (prompt or "").strip()
+        neg_text = (negative or self.cfg.negative or "").strip()
+        pos_set, neg_set = self._override_text_nodes(prompt_dict, positive=pos_text, negative=neg_text)
+
+        # Style (best-effort, same semantics as local)
+        style_set = False
+        if style_text:
+            node_style_id = self.cfg.node_id_style_positive
+            node_style = prompt_dict.get(node_style_id)
+            if isinstance(node_style, dict) and node_style.get("class_type") == "CLIPTextEncode":
+                ins = node_style.get("inputs", {})
+                if isinstance(ins, dict) and "text" in ins:
+                    ins["text"] = style_text
+                    style_set = True
+            if not style_set and style_text.lower() not in pos_text.lower():
+                node_pos = prompt_dict.get(self.cfg.node_id_positive)
+                style_suffix = f" Style: {style_text}"
+                if isinstance(node_pos, dict) and node_pos.get("class_type") == "CLIPTextEncode":
+                    ins = node_pos.get("inputs", {})
+                    if isinstance(ins, dict) and "text" in ins and isinstance(ins["text"], str):
+                        ins["text"] = (ins["text"] or "") + style_suffix
+                        pos_set = True
+                else:
+                    clips = self._find_clip_nodes(prompt_dict)
+                    if clips:
+                        ins = clips[0].get("inputs", {})
+                        if isinstance(ins, dict) and "text" in ins and isinstance(ins["text"], str):
+                            ins["text"] = (ins["text"] or "") + style_suffix
+                            pos_set = True
+
+        print(
+            f"[COMFY REMOTE] host={self.cfg.host} port={self.cfg.port} scheme={self.cfg.scheme} view={self.cfg.force_view_mode} "
+            f"size={w}x{h} sampler={sampler} pos_set={pos_set} neg_set={neg_set} style_set={style_set}"
+        )
+
+        # Force comfyui_bridge to remote behaviors for this call only
+        with _remote_env_ctx(scheme=self.cfg.scheme, force_view_mode=self.cfg.force_view_mode):
+            images = await generate_from_prompt_dict(
+                prompt_dict=prompt_dict,
+                out_dir=self.out_dir,
+                positive_text=None,
+                negative_text=None,
+                width=None,
+                height=None,
+                steps=None,
+                cfg=None,
+                sampler_name=None,
+                scheduler=None,
+                denoise=None,
+                seed=None,
+                host=self.cfg.host,
+                port=self.cfg.port,
+                max_wait_sec=float(self.cfg.timeout_sec),
+                poll_interval=1.0,
+            )
+
+        if images:
+            return images[0]
+        raise RuntimeError("comfy_no_images")
+
+
 # ---------------------------
 # Factory (Decoupled selection)
 # ---------------------------
@@ -1052,19 +1351,45 @@ class BackendEnv(BaseModel):
     image_backend: str = Field(default_factory=lambda: _env_str("IMAGE_BACKEND", "comfyui").lower())
     allow_cloud: bool = Field(default_factory=lambda: _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0))
     output_dir: Path = Field(default_factory=lambda: Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")).resolve())
+    # Runtime comfy mode: 'local' | 'remote' | 'auto' (auto prefers remote if configured, else local)
+    comfy_mode: str = Field(default_factory=lambda: (_env_str("APP_COMFY_MODE", "local") or "local").lower())
+
 
 def build_image_backend() -> ImageBackend:
+    """
+    Build the current image backend based on environment.
+    Supports:
+    - IMAGE_BACKEND=comfyui|pollinations
+    - APP_COMFY_MODE=local|remote|auto (auto: prefer remote if configured, else local)
+    """
     env = BackendEnv()
     out_dir = env.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if env.image_backend == "comfyui":
-        cfg = ComfyConfig()
-        return LocalComfyBackend(out_dir=out_dir, cfg=cfg)
+        mode = env.comfy_mode
+        if mode == "remote":
+            cfg = RemoteComfyConfig()
+            return RemoteComfyBackend(out_dir=out_dir, cfg=cfg)
+        elif mode == "auto":
+            # Prefer remote when reasonably configured; fallback to local on any config/policy error
+            try:
+                cfg_remote = RemoteComfyConfig()
+                if cfg_remote.host:
+                    return RemoteComfyBackend(out_dir=out_dir, cfg=cfg_remote)
+            except Exception as e:
+                print(f"[BACKEND FACTORY] remote auto-selection failed: {type(e).__name__}: {e} -> falling back to local")
+            cfg_local = ComfyConfig()
+            return LocalComfyBackend(out_dir=out_dir, cfg=cfg_local)
+        else:
+            cfg = ComfyConfig()
+            return LocalComfyBackend(out_dir=out_dir, cfg=cfg)
+
     elif env.image_backend == "pollinations":
         cfg = PollinationsConfig()
         cfg.allow_cloud = env.allow_cloud
         return PollinationsBackend(out_dir=out_dir, cfg=cfg)
+
     else:
         raise RuntimeError(f"Unsupported IMAGE_BACKEND={env.image_backend}")
 
@@ -1084,11 +1409,11 @@ def merge_style_prompt(content_prompt: str, style_positive: Optional[str]) -> st
     style = (style_positive or "").strip()
     if not style:
         return content
-    # Avoid trivial duplicate
     if style.lower() in content.lower():
         return content
     sep = " "
     return f"{content}{sep}Style: {style}".strip()
+
 
 def inject_negatives_for_final_prompt(prompt: str, negative: str | None) -> str:
     """
@@ -1100,3 +1425,4 @@ def inject_negatives_for_final_prompt(prompt: str, negative: str | None) -> str:
         return prompt
     new_prompt, _preview = _inject_negatives_into_prompt_keyword(prompt, negative)
     return new_prompt
+
