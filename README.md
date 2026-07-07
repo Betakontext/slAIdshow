@@ -41,41 +41,39 @@ It runs strictly local on your machine via Whisper (https://github.com/openai/wh
 ---
 
 ### Repository Layout
-
-	├── app.py
-	├── comfyui_bridge.py
-	├── comfyui.service
-	├── data
-	│   ├── references
-	│   └── refs
-	├── image_backend.py
-	├── models
-	│   ├── ggml-base.bin
-	│   └── ggml-tiny.bin
-	├── outputs
-	│   ├── audio
-	│   ├── config
-	│   │   └── style.json
-	│   ├── images
-	├── README.md
-	├── requirements.txt
-	├── run.ps1
-	├── run.sh
-	├── slAIdshow_summary.txt
-	├── static
-	│   └── uploads
-	├── style_engine.py
-	├── style_refs
-	├── utils
-	│   ├── audio_test.py
-	│   ├── dev_check.py
-	│   ├── mic_check_whisper.py
-	│   ├── test_comfy_local.py
-	│   └── verify_runtime.py
-	├── web
-	│   └── index.html
-	└── workflows
-		└── text2img_SD15-FP16.json
+── app.py
+├── comfyui_bridge.py
+├── comfyui.service
+├── .env   # create from .env.example and add f.e. Pollinations secret
+├── .env.exampe
+├── image_backend.py
+├── models
+│   └── ggml-base.bin
+├── outputs
+│   └── images
+│ 		├── bridge
+│   	│	└── tunnel_url.json
+│     	└── refs
+├── __pycache__
+├── README.md
+├── requirements.txt
+├── run.ps1
+├── run.sh
+├── static
+│   └── style
+├── style_engine.py
+├── utils
+│   ├── audio_test.py
+│   ├── dev_check.py
+│   ├── mic_check_whisper.py
+│   ├── style_features.py
+│   ├── test_comfy_local.py
+│   ├── test_pollinations_style_ref_auto_style.py
+│   └── verify_runtime.py
+├── web
+│   └── index.html
+└── workflows
+	└── text2img_SD15-FP16_Infografic.json
 
 ---
 

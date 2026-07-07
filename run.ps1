@@ -1,6 +1,6 @@
 #!/usr/bin/env pwsh
 <#
-Launcher for speechtoimage_ai (Windows PowerShell)
+Launcher for slAUdshow (Windows PowerShell)
 - Localhost only
 - Project virtual environment
 - Requirements installation
