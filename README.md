@@ -1,6 +1,6 @@
 ### slAIdshow | local AI speech-to-image generator
 
-## Whisper–Ollama–ComfyUI Pipeline for AI Live Illustrations (local, Browser UI)
+## Whisper–Ollama–ComfyUI Pipeline for AI Live Illustrations (local | remote | cloud via Browser UI)
 
 As a multi‑modal harness slAIdshow converts live voice inputs into real‑time visual illustrations for talks, readings, speeches and presentations.
 It runs strictly local on your machine via Whisper (https://github.com/openai/whisper) as backend for audio transcriptions, local LLM prompt optimizations via Ollama (https://github.com/ollama/ollama), and image generations via ComfyUI (https://github.com/comfy-org/comfyui) locally, or online if switched to Pollinations cloud services (https://github.com/pollinations/pollinations). A simple browser UI provides Start/Stop of audio input, text input field for direct prompts, optional prompt optimizations via Ollama and a workflow selector for custom ComfyUI workflows. With the default setup, delivered in this repository, it shows the generated images every 6–10 seconds, along with live transcripts and the latest prompts. The app runs flawlessly on a RTX3060 GPU with 6GB VRAM, and slows down a bit if run with CPU only.
@@ -9,9 +9,9 @@ It runs strictly local on your machine via Whisper (https://github.com/openai/wh
 
 ### Features
 
-- Local Browser UI (FastAPI) with Start/Stop controls
+- Local Browser UI (FastAPI) with Start/Stop controls and varius style settings
 - Audio capture from system devices with periodic transcription snapshots via Whisper (configurable, e.g., every 3–6 s)
-- Prompt optimizations for picture generation from those transcripts via Ollama (localhost:11434)
+- Direct prompt injection or prompt optimizations for picture generation from those transcripts via Ollama (localhost:11434)
 - Image generations via:
   - ComfyUI locally (127.0.0.1:8188 or 0.0.0.0:8188 for same‑LAN hosts)
   - ComfyUI remote (reachable from another network via VPN/tunnel)
@@ -41,41 +41,39 @@ It runs strictly local on your machine via Whisper (https://github.com/openai/wh
 ---
 
 ### Repository Layout
-
-	├── app.py
-	├── comfyui_bridge.py
-	├── comfyui.service
-	├── data
-	│   ├── references
-	│   └── refs
-	├── image_backend.py
-	├── models
-	│   ├── ggml-base.bin
-	│   └── ggml-tiny.bin
-	├── outputs
-	│   ├── audio
-	│   ├── config
-	│   │   └── style.json
-	│   ├── images
-	├── README.md
-	├── requirements.txt
-	├── run.ps1
-	├── run.sh
-	├── slAIdshow_summary.txt
-	├── static
-	│   └── uploads
-	├── style_engine.py
-	├── style_refs
-	├── utils
-	│   ├── audio_test.py
-	│   ├── dev_check.py
-	│   ├── mic_check_whisper.py
-	│   ├── test_comfy_local.py
-	│   └── verify_runtime.py
-	├── web
-	│   └── index.html
-	└── workflows
-		└── text2img_SD15-FP16.json
+── app.py
+├── comfyui_bridge.py
+├── comfyui.service
+├── .env   # create from .env.example and add f.e. Pollinations secret
+├── .env.exampe
+├── image_backend.py
+├── models
+│   └── ggml-base.bin
+├── outputs
+│   └── images
+│ 		├── bridge
+│   	│	└── tunnel_url.json
+│     	└── refs
+├── __pycache__
+├── README.md
+├── requirements.txt
+├── run.ps1
+├── run.sh
+├── static
+│   └── style
+├── style_engine.py
+├── utils
+│   ├── audio_test.py
+│   ├── dev_check.py
+│   ├── mic_check_whisper.py
+│   ├── style_features.py
+│   ├── test_comfy_local.py
+│   ├── test_pollinations_style_ref_auto_style.py
+│   └── verify_runtime.py
+├── web
+│   └── index.html
+└── workflows
+	└── text2img_SD15-FP16_Infografic.json
 
 ---
 
