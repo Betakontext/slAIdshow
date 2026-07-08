@@ -1496,14 +1496,14 @@
     });
 
     // ---------- Open dir hint ----------
-    document.getElementById('btn-open-dir').addEventListener('click', async () => {
-      try {
-        const r = await fetch('/open_dir_hint');
-        if (!r.ok) return;
-        const j = await r.json();
-        window.open(j?.static_url || '/static/', '_blank');
-      } catch {}
-    });
+      document.getElementById('btn-open-dir').addEventListener('click', async () => {
+        try {
+          const r = await fetch('/open_dir');
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        } catch (e) {
+          alert('Could not open folder on the server machine. ' + e.message);
+        }
+      });
 
     // ---------- Direct live toggle wiring ----------
     async function setDirectLive(enabled) {

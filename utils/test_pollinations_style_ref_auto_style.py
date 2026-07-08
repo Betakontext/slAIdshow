@@ -74,8 +74,8 @@ APP_IMAGE_HEIGHT = int(os.getenv("APP_IMAGE_HEIGHT", "720") or "720")
 SEED = int(os.getenv("TEST_SEED", "1234") or "1234")
 
 # I/O locations
-STYLE_REFS_DIR = Path(os.getenv("APP_INPUT_DIR", "./outputs/style_refs")).resolve()
-STYLE_FILENAME = os.getenv("TEST_STYLE_REFERENCE", "donald-duck-102-768x576_2.jpg")
+STYLE_REFS_DIR = Path(os.getenv("APP_INPUT_DIR", "./outputs/images/refs")).resolve()
+STYLE_FILENAME = os.getenv("TEST_STYLE_REFERENCE", "./donald-duck-102-768x576.jpg")
 STYLE_FILE = (STYLE_REFS_DIR / STYLE_FILENAME).resolve()
 
 OUTPUT_DIR = Path(os.getenv("APP_OUTPUT_DIR", "./outputs/images")).resolve()
