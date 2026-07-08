@@ -13,6 +13,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
+from utils.os_open import open_folder_os, OpenDirError
 
 # ---------- Optional dotenv loading ----------
 
@@ -50,13 +51,17 @@ from fastapi.responses import (
     PlainTextResponse,
     StreamingResponse,
     RedirectResponse,
+    Response,
 )
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator, HttpUrl
 
+from starlette.responses import Response
+
 # Image backend factory and interface
 from image_backend import build_image_backend, ImageBackend
 from image_backend import merge_style_prompt  # helper
+from utils.os_open import open_folder_os, OpenDirError
 
 try:
     from image_backend import LocalComfyBackend  # type: ignore
@@ -2485,6 +2490,37 @@ async def api_style_reset():
 @app.get("/open_dir_hint")
 async def open_dir_hint():
     return {"static_url": "/static/", "path": str(OUTPUT_DIR)}
+
+@app.get("/open_dir")
+async def open_dir():
+    """
+    Open OUTPUT_DIR in the native file manager.
+    Returns 200 OK with empty body and explicit Content-Length: 0 to avoid
+    middleware/body mismatches. On failure, returns 409 with JSON details.
+    """
+    try:
+        open_folder_os(OUTPUT_DIR)
+        # 200 OK, no body; make it explicit for all middlewares
+        return Response(status_code=200, content=b"", headers={"Content-Length": "0"})
+    except OpenDirError as e:
+        detail = {
+            "error": "open_dir_failed",
+            "reason": str(e),
+            "fallback": "/static/",
+            "path": str(OUTPUT_DIR),
+        }
+        # JSON on error is fine; here a body is intended
+        from fastapi.responses import JSONResponse
+        return JSONResponse(detail, status_code=409)
+    except Exception as e:
+        detail = {
+            "error": "unexpected_error",
+            "reason": str(e),
+            "fallback": "/static/",
+            "path": str(OUTPUT_DIR),
+        }
+        from fastapi.responses import JSONResponse
+        return JSONResponse(detail, status_code=409)
 
 # ---------- App entry ----------
 
