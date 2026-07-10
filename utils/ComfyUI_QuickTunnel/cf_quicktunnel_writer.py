@@ -45,7 +45,10 @@ Priority:
 - If --env-file is omitted, the loader auto-discovers .env next to the script,
   then in current working directory.
 
+Prerequisites:
 
+-> Place this file and the .env.example into the folder where you have your cloudflared.exe
+-> Fill .env.example with your host adress and keys and save it as .env
 
 Typical start:
 

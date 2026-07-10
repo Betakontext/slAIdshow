@@ -36,6 +36,7 @@ It runs strictly local on your machine via Whisper (https://github.com/openai/wh
 - pywhispercpp installed locally (for audio transcription)
 - Ollama installed and running locally (for LLM prompt optimization)
 - ComfyUI running locally with API on port 8188 (for local image generation)
+- ComfyUI running on remote in the same network or in another network f.e. reachable via cloudflared quicktunnel URL
 - Optional: Pollinations account + API key (for cloud image generation)
 
 ---
@@ -391,8 +392,9 @@ Start ComfyUI
 	# If you only have a CPU available:
 	# python main.py --listen 127.0.0.1 --port 8188 --CPU
 
-To access ComfyUI from another device in the same local network add "--listen 0.0.0.0" in ComfyUI’s config/batch (or run script) and start with:
+To access ComfyUI (local) from another device in the same local network add "--listen 0.0.0.0" in ComfyUI’s config/batch (or run script) and start with:
 
+	# I tested with 6GB VRAM:
 	python main.py --listen 0.0.0.0 --port 8188 --lowvram
 	# If you only have a CPU available:
 	# python main.py --listen 0.0.0.0 --port 8188 --CPU
@@ -400,6 +402,12 @@ To access ComfyUI from another device in the same local network add "--listen 0.
 → Access the ComfyUI GUI from the other device in the browser via:
 
 	http://<ip-of-device-ComfyUI-is-running-on>:8188
+
+To access ComfyUI (remote) from another device in another network:
+
+→ Use f.e. cloudflared and the ComfyUI bridge tool you can find unfer /utils or here with further descriptions: https://github.com/Betakontext/cloudflared-quicktunnel-bridge
+
+
 
 ---
 
