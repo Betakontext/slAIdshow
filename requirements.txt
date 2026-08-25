@@ -20,6 +20,9 @@ sounddevice==0.4.7
 # Whisper.cpp Python bindings (lokale Echtzeit-Transkription)
 pywhispercpp>=1.1.0
 
+# Fast Whisper transcription backend (CTranslate2-based; CPU fallback and optional CUDA support)
+faster-whisper==1.2.1
+
 # Environment handling
 python-dotenv==1.0.1
 
