@@ -45,6 +45,13 @@ print(f"[ENV] APP_OLLAMA_VISION_MODEL={os.getenv('APP_OLLAMA_VISION_MODEL')}, "
 import httpx
 import numpy as np
 import sounddevice as sd
+
+from transcription_backend import (
+    get_transcription_status,
+    init_transcription_backend,
+    transcribe_chunk,
+)
+
 from fastapi import FastAPI, Request, UploadFile, File, Body, Query
 from fastapi.responses import (
     JSONResponse,
@@ -142,14 +149,46 @@ FIRST_SNAPSHOT_DEADLINE_SEC = _env_float("APP_FIRST_SNAPSHOT_DEADLINE_SEC", 1.2)
 
 APP_SSE_TICK_SEC = _env_float("APP_SSE_TICK_SEC", 1.0)
 
-# ---------- Whisper (pywhispercpp) ----------
+# ---------- Transcription backend configuration ----------
 
+# The implementation and backend selection live in transcription_backend.py.
+# These values remain here because app.py exposes them in /config and uses
+# them for the audio pipeline configuration display.
+WHISPER_BACKEND_REQUESTED = _env_str("APP_WHISPER_BACKEND", "auto").lower()
 WHISPER_MODEL_PATH = _env_str("APP_WHISPER_MODEL_PATH", "")
 WHISPER_LANGUAGE = _env_str("APP_WHISPER_LANGUAGE", "de")
 WHISPER_THREADS = _env_int("APP_WHISPER_THREADS", 2)
 WHISPER_TEMPERATURE = _env_float("APP_WHISPER_TEMPERATURE", 0.0)
 WHISPER_MIN_SEC = _env_float("APP_WHISPER_MIN_SEC", 0.35)
 WHISPER_MIN_PEAK = _env_float("APP_WHISPER_MIN_PEAK", 0.0009)
+
+FASTER_WHISPER_MODEL = _env_str("APP_FASTER_WHISPER_MODEL", "small")
+FASTER_WHISPER_DEVICE = _env_str("APP_FASTER_WHISPER_DEVICE", "auto")
+FASTER_WHISPER_COMPUTE_TYPE = _env_str(
+    "APP_FASTER_WHISPER_COMPUTE_TYPE",
+    "auto",
+)
+FASTER_WHISPER_CPU_THREADS = _env_int(
+    "APP_FASTER_WHISPER_CPU_THREADS",
+    WHISPER_THREADS,
+)
+FASTER_WHISPER_NUM_WORKERS = _env_int(
+    "APP_FASTER_WHISPER_NUM_WORKERS",
+    1,
+)
+FASTER_WHISPER_BEAM_SIZE = _env_int(
+    "APP_FASTER_WHISPER_BEAM_SIZE",
+    1,
+)
+FASTER_WHISPER_VAD_FILTER = _env_bool01(
+    "APP_FASTER_WHISPER_VAD_FILTER",
+    0,
+)
+FASTER_WHISPER_DOWNLOAD_ROOT = _env_str(
+    "APP_FASTER_WHISPER_DOWNLOAD_ROOT",
+    "",
+)
+
 
 # ---------- Text filtering ----------
 
@@ -451,147 +490,13 @@ def pick_input_device(prefer: Optional[str] = None) -> int:
             return i
     raise RuntimeError("No input device with max_input_channels>0 found.")
 
-def to_int16(x: np.ndarray) -> np.ndarray:
-    x = np.clip(x, -1.0, 1.0)
-    return (x * 32767.0).astype(np.int16, copy=False)
-
 def rms_vad(frame: np.ndarray, rms_threshold: float = 0.01) -> bool:
     if frame.size == 0:
         return False
     rms = float(np.sqrt(np.mean(np.square(frame, dtype=np.float32), dtype=np.float64)))
     return rms >= rms_threshold
 
-def resample_to_16k(samples: np.ndarray, sr: int) -> np.ndarray:
-    if sr == 16000:
-        return samples.astype(np.float32, copy=False)
-    target_len = int(samples.shape[0] * (16000.0 / float(sr)))
-    if target_len <= 0:
-        return np.array([], dtype=np.float32)
-    return np.interp(
-        np.linspace(0.0, 1.0, num=target_len, endpoint=False, dtype=np.float64),
-        np.linspace(0.0, 1.0, num=samples.shape[0], endpoint=False, dtype=np.float64),
-        samples.astype(np.float64, copy=False),
-    ).astype(np.float32, copy=False)
 
-# ---------- Whisper init ----------
-
-WHISPER_AVAILABLE = True
-try:
-    from pywhispercpp.model import Model as WhisperModel  # type: ignore
-except Exception as e:
-    print(f"[WARN] could not import pywhispercpp: {e}")
-    WhisperModel = None  # type: ignore
-    WHISPER_AVAILABLE = False
-
-_WHISPER_MODEL: Optional[WhisperModel] = None
-
-def init_whisper_model() -> None:
-    global _WHISPER_MODEL
-    if not WHISPER_AVAILABLE or _WHISPER_MODEL is not None:
-        return
-    if not WHISPER_MODEL_PATH or not Path(WHISPER_MODEL_PATH).is_file():
-        print(f"[WHISPER] model not found/disabled: {WHISPER_MODEL_PATH}")
-        return
-    try:
-        _WHISPER_MODEL = WhisperModel(
-            WHISPER_MODEL_PATH,
-            n_threads=WHISPER_THREADS,
-            print_progress=False,
-            print_realtime=False,
-            language=WHISPER_LANGUAGE or None,
-            translate=False,
-            temperature=WHISPER_TEMPERATURE,
-        )
-        print(
-            f"[WHISPER] model loaded: {Path(WHISPER_MODEL_PATH).name}, "
-            f"threads={WHISPER_THREADS}, lang={WHISPER_LANGUAGE}"
-        )
-    except Exception as e:
-        print(f"[WHISPER] initialization failed: {e}")
-        _WHISPER_MODEL = None
-
-TEXT_FIELD_RE = re.compile(r"text\s*=\s*(.+?)(?:,|$)")
-META_RE = re.compile(
-    r"\b(musik|music|applaus|applause|lachen|laugh|geräusch|noise|husten|cough|klatschen|klingel|ring|summen|hmm+|pause)\b",
-    re.I,
-)
-
-def _parse_whisper_out(raw: object) -> str:
-    if raw is None:
-        return ""
-    if isinstance(raw, dict):
-        if isinstance(raw.get("text"), str):
-            return raw["text"]
-        segs = raw.get("segments")
-        if isinstance(segs, list):
-            return " ".join(str(s.get("text", "")).strip() for s in segs if isinstance(s, dict)).strip()
-        return ""
-    s = str(raw).strip()
-    if not s or s == "[]":
-        return ""
-    if s.startswith("[") and "text=" in s:
-        parts = TEXT_FIELD_RE.findall(s)
-        if parts:
-            cleaned = []
-            for t in parts:
-                t = t.strip()
-                if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
-                    t = t[1:-1]
-                cleaned.append(t.strip())
-            return " ".join(cleaned).strip()
-    return s
-
-def clean_transcript(raw: str) -> str:
-    if not raw:
-        return ""
-    txt = " ".join(raw.split()).strip()
-    if not txt:
-        return ""
-    if META_RE.search(txt) and len(txt.split()) <= 3:
-        return ""
-    if len(txt.split()) == 1 and txt.lower() in {"ja", "und", "also", "äh", "oh"}:
-        return ""
-    return txt
-
-def is_meaningful_text(t: str, min_chars: int, min_words: int) -> bool:
-    t = (t or "").strip()
-    return bool(t) and len(t) >= min_chars and len(t.split()) >= min_words and re.search(r"[A-Za-zÄÖÜäöüß]", t)
-
-def transcribe_chunk_with_whisper(samples: np.ndarray, sr: int) -> str:
-    if not WHISPER_AVAILABLE or _WHISPER_MODEL is None:
-        return ""
-    if samples.size == 0:
-        return ""
-    peak = float(np.max(np.abs(samples)))
-    if peak < WHISPER_MIN_PEAK:
-        print(f"[WHISPER] below_min_peak peak={peak:.4f} th={WHISPER_MIN_PEAK:.4f}")
-        return ""
-    min_sec = max(0.0, float(WHISPER_MIN_SEC))
-    if samples.size < int(sr * min_sec):
-        pad = int(sr * min_sec) - samples.size
-        samples = np.concatenate([samples, np.zeros(pad, dtype=np.float32)], axis=0)
-    if sr != 16000:
-        samples = resample_to_16k(samples, sr)
-        if samples.size == 0:
-            return ""
-    try:
-        if hasattr(_WHISPER_MODEL, "transcribe_float32"):
-            raw = _WHISPER_MODEL.transcribe_float32(samples)
-        elif hasattr(_WHISPER_MODEL, "transcribe"):
-            raw = _WHISPER_MODEL.transcribe(samples)
-        else:
-            raw = _WHISPER_MODEL.transcribe_pcm16(to_int16(samples))
-        txt = clean_transcript(_parse_whisper_out(raw))
-        if txt:
-            print(f"[WHISPER] text: {txt}")
-        else:
-            print("[WHISPER] raw→empty")
-        return txt
-    except KeyboardInterrupt:
-        return ""
-    except Exception as e:
-        print(f"[WHISPER] transcription failed: {e}")
-        return ""
 
 # ---------- HTTP utils ----------
 
@@ -760,8 +665,14 @@ def _log_effective_config() -> None:
         f"disable={DISABLE_VAD} rms_th={RMS_VAD_THRESHOLD}",
         "| snap:",
         f"snapshot_sec={SNAPSHOT_SEC} min_buf_sec={MIN_BUF_SEC} max_sil_ms={MAX_SILENCE_MS} max_seg={MAX_SEGMENT_SEC}",
-        "| whisper:",
-        f"min_sec={WHISPER_MIN_SEC} min_peak={WHISPER_MIN_PEAK} lang={WHISPER_LANGUAGE}",
+        "| transcription:",
+        f"requested_backend={WHISPER_BACKEND_REQUESTED} "
+        f"lang={WHISPER_LANGUAGE} "
+        f"min_sec={WHISPER_MIN_SEC} "
+        f"min_peak={WHISPER_MIN_PEAK} "
+        f"faster_model={FASTER_WHISPER_MODEL} "
+        f"faster_device={FASTER_WHISPER_DEVICE} "
+        f"faster_compute={FASTER_WHISPER_COMPUTE_TYPE}",
         "| text:",
         f"min_chars={TEXT_MIN_CHARS} min_words={TEXT_MIN_WORDS} force_meaningful={FORCE_MEANINGFUL_CHECK}",
         "| llm:",
@@ -939,7 +850,7 @@ async def audio_transcription_loop() -> None:
                     break
 
                 def _do_transcribe(arr: np.ndarray, sample_rate: int) -> str:
-                    return transcribe_chunk_with_whisper(arr, sample_rate)
+                    return transcribe_chunk(arr, sample_rate)
 
                 try:
                     text = await asyncio.to_thread(_do_transcribe, snap, sr)
@@ -1163,7 +1074,12 @@ from contextlib import asynccontextmanager
 async def lifespan(app: FastAPI):
     print(f"[ENV] loaded from: {ENV_PATH or '(env vars only)'}")
     _log_effective_config()
-    init_whisper_model()
+    transcription_manager = init_transcription_backend()
+    print(
+        "[TRANSCRIBE] startup_status="
+        f"{json.dumps(transcription_manager.get_status(), ensure_ascii=False)}"
+    )
+
 
     # Verify REFS_DIR early
     try:
@@ -1278,6 +1194,14 @@ async def ping():
 async def status():
     return {"ok": True, "running": STATE.running, "shutting_down": STATE.shutting_down}
 
+@app.get("/transcription/status")
+async def transcription_status():
+    """
+    Return the selected transcription backend and device readiness details.
+    """
+    return get_transcription_status()
+
+
 @app.get("/health", response_model=HealthReport)
 async def health() -> HealthReport:
     ollama_ok = await _ollama_available()
@@ -1311,7 +1235,30 @@ async def get_config():
         "audio": {"device_pref": AUDIO_DEVICE_PREF, "sample_rate": SAMPLE_RATE, "frame_ms": FRAME_MS, "stream_latency_sec": APP_STREAM_LATENCY_SEC},
         "vad": {"disable_vad": DISABLE_VAD, "rms_threshold": RMS_VAD_THRESHOLD},
         "snapshot": {"snapshot_sec": SNAPSHOT_SEC, "min_buf_sec": MIN_BUF_SEC, "max_silence_ms": MAX_SILENCE_MS, "max_segment_sec": MAX_SEGMENT_SEC, "first_snapshot_deadline_sec": FIRST_SNAPSHOT_DEADLINE_SEC},
-        "whisper": {"model_path": masked, "language": WHISPER_LANGUAGE, "threads": WHISPER_THREADS, "temperature": WHISPER_TEMPERATURE, "min_sec": WHISPER_MIN_SEC, "min_peak": WHISPER_MIN_PEAK},
+
+        "transcription": {
+            "requested_backend": WHISPER_BACKEND_REQUESTED,
+            "language": WHISPER_LANGUAGE,
+            "threads": WHISPER_THREADS,
+            "temperature": WHISPER_TEMPERATURE,
+            "min_sec": WHISPER_MIN_SEC,
+            "min_peak": WHISPER_MIN_PEAK,
+            "pywhispercpp": {
+                "model_path": masked,
+            },
+            "faster_whisper": {
+                "model": FASTER_WHISPER_MODEL,
+                "device_requested": FASTER_WHISPER_DEVICE,
+                "compute_type_requested": FASTER_WHISPER_COMPUTE_TYPE,
+                "cpu_threads": FASTER_WHISPER_CPU_THREADS,
+                "num_workers": FASTER_WHISPER_NUM_WORKERS,
+                "beam_size": FASTER_WHISPER_BEAM_SIZE,
+                "vad_filter": FASTER_WHISPER_VAD_FILTER,
+                "download_root": FASTER_WHISPER_DOWNLOAD_ROOT or None,
+            },
+            "runtime": get_transcription_status(),
+        },
+
         "text": {"min_chars": TEXT_MIN_CHARS, "min_words": TEXT_MIN_WORDS, "force_meaningful": FORCE_MEANINGFUL_CHECK},
         "context": {"max_segments": CONTEXT_MAX_SEGMENTS, "max_chars": CONTEXT_MAX_CHARS},
         "ollama": {"host": OLLAMA_HOST, "port": OLLAMA_PORT, "model": OLLAMA_MODEL, "temperature": OLLAMA_TEMPERATURE, "timeout_sec": OLLAMA_TIMEOUT_SEC, "interval_sec": LLM_INTERVAL_SEC, "disabled": OLLAMA_DISABLED},
