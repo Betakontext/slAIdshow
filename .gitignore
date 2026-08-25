@@ -74,3 +74,6 @@ dist/
 
 # Plans
 plan.odt
+
+# Faster-Whisper runtime model cache
+models/faster-whisper-cache/
