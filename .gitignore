@@ -35,6 +35,10 @@ Thumbs.db
 # Model weights (Whisper, large files; don't version control)
 models/*.bin
 
+
+# Faster-Whisper runtime model cache
+models/faster-whisper-cache/
+
 # If you need to keep documentation in models/, whitelist it:
 # !models/README.md
 
@@ -74,3 +78,4 @@ dist/
 
 # Plans
 plan.odt
+
