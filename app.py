@@ -66,8 +66,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, HttpUrl
 from starlette.responses import Response
 
 # Image backend factory and interface
-from image_backend import build_image_backend, ImageBackend
-from image_backend import merge_style_prompt  # helper
+from image_backend import build_image_backend, ImageBackend, merge_style_prompt, register_event_listener
+
 from utils.os_open import open_folder_os, OpenDirError
 
 try:
@@ -1290,6 +1290,25 @@ if not any(route for route in app.router.routes if getattr(route, "path", "") ==
 web_dir = Path("web").resolve()
 if web_dir.exists():
     app.mount("/web", StaticFiles(directory=str(web_dir), html=True), name="web")
+
+# Bridge: route image_backend events into our SSE broadcaster
+async def sse_broadcast(event_name: str, payload: dict) -> None:
+    """
+    Accepts events from image_backend (e.g., 'gallery:updated') and forwards them
+    to existing SSE clients using the local 'broadcast' helper.
+    """
+    # Reuse your existing 'broadcast' function that enqueues SSE messages to STATE.listeners
+    # payload can be dict; if your broadcast expects plain strings for data,
+    # you can json.dumps(payload) here. The event_name stays as SSE 'event:' field.
+    try:
+        data = payload if isinstance(payload, (str, bytes)) else json.dumps(payload, ensure_ascii=False)
+        await broadcast(event_name, data)
+    except Exception as e:
+        print(f"[SSE-BRIDGE] failed to forward event {event_name}: {e}")
+
+# Register once at server startup time
+register_event_listener(sse_broadcast)
+
 
 @app.get("/", include_in_schema=False)
 async def root_redirect():
