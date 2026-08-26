@@ -140,37 +140,6 @@
     }
     .toggle input { transform: scale(1.05); }
     .muted { color: var(--muted); }
-
-    /* NEW: Gallery styles */
-    .gallery-controls { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
-    #thumbs {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
-      gap: 8px;
-    }
-    .thumb {
-      position: relative;
-      border: 1px solid var(--border);
-      background: #0b0e14;
-      border-radius: 8px;
-      overflow: hidden;
-      height: 96px;
-      cursor: pointer;
-    }
-    .thumb img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-      filter: saturate(1);
-      transition: transform .15s ease, filter .15s ease, opacity .2s ease;
-    }
-    .thumb:hover img { transform: scale(1.02); filter: saturate(1.15); }
-    .thumb .name {
-      position: absolute; left: 4px; right: 4px; bottom: 4px;
-      font-size: 10px; color: #dfe6f3; background: rgba(0,0,0,0.45);
-      padding: 2px 4px; border-radius: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
   </style>
 </head>
 <body>
@@ -354,18 +323,6 @@
         </div>
       </aside>
     </div>
-
-    <!-- NEW: Thumbnail Gallery card -->
-    <section class="card">
-      <h3 id="title-gallery">Galerie</h3>
-      <div class="body">
-        <div class="gallery-controls">
-          <button id="btn-refresh-gallery" title="Neu laden">Neu laden</button>
-          <span class="subtle" id="gallery-hint"></span>
-        </div>
-        <div id="thumbs" aria-live="polite"></div>
-      </div>
-    </section>
   </main>
 
   <script>
@@ -463,10 +420,6 @@
         direct_live_label: "Direkt live",
         direct_live_title: "LLM-Optimierung umgehen; rohe Whisper-Transkripte verwenden",
         direct_live_on_hint: "Direktmodus aktiv: Rohtranskripte (ohne LLM)",
-        // NEW i18n for gallery
-        title_gallery: "Galerie",
-        btn_gallery_refresh: "Neu laden",
-        gallery_hint: "Klicke auf ein Miniaturbild, um es anzuzeigen.",
       },
       en: {
         brand: "slAIdshow | Local Speech-to-Image Pipeline",
@@ -560,10 +513,6 @@
         direct_live_label: "Direct live",
         direct_live_title: "Bypass text LLM; use raw Whisper transcripts",
         direct_live_on_hint: "Direct mode active: raw transcripts (no LLM)",
-        // NEW i18n for gallery
-        title_gallery: "Gallery",
-        btn_gallery_refresh: "Refresh",
-        gallery_hint: "Click a thumbnail to view it.",
       }
     };
 
@@ -643,20 +592,13 @@
       const btnPull = document.getElementById('btn-bridge-pull');
       if (btnPull) { btnPull.textContent = t('pull_btn_short'); btnPull.title = t('pull_btn_short'); }
 
+      // NEW: Direct live toggle label and title should follow language
       const lblDirect = document.getElementById('label-direct-live');
       if (lblDirect) lblDirect.textContent = t('direct_live_label');
       const toggleDirect = document.getElementById('toggle-direct-live');
       if (toggleDirect && toggleDirect.parentElement) {
         toggleDirect.parentElement.title = t('direct_live_title');
       }
-
-      // NEW: Gallery i18n
-      const titleGallery = document.getElementById('title-gallery');
-      if (titleGallery) titleGallery.textContent = t('title_gallery');
-      const btnGallery = document.getElementById('btn-refresh-gallery');
-      if (btnGallery) btnGallery.textContent = t('btn_gallery_refresh');
-      const galHint = document.getElementById('gallery-hint');
-      if (galHint) galHint.textContent = t('gallery_hint');
 
       const statusEl = document.getElementById('status');
       if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
@@ -717,12 +659,9 @@
     const toggleVision = $('#toggle-vision');
     const visionHintEl = document.getElementById('vision-hint');
 
+    // NEW: Direct live toggle
     const toggleDirectLive = document.getElementById('toggle-direct-live');
     const labelDirectLive = document.getElementById('label-direct-live');
-
-    // NEW: Gallery elements
-    const thumbsEl = document.getElementById('thumbs');
-    const btnRefreshGallery = document.getElementById('btn-refresh-gallery');
 
     let LAST_STYLE_POSITIVE = null;
 
@@ -860,11 +799,7 @@
       });
       sse.addEventListener('image', (ev) => {
         const rel = (ev?.data || '').trim();
-        if (rel) {
-          setImage(rel, caption.textContent || rel);
-          // NEW: Insert/refresh thumbnail on new image
-          prependThumb({name: rel.replace(/^\/?static\//, ''), url: rel, modified: Date.now()/1000});
-        }
+        if (rel) setImage(rel, caption.textContent || rel);
       });
     }
     connectSSE();
@@ -1222,8 +1157,6 @@
           setImage(j.rel, prompt);
           log(statusLog, `direct image: ${j.rel}`);
           log(promptLog, prompt);
-          // also insert thumb
-          prependThumb({name: j.rel.replace(/^\/?static\//, ''), url: j.rel, modified: Date.now()/1000});
         } else {
           log(statusLog, `direct failed: ${j.detail || j.error || r.status}`);
         }
@@ -1280,7 +1213,9 @@
           bridgeStatus.textContent = `${t('pull_fail')}: missing PULL_URL on server`;
           return null;
         }
-      } catch {}
+      } catch {
+        // continue
+      }
       try {
         const r = await fetch('/api/bridge/apply_from_pull', {
           method: 'POST',
@@ -1561,14 +1496,14 @@
     });
 
     // ---------- Open dir hint ----------
-    document.getElementById('btn-open-dir').addEventListener('click', async () => {
-      try {
-        const r = await fetch('/open_dir');
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      } catch (e) {
-        alert('Could not open folder on the server machine. ' + e.message);
-      }
-    });
+      document.getElementById('btn-open-dir').addEventListener('click', async () => {
+        try {
+          const r = await fetch('/open_dir');
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        } catch (e) {
+          alert('Could not open folder on the server machine. ' + e.message);
+        }
+      });
 
     // ---------- Direct live toggle wiring ----------
     async function setDirectLive(enabled) {
@@ -1583,87 +1518,21 @@
         syncDirectLiveHint();
       } catch (e) {
         log(statusLog, `direct_live update failed: ${e}`);
+        // revert UI on error
         toggleDirectLive.checked = !enabled;
         syncDirectLiveHint();
       }
     }
     function syncDirectLiveHint() {
       if (toggleDirectLive.checked) {
+        // Show localized "Direct mode active" hint
         statusEl.textContent = t('direct_live_on_hint');
       } else {
+        // Do not overwrite current status when toggled off; only set to "Ready" if we are not actively connected state text
         if (!statusEl.dataset.state || statusEl.dataset.state === 'connecting') {
           statusEl.textContent = t('status_ready');
         }
       }
-    }
-
-    // ---------- Gallery: fetch + render ----------
-    async function loadGallery(limit = 50) {
-      if (!thumbsEl) return;
-      try {
-        const r = await fetch(`/api/images?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' });
-        const j = await r.json().catch(() => ({}));
-        if (!r.ok || !j?.items) {
-          log(statusLog, `gallery load failed: ${r.status}`);
-          return;
-        }
-        renderThumbs(j.items);
-      } catch (e) {
-        log(statusLog, `gallery load exception: ${e}`);
-      }
-    }
-
-    function renderThumbs(items) {
-      thumbsEl.innerHTML = '';
-      for (const it of items) {
-        appendThumb(it);
-      }
-    }
-
-    function appendThumb(it) {
-      const div = document.createElement('div');
-      div.className = 'thumb';
-      const imgEl = document.createElement('img');
-      const url = it.url || (`/static/${it.name}`);
-      imgEl.src = url;
-      imgEl.alt = it.name || 'image';
-      imgEl.loading = 'lazy';
-      imgEl.decoding = 'async';
-      const name = document.createElement('div');
-      name.className = 'name';
-      name.textContent = it.name || '';
-      div.appendChild(imgEl);
-      div.appendChild(name);
-      div.addEventListener('click', () => {
-        setImage(url, caption.textContent || it.name);
-      });
-      thumbsEl.appendChild(div);
-    }
-
-    function prependThumb(it) {
-      if (!thumbsEl) return;
-      const div = document.createElement('div');
-      div.className = 'thumb';
-      const imgEl = document.createElement('img');
-      const url = it.url || (`/static/${it.name}`);
-      imgEl.src = url;
-      imgEl.alt = it.name || 'image';
-      imgEl.loading = 'lazy';
-      imgEl.decoding = 'async';
-      const name = document.createElement('div');
-      name.className = 'name';
-      name.textContent = it.name || '';
-      div.appendChild(imgEl);
-      div.appendChild(name);
-      div.addEventListener('click', () => {
-        setImage(url, caption.textContent || it.name);
-      });
-      if (thumbsEl.firstChild) thumbsEl.insertBefore(div, thumbsEl.firstChild);
-      else thumbsEl.appendChild(div);
-    }
-
-    if (btnRefreshGallery) {
-      btnRefreshGallery.addEventListener('click', () => loadGallery(50));
     }
 
     // ---------- Initial config ----------
@@ -1726,14 +1595,21 @@
           saveStyleState();
         }
 
-        // Server exposes direct_live as object {enabled}
-        const serverDirect = !!(j?.direct_live && j.direct_live.enabled === true);
+        // Hydrate direct_live toggle from server
+        // Honor explicit true from server only if user hasn't manually interacted yet.
+        // Default stays OFF unless server says true.
+        // Only set to true if serverDirect === true AND user hasn't explicitly toggled it yet.
+        const serverDirect = j?.direct_live === true;
         const userInteracted = toggleDirectLive.dataset.userInteracted === '1';
+
+        // Default remains OFF unless explicitly true from server and no prior user override.
         if (serverDirect && !userInteracted) {
           toggleDirectLive.checked = true;
         } else if (!userInteracted) {
           toggleDirectLive.checked = false;
         }
+        // if userInteracted, keep whatever the user set.
+
         syncDirectLiveHint();
 
         if (statusEl.dataset.state !== 'connected') statusEl.textContent = t('status_ready');
@@ -1750,6 +1626,7 @@
 
     // Toggle handler
     toggleDirectLive.addEventListener('change', () => {
+      // Mark that the user explicitly changed the setting
       toggleDirectLive.dataset.userInteracted = '1';
       setDirectLive(toggleDirectLive.checked);
     });
@@ -1774,9 +1651,6 @@
       if (document.getElementById('workflow-block').style.display !== 'none') {
         await refreshWorkflowList();
       }
-
-      // Initial gallery load
-      await loadGallery(50);
     })();
   </script>
 
