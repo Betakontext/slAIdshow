@@ -809,6 +809,65 @@ def _apply_active_workflow_if_local() -> None:
     except Exception as e:
         print(f"[WF] failed to apply active workflow: {e}")
 
+# --- Meaningful text guard for transcripts (robust minimal impl) ---
+import re
+
+# Treat strings that are only whitespace/punctuation as noise
+_ONLY_PUNCT_OR_SPACE = re.compile(r"^[\s\W_]+$", re.IGNORECASE)
+
+# Common filler words/interjections to ignore when very short/single-token
+_FILLERS = {
+    "äh", "ähm", "hm", "hmm", "hmmm", "öhm", "öh", "umm", "um", "uh", "er", "eh",
+    "ah", "oh", "ok", "okay", "yo", "yo.", "yo!", "yo?", "äh.", "äh?", "äh!",
+    "jo", "ne", "nee", "yoa", "oha"
+}
+
+def is_meaningful_text(text: str, min_chars: int = 0, min_words: int = 0) -> bool:
+    """
+    Returns True if 'text' looks meaningful enough to forward into the pipeline.
+    - Strips and lowercases.
+    - Rejects empty or punctuation-only strings.
+    - Applies minimal length/word-count thresholds if provided.
+    - Filters typical short fillers when they appear isolated.
+    """
+    if not text:
+        return False
+
+    t = text.strip()
+    if not t:
+        return False
+
+    # Reject if it's only spaces/punct
+    if _ONLY_PUNCT_OR_SPACE.match(t):
+        return False
+
+    # Minimal character threshold (after stripping)
+    if isinstance(min_chars, int) and min_chars > 0 and len(t) < min_chars:
+        # If it's very short, still accept if it's clearly a real word with letters and not a filler
+        letters = re.findall(r"[A-Za-zÄÖÜäöüßÀ-ÿ]", t)
+        if len(letters) < max(2, min_chars // 2):
+            # If it's a single short token and matches a known filler, drop it
+            if " " not in t and t.lower() in _FILLERS:
+                return False
+
+    # Minimal word threshold
+    if isinstance(min_words, int) and min_words > 0:
+        # Count tokens that have at least a letter or number
+        tokens = [w for w in re.split(r"\s+", t) if re.search(r"[A-Za-z0-9ÄÖÜäöüßÀ-ÿ]", w)]
+        if len(tokens) < min_words:
+            # If tokens < threshold and looks like a filler, reject
+            if len(tokens) == 1 and tokens[0].lower() in _FILLERS:
+                return False
+            # If it's just 1 tiny token of punct or digits, reject
+            if len(tokens) == 0:
+                return False
+
+    # Additional guard: must contain at least 2 letters overall OR at least one word-like token
+    if not re.search(r"[A-Za-zÄÖÜäöüßÀ-ÿ].*[A-Za-zÄÖÜäöüßÀ-ÿ]", t) and not re.search(r"\b\w+\b", t):
+        return False
+
+    return True
+
 # ---------- Audio transcription loop ----------
 
 async def audio_transcription_loop() -> None:
