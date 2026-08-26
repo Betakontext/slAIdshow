@@ -1,6 +1,6 @@
 Zielbeschreibung:
 
-Eine Speech-to-Image Whisper-Ollama (Text LLM)-ComfyUI/Pollinations Pipeline “slAIdshow”:
+Eine Speech-to-Image Whispe, Faster-Whisper r-Ollama (Text LLM) - ComfyUI (lokal) Pollinations (cloud) Pipeline “slAIdshow”:
 
 Drei Bild-Backends, in allen drei Modi
 
@@ -33,6 +33,7 @@ Drei Bild-Backends, in allen drei Modi
 ├── static
 │   └── style
 ├── style_engine.py
+├── transcribtion_backend.py
 ├── utils
 │   ├── audio_test.py
 │   ├── dev_check.py
@@ -46,10 +47,40 @@ Drei Bild-Backends, in allen drei Modi
 └── workflows
 	└── text2img_SD15-FP16_Infografic.json
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Hier die Dateien auf dem derzeitigen Stand:
 
 
+
+
+
+
+
+
 # app.py
+
+
+
 # app.py
 from __future__ import annotations
 
@@ -256,6 +287,10 @@ CONTEXT_MAX_CHARS = _env_int("APP_CONTEXT_MAX_CHARS", 480)
 OUTPUT_DIR = Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")).resolve()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# Gallery configuration. Only files directly inside OUTPUT_DIR are listed.
+GALLERY_IMAGE_LIMIT = max(1, min(100, _env_int("APP_GALLERY_IMAGE_LIMIT", 50)))
+GALLERY_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+
 def rel_for_ui(p: Path) -> str:
     return Path(p).name
 
@@ -291,6 +326,46 @@ def ensure_in_output_dir(p: Path) -> Path:
     except Exception as e:
         print(f"[SAVE] failed to move/copy image: {e}")
         return p
+
+def _list_gallery_images(limit: int) -> List["GalleryImageItem"]:
+    """
+    Return recent generated images directly inside OUTPUT_DIR.
+
+    Non-recursive on purpose. Excludes:
+      - refs/ (reference uploads)
+      - bridge/ (tunnel sync artifacts)
+      - any subdirectories or symlinks
+    """
+    items: List[GalleryImageItem] = []
+    try:
+        entries = list(OUTPUT_DIR.iterdir())
+    except FileNotFoundError:
+        return items
+    except Exception as e:
+        print(f"[GALLERY] failed to read output directory: {e}")
+        return items
+
+    for path in entries:
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            if path.suffix.lower() not in GALLERY_IMAGE_SUFFIXES:
+                continue
+            st = path.stat()
+            items.append(
+                GalleryImageItem(
+                    name=path.name,
+                    url=f"/static/{path.name}",
+                    modified=float(st.st_mtime),
+                )
+            )
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            print(f"[GALLERY] skipped entry {path!s}: {e}")
+
+    items.sort(key=lambda it: it.modified, reverse=True)
+    return items[: max(1, int(limit))]
 
 # UI-defaults (initial)
 APP_IMAGE_WIDTH = _env_int("APP_IMAGE_WIDTH", 512)
@@ -483,6 +558,16 @@ class ImageResponse(BaseModel):
     rel: Optional[str] = None
     width: int | None = None
     height: int | None = None
+
+class GalleryImageItem(BaseModel):
+    """A generated image available for the UI thumbnail gallery."""
+    name: str
+    url: str
+    modified: float
+
+class GalleryImageList(BaseModel):
+    """Response payload for the generated-image gallery endpoint."""
+    items: List[GalleryImageItem]
 
 class ImageSizeSettings(BaseModel):
     width: int = Field(ge=_MIN_SIZE, le=_MAX_SIZE)
@@ -806,6 +891,65 @@ def _apply_active_workflow_if_local() -> None:
         print(f"[WF] applied workflow to LocalComfyBackend: {wf_path.name}")
     except Exception as e:
         print(f"[WF] failed to apply active workflow: {e}")
+
+# --- Meaningful text guard for transcripts (robust minimal impl) ---
+import re
+
+# Treat strings that are only whitespace/punctuation as noise
+_ONLY_PUNCT_OR_SPACE = re.compile(r"^[\s\W_]+$", re.IGNORECASE)
+
+# Common filler words/interjections to ignore when very short/single-token
+_FILLERS = {
+    "äh", "ähm", "hm", "hmm", "hmmm", "öhm", "öh", "umm", "um", "uh", "er", "eh",
+    "ah", "oh", "ok", "okay", "yo", "yo.", "yo!", "yo?", "äh.", "äh?", "äh!",
+    "jo", "ne", "nee", "yoa", "oha"
+}
+
+def is_meaningful_text(text: str, min_chars: int = 0, min_words: int = 0) -> bool:
+    """
+    Returns True if 'text' looks meaningful enough to forward into the pipeline.
+    - Strips and lowercases.
+    - Rejects empty or punctuation-only strings.
+    - Applies minimal length/word-count thresholds if provided.
+    - Filters typical short fillers when they appear isolated.
+    """
+    if not text:
+        return False
+
+    t = text.strip()
+    if not t:
+        return False
+
+    # Reject if it's only spaces/punct
+    if _ONLY_PUNCT_OR_SPACE.match(t):
+        return False
+
+    # Minimal character threshold (after stripping)
+    if isinstance(min_chars, int) and min_chars > 0 and len(t) < min_chars:
+        # If it's very short, still accept if it's clearly a real word with letters and not a filler
+        letters = re.findall(r"[A-Za-zÄÖÜäöüßÀ-ÿ]", t)
+        if len(letters) < max(2, min_chars // 2):
+            # If it's a single short token and matches a known filler, drop it
+            if " " not in t and t.lower() in _FILLERS:
+                return False
+
+    # Minimal word threshold
+    if isinstance(min_words, int) and min_words > 0:
+        # Count tokens that have at least a letter or number
+        tokens = [w for w in re.split(r"\s+", t) if re.search(r"[A-Za-z0-9ÄÖÜäöüßÀ-ÿ]", w)]
+        if len(tokens) < min_words:
+            # If tokens < threshold and looks like a filler, reject
+            if len(tokens) == 1 and tokens[0].lower() in _FILLERS:
+                return False
+            # If it's just 1 tiny token of punct or digits, reject
+            if len(tokens) == 0:
+                return False
+
+    # Additional guard: must contain at least 2 letters overall OR at least one word-like token
+    if not re.search(r"[A-Za-zÄÖÜäöüßÀ-ÿ].*[A-Za-zÄÖÜäöüßÀ-ÿ]", t) and not re.search(r"\b\w+\b", t):
+        return False
+
+    return True
 
 # ---------- Audio transcription loop ----------
 
@@ -1245,6 +1389,24 @@ async def ping():
 @app.get("/status")
 async def status():
     return {"ok": True, "running": STATE.running, "shutting_down": STATE.shutting_down}
+
+@app.get("/api/images", response_model=GalleryImageList)
+async def api_list_images(
+    limit: int = Query(
+        default=GALLERY_IMAGE_LIMIT,
+        ge=1,
+        le=100,
+        description="Maximum number of recent generated images to return.",
+    ),
+) -> GalleryImageList:
+    """
+    Return recent generated images for the browser thumbnail gallery.
+
+    The directory scan runs in a worker thread so the event loop remains
+    responsive while image generation, SSE, and audio transcription are active.
+    """
+    items = await asyncio.to_thread(_list_gallery_images, limit)
+    return GalleryImageList(items=items)
 
 @app.get("/transcription/status")
 async def transcription_status():
@@ -1804,7 +1966,7 @@ def _is_valid_hostname(host: str) -> bool:
         inside = host[1:-1]
         return 0 < len(inside) <= 253
     ipv4_pattern = r"^\d{1,3}(\.\d{1,3}){3}$"
-    if re.match(ipv4_pattern, host):
+    if re.match(iv4 := ipv4_pattern, host):
         try:
             parts = [int(p) for p in host.split(".")]
             return all(0 <= p <= 255 for p in parts)
@@ -2601,6 +2763,16 @@ if __name__ == "__main__":
 # transcription_backend.py
 
 
+"""
+Selectable local speech-to-text backends for slAIdshow.
+
+Supported backends:
+- faster_whisper: Preferred backend using CTranslate2.
+- pywhispercpp: Lightweight fallback using whisper.cpp Python bindings.
+- auto: faster-whisper CUDA -> faster-whisper CPU/int8 -> pywhispercpp.
+
+All comments and operational messages in this module are intentionally English.
+"""
 
 from __future__ import annotations
 
@@ -2614,6 +2786,10 @@ from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
 
+
+# -----------------------
+# Environment helpers
+# -----------------------
 
 def _env_str(key: str, default: str = "") -> str:
     return (os.getenv(key, default) or "").strip()
@@ -2639,6 +2815,10 @@ def _env_bool(key: str, default: bool = False) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+# -----------------------
+# Regex helpers
+# -----------------------
+
 TEXT_FIELD_RE = re.compile(r"text\s*=\s*(.+?)(?:,|$)")
 META_RE = re.compile(
     r"\b(musik|music|applaus|applause|lachen|laugh|geräusch|noise|"
@@ -2646,6 +2826,10 @@ META_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+# -----------------------
+# Configuration dataclass
+# -----------------------
 
 @dataclass(frozen=True)
 class TranscriptionConfig:
@@ -2657,6 +2841,11 @@ class TranscriptionConfig:
     temperature: float
     min_seconds: float
     min_peak: float
+
+    # Optional Whisper-level thresholds (used by faster-whisper)
+    no_speech_threshold: Optional[float]
+    logprob_threshold: Optional[float]
+    condition_on_previous_text: bool
 
     pywhispercpp_model_path: str
 
@@ -2695,6 +2884,23 @@ class TranscriptionConfig:
         download_root_raw = _env_str("APP_FASTER_WHISPER_DOWNLOAD_ROOT", "")
         download_root = str(Path(download_root_raw).resolve()) if download_root_raw else None
 
+        # Optional decode controls; None means "do not pass" to keep library defaults
+        no_speech_threshold_env = _env_str("APP_WHISPER_NO_SPEECH_THRESHOLD", "")
+        no_speech_threshold: Optional[float] = None
+        if no_speech_threshold_env:
+            try:
+                no_speech_threshold = float(no_speech_threshold_env)
+            except Exception:
+                print("[TRANSCRIBE] Ignoring invalid APP_WHISPER_NO_SPEECH_THRESHOLD")
+
+        logprob_threshold_env = _env_str("APP_WHISPER_LOGPROB_THRESHOLD", "")
+        logprob_threshold: Optional[float] = None
+        if logprob_threshold_env:
+            try:
+                logprob_threshold = float(logprob_threshold_env)
+            except Exception:
+                print("[TRANSCRIBE] Ignoring invalid APP_WHISPER_LOGPROB_THRESHOLD")
+
         return cls(
             requested_backend=requested_backend,
             language=_env_str("APP_WHISPER_LANGUAGE", "de"),
@@ -2702,6 +2908,9 @@ class TranscriptionConfig:
             temperature=max(0.0, _env_float("APP_WHISPER_TEMPERATURE", 0.0)),
             min_seconds=max(0.0, _env_float("APP_WHISPER_MIN_SEC", 0.35)),
             min_peak=max(0.0, _env_float("APP_WHISPER_MIN_PEAK", 0.0009)),
+            no_speech_threshold=no_speech_threshold,
+            logprob_threshold=logprob_threshold,
+            condition_on_previous_text=_env_bool("APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT", False),
             pywhispercpp_model_path=_env_str("APP_WHISPER_MODEL_PATH", ""),
             faster_whisper_model=_env_str("APP_FASTER_WHISPER_MODEL", "small"),
             faster_whisper_device=faster_device,
@@ -2728,6 +2937,10 @@ class TranscriptionConfig:
             faster_whisper_download_root=download_root,
         )
 
+
+# -----------------------
+# Status dataclass
+# -----------------------
 
 @dataclass
 class TranscriptionStatus:
@@ -2759,6 +2972,10 @@ class TranscriptionStatus:
         return asdict(self)
 
 
+# -----------------------
+# Backend base
+# -----------------------
+
 class BaseTranscriptionBackend:
     """Common synchronous interface used by app.py through asyncio.to_thread."""
 
@@ -2770,6 +2987,10 @@ class BaseTranscriptionBackend:
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
         raise NotImplementedError
 
+
+# -----------------------
+# Faster-Whisper backend
+# -----------------------
 
 class FasterWhisperBackend(BaseTranscriptionBackend):
     """CTranslate2-backed faster-whisper implementation."""
@@ -2805,6 +3026,21 @@ class FasterWhisperBackend(BaseTranscriptionBackend):
         self.model_name = config.faster_whisper_model
         self.model = WhisperModel(config.faster_whisper_model, **model_kwargs)
 
+        # Log effective parameters for troubleshooting
+        print(
+            "[TRANSCRIBE] Faster-Whisper init: "
+            f"device={self.device} compute_type={self.compute_type} "
+            f"model={self.model_name} cpu_threads={config.faster_whisper_cpu_threads} "
+            f"workers={config.faster_whisper_num_workers} "
+            f"beam_size={config.faster_whisper_beam_size} "
+            f"vad_filter={int(config.faster_whisper_vad_filter)} "
+            f"lang={config.language} temp={config.temperature:.2f} "
+            f"min_sec={config.min_seconds:.2f} min_peak={config.min_peak:.4f} "
+            f"no_speech_thr={config.no_speech_threshold} "
+            f"logprob_thr={config.logprob_threshold} "
+            f"cond_prev={int(config.condition_on_previous_text)}"
+        )
+
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
         audio = _prepare_audio(
             samples=samples,
@@ -2814,16 +3050,22 @@ class FasterWhisperBackend(BaseTranscriptionBackend):
         if audio.size == 0:
             return ""
 
-        segments, _info = self.model.transcribe(
-            audio,
+        # Build kwargs conditionally to avoid overriding library defaults with None
+        kwargs: Dict[str, Any] = dict(
             language=self.config.language or None,
             beam_size=self.config.faster_whisper_beam_size,
             temperature=self.config.temperature,
             vad_filter=self.config.faster_whisper_vad_filter,
-            condition_on_previous_text=False,
+            condition_on_previous_text=self.config.condition_on_previous_text,
             word_timestamps=False,
             without_timestamps=True,
         )
+        if self.config.no_speech_threshold is not None:
+            kwargs["no_speech_threshold"] = self.config.no_speech_threshold
+        if self.config.logprob_threshold is not None:
+            kwargs["log_prob_threshold"] = self.config.logprob_threshold
+
+        segments, _info = self.model.transcribe(audio, **kwargs)
 
         text_parts: List[str] = []
         for segment in segments:
@@ -2833,6 +3075,10 @@ class FasterWhisperBackend(BaseTranscriptionBackend):
 
         return clean_transcript(" ".join(text_parts))
 
+
+# -----------------------
+# pywhispercpp backend
+# -----------------------
 
 class PyWhisperCppBackend(BaseTranscriptionBackend):
     """Existing whisper.cpp-based fallback implementation."""
@@ -2862,6 +3108,13 @@ class PyWhisperCppBackend(BaseTranscriptionBackend):
             temperature=config.temperature,
         )
 
+        print(
+            "[TRANSCRIBE] pywhispercpp init: "
+            f"model={self.model_path.name} threads={config.threads} "
+            f"lang={config.language} temp={config.temperature:.2f} "
+            f"min_sec={config.min_seconds:.2f} min_peak={config.min_peak:.4f}"
+        )
+
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
         audio = _prepare_audio(
             samples=samples,
@@ -2880,6 +3133,10 @@ class PyWhisperCppBackend(BaseTranscriptionBackend):
 
         return clean_transcript(_parse_pywhispercpp_output(raw))
 
+
+# -----------------------
+# Manager and initialization
+# -----------------------
 
 class TranscriptionManager:
     """
@@ -3169,6 +3426,10 @@ class TranscriptionManager:
         return self.status.to_dict()
 
 
+# -----------------------
+# Capability helpers
+# -----------------------
+
 def _get_supported_compute_types(device: str) -> Set[str]:
     """
     Query CTranslate2 capabilities without relying on torch.cuda.is_available().
@@ -3216,6 +3477,10 @@ def _select_compute_type(
 
     return None
 
+
+# -----------------------
+# Audio preparation
+# -----------------------
 
 def _prepare_audio(
     samples: np.ndarray,
@@ -3284,6 +3549,10 @@ def _to_int16(samples: np.ndarray) -> np.ndarray:
     return (clipped * 32767.0).astype(np.int16, copy=False)
 
 
+# -----------------------
+# Output parsing/cleaning
+# -----------------------
+
 def _parse_pywhispercpp_output(raw: object) -> str:
     """Normalize several pywhispercpp return shapes into a text string."""
 
@@ -3329,7 +3598,10 @@ def _parse_pywhispercpp_output(raw: object) -> str:
 
 
 def clean_transcript(raw: str) -> str:
-    """Remove empty, whitespace-only, and known non-speech filler results."""
+    """
+    Remove empty, whitespace-only, and obvious non-speech fillers.
+    Keep short but plausible sentence starts (avoid over-filtering).
+    """
 
     if not raw:
         return ""
@@ -3338,27 +3610,36 @@ def clean_transcript(raw: str) -> str:
     if not text:
         return ""
 
-    if META_RE.search(text) and len(text.split()) <= 3:
-        return ""
-
-    if len(text.split()) == 1 and text.lower() in {
+    # Filter single-word trivial fillers only (more permissive than before)
+    single = text.lower()
+    if len(text.split()) == 1 and single in {
         "ja",
         "und",
         "also",
         "äh",
         "oh",
+        "ähm",
+        "hm",
+        "hmm",
     }:
+        return ""
+
+    # Remove meta/fx-only very short lines like "(Applaus)"
+    if META_RE.search(text) and len(text.split()) <= 3:
         return ""
 
     return text
 
+
+# -----------------------
+# Public API
+# -----------------------
 
 _MANAGER: Optional[TranscriptionManager] = None
 
 
 def get_transcription_manager() -> TranscriptionManager:
     """Return the process-wide manager without initializing model weights."""
-
     global _MANAGER
     if _MANAGER is None:
         _MANAGER = TranscriptionManager()
@@ -3367,7 +3648,6 @@ def get_transcription_manager() -> TranscriptionManager:
 
 def init_transcription_backend() -> TranscriptionManager:
     """Initialize the configured backend once during FastAPI lifespan startup."""
-
     manager = get_transcription_manager()
     manager.initialize()
     return manager
@@ -3375,14 +3655,13 @@ def init_transcription_backend() -> TranscriptionManager:
 
 def transcribe_chunk(samples: np.ndarray, sample_rate: int) -> str:
     """Application-facing synchronous transcription function."""
-
     return get_transcription_manager().transcribe(samples, sample_rate)
 
 
 def get_transcription_status() -> Dict[str, Any]:
     """Application-facing status payload for API/UI diagnostics."""
-
     return get_transcription_manager().get_status()
+
 
 
 
@@ -7633,6 +7912,9 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
 
 
 #web/index.html
+
+
+
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -7775,6 +8057,37 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
     }
     .toggle input { transform: scale(1.05); }
     .muted { color: var(--muted); }
+
+    /* NEW: Gallery styles */
+    .gallery-controls { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+    #thumbs {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+      gap: 8px;
+    }
+    .thumb {
+      position: relative;
+      border: 1px solid var(--border);
+      background: #0b0e14;
+      border-radius: 8px;
+      overflow: hidden;
+      height: 96px;
+      cursor: pointer;
+    }
+    .thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      filter: saturate(1);
+      transition: transform .15s ease, filter .15s ease, opacity .2s ease;
+    }
+    .thumb:hover img { transform: scale(1.02); filter: saturate(1.15); }
+    .thumb .name {
+      position: absolute; left: 4px; right: 4px; bottom: 4px;
+      font-size: 10px; color: #dfe6f3; background: rgba(0,0,0,0.45);
+      padding: 2px 4px; border-radius: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
   </style>
 </head>
 <body>
@@ -7958,6 +8271,18 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
         </div>
       </aside>
     </div>
+
+    <!-- NEW: Thumbnail Gallery card -->
+    <section class="card">
+      <h3 id="title-gallery">Galerie</h3>
+      <div class="body">
+        <div class="gallery-controls">
+          <button id="btn-refresh-gallery" title="Neu laden">Neu laden</button>
+          <span class="subtle" id="gallery-hint"></span>
+        </div>
+        <div id="thumbs" aria-live="polite"></div>
+      </div>
+    </section>
   </main>
 
   <script>
@@ -8055,6 +8380,10 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
         direct_live_label: "Direkt live",
         direct_live_title: "LLM-Optimierung umgehen; rohe Whisper-Transkripte verwenden",
         direct_live_on_hint: "Direktmodus aktiv: Rohtranskripte (ohne LLM)",
+        // NEW i18n for gallery
+        title_gallery: "Galerie",
+        btn_gallery_refresh: "Neu laden",
+        gallery_hint: "Klicke auf ein Miniaturbild, um es anzuzeigen.",
       },
       en: {
         brand: "slAIdshow | Local Speech-to-Image Pipeline",
@@ -8148,6 +8477,10 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
         direct_live_label: "Direct live",
         direct_live_title: "Bypass text LLM; use raw Whisper transcripts",
         direct_live_on_hint: "Direct mode active: raw transcripts (no LLM)",
+        // NEW i18n for gallery
+        title_gallery: "Gallery",
+        btn_gallery_refresh: "Refresh",
+        gallery_hint: "Click a thumbnail to view it.",
       }
     };
 
@@ -8227,13 +8560,20 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       const btnPull = document.getElementById('btn-bridge-pull');
       if (btnPull) { btnPull.textContent = t('pull_btn_short'); btnPull.title = t('pull_btn_short'); }
 
-      // NEW: Direct live toggle label and title should follow language
       const lblDirect = document.getElementById('label-direct-live');
       if (lblDirect) lblDirect.textContent = t('direct_live_label');
       const toggleDirect = document.getElementById('toggle-direct-live');
       if (toggleDirect && toggleDirect.parentElement) {
         toggleDirect.parentElement.title = t('direct_live_title');
       }
+
+      // NEW: Gallery i18n
+      const titleGallery = document.getElementById('title-gallery');
+      if (titleGallery) titleGallery.textContent = t('title_gallery');
+      const btnGallery = document.getElementById('btn-refresh-gallery');
+      if (btnGallery) btnGallery.textContent = t('btn_gallery_refresh');
+      const galHint = document.getElementById('gallery-hint');
+      if (galHint) galHint.textContent = t('gallery_hint');
 
       const statusEl = document.getElementById('status');
       if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
@@ -8294,9 +8634,12 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
     const toggleVision = $('#toggle-vision');
     const visionHintEl = document.getElementById('vision-hint');
 
-    // NEW: Direct live toggle
     const toggleDirectLive = document.getElementById('toggle-direct-live');
     const labelDirectLive = document.getElementById('label-direct-live');
+
+    // NEW: Gallery elements
+    const thumbsEl = document.getElementById('thumbs');
+    const btnRefreshGallery = document.getElementById('btn-refresh-gallery');
 
     let LAST_STYLE_POSITIVE = null;
 
@@ -8434,7 +8777,11 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       });
       sse.addEventListener('image', (ev) => {
         const rel = (ev?.data || '').trim();
-        if (rel) setImage(rel, caption.textContent || rel);
+        if (rel) {
+          setImage(rel, caption.textContent || rel);
+          // NEW: Insert/refresh thumbnail on new image
+          prependThumb({name: rel.replace(/^\/?static\//, ''), url: rel, modified: Date.now()/1000});
+        }
       });
     }
     connectSSE();
@@ -8792,6 +9139,8 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
           setImage(j.rel, prompt);
           log(statusLog, `direct image: ${j.rel}`);
           log(promptLog, prompt);
+          // also insert thumb
+          prependThumb({name: j.rel.replace(/^\/?static\//, ''), url: j.rel, modified: Date.now()/1000});
         } else {
           log(statusLog, `direct failed: ${j.detail || j.error || r.status}`);
         }
@@ -8848,9 +9197,7 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
           bridgeStatus.textContent = `${t('pull_fail')}: missing PULL_URL on server`;
           return null;
         }
-      } catch {
-        // continue
-      }
+      } catch {}
       try {
         const r = await fetch('/api/bridge/apply_from_pull', {
           method: 'POST',
@@ -9133,11 +9480,11 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
     // ---------- Open dir hint ----------
     document.getElementById('btn-open-dir').addEventListener('click', async () => {
       try {
-        const r = await fetch('/open_dir_hint');
-        if (!r.ok) return;
-        const j = await r.json();
-        window.open(j?.static_url || '/static/', '_blank');
-      } catch {}
+        const r = await fetch('/open_dir');
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      } catch (e) {
+        alert('Could not open folder on the server machine. ' + e.message);
+      }
     });
 
     // ---------- Direct live toggle wiring ----------
@@ -9153,21 +9500,87 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
         syncDirectLiveHint();
       } catch (e) {
         log(statusLog, `direct_live update failed: ${e}`);
-        // revert UI on error
         toggleDirectLive.checked = !enabled;
         syncDirectLiveHint();
       }
     }
     function syncDirectLiveHint() {
       if (toggleDirectLive.checked) {
-        // Show localized "Direct mode active" hint
         statusEl.textContent = t('direct_live_on_hint');
       } else {
-        // Do not overwrite current status when toggled off; only set to "Ready" if we are not actively connected state text
         if (!statusEl.dataset.state || statusEl.dataset.state === 'connecting') {
           statusEl.textContent = t('status_ready');
         }
       }
+    }
+
+    // ---------- Gallery: fetch + render ----------
+    async function loadGallery(limit = 50) {
+      if (!thumbsEl) return;
+      try {
+        const r = await fetch(`/api/images?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j?.items) {
+          log(statusLog, `gallery load failed: ${r.status}`);
+          return;
+        }
+        renderThumbs(j.items);
+      } catch (e) {
+        log(statusLog, `gallery load exception: ${e}`);
+      }
+    }
+
+    function renderThumbs(items) {
+      thumbsEl.innerHTML = '';
+      for (const it of items) {
+        appendThumb(it);
+      }
+    }
+
+    function appendThumb(it) {
+      const div = document.createElement('div');
+      div.className = 'thumb';
+      const imgEl = document.createElement('img');
+      const url = it.url || (`/static/${it.name}`);
+      imgEl.src = url;
+      imgEl.alt = it.name || 'image';
+      imgEl.loading = 'lazy';
+      imgEl.decoding = 'async';
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = it.name || '';
+      div.appendChild(imgEl);
+      div.appendChild(name);
+      div.addEventListener('click', () => {
+        setImage(url, caption.textContent || it.name);
+      });
+      thumbsEl.appendChild(div);
+    }
+
+    function prependThumb(it) {
+      if (!thumbsEl) return;
+      const div = document.createElement('div');
+      div.className = 'thumb';
+      const imgEl = document.createElement('img');
+      const url = it.url || (`/static/${it.name}`);
+      imgEl.src = url;
+      imgEl.alt = it.name || 'image';
+      imgEl.loading = 'lazy';
+      imgEl.decoding = 'async';
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = it.name || '';
+      div.appendChild(imgEl);
+      div.appendChild(name);
+      div.addEventListener('click', () => {
+        setImage(url, caption.textContent || it.name);
+      });
+      if (thumbsEl.firstChild) thumbsEl.insertBefore(div, thumbsEl.firstChild);
+      else thumbsEl.appendChild(div);
+    }
+
+    if (btnRefreshGallery) {
+      btnRefreshGallery.addEventListener('click', () => loadGallery(50));
     }
 
     // ---------- Initial config ----------
@@ -9230,21 +9643,14 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
           saveStyleState();
         }
 
-        // Hydrate direct_live toggle from server
-        // Honor explicit true from server only if user hasn't manually interacted yet.
-        // Default stays OFF unless server says true.
-        // Only set to true if serverDirect === true AND user hasn't explicitly toggled it yet.
-        const serverDirect = j?.direct_live === true;
+        // Server exposes direct_live as object {enabled}
+        const serverDirect = !!(j?.direct_live && j.direct_live.enabled === true);
         const userInteracted = toggleDirectLive.dataset.userInteracted === '1';
-
-        // Default remains OFF unless explicitly true from server and no prior user override.
         if (serverDirect && !userInteracted) {
           toggleDirectLive.checked = true;
         } else if (!userInteracted) {
           toggleDirectLive.checked = false;
         }
-        // if userInteracted, keep whatever the user set.
-
         syncDirectLiveHint();
 
         if (statusEl.dataset.state !== 'connected') statusEl.textContent = t('status_ready');
@@ -9261,7 +9667,6 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
 
     // Toggle handler
     toggleDirectLive.addEventListener('change', () => {
-      // Mark that the user explicitly changed the setting
       toggleDirectLive.dataset.userInteracted = '1';
       setDirectLive(toggleDirectLive.checked);
     });
@@ -9286,6 +9691,9 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       if (document.getElementById('workflow-block').style.display !== 'none') {
         await refreshWorkflowList();
       }
+
+      // Initial gallery load
+      await loadGallery(50);
     })();
   </script>
 
@@ -9363,45 +9771,71 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
 
 
 
+
+
+
+
+
 # .env :
 
 # =========================
 # Base settings (local & cloud)
 # =========================
 APP_AUDIO_DEVICE=pipewire
-APP_SAMPLE_RATE=48000
+APP_SAMPLE_RATE=16000
 APP_FRAME_DURATION_MS=20
-APP_STREAM_LATENCY_SEC=0.12
+APP_STREAM_LATENCY_SEC=0.08
 APP_SSE_TICK_SEC=30.0
 
 # VAD (Voice Activity Detection)
-APP_DISABLE_VAD=1
+APP_DISABLE_VAD=0
 APP_USE_WEBRTC_VAD=0
-APP_VAD_AGGRESSIVENESS=0
-APP_RMS_VAD_THRESHOLD=0.02
-# APP_RMS_VAD_THRESHOLD=0.015
+APP_VAD_AGGRESSIVENESS=2
+APP_RMS_VAD_THRESHOLD=0.017
 
-# Snapshot / segmentation
-APP_SNAPSHOT_SEC=4.0
-APP_MIN_BUF_SEC=0.8
-APP_MAX_SILENCE_MS=1500
-APP_MAX_SEGMENT_SEC=15.0
-APP_FIRST_SNAPSHOT_DEADLINE_SEC=0.8
+# Snapshot / segmentation (satzorientiert + 8s-Flush)
+APP_SNAPSHOT_SEC=1.0
+APP_MIN_BUF_SEC=1.2
+APP_MAX_SILENCE_MS=1000
+APP_MAX_SEGMENT_SEC=12.0
+APP_FIRST_SNAPSHOT_DEADLINE_SEC=2.2
 
 # Frontend text filter
 APP_TEXT_MIN_CHARS=6
 APP_TEXT_MIN_WORDS=2
 APP_FORCE_MEANINGFUL_CHECK=1
 
-# =========================
-# Transcriptions via Whisper (pywhispercpp)
-# =========================
-APP_WHISPER_MODEL_PATH=./models/ggml-base.bin
+# ==========================================
+# Speech-to-text backend selection
+# ==========================================
+APP_WHISPER_BACKEND=faster_whisper
+
+# Shared transcription settings (frontend/VAD-gating)
 APP_WHISPER_LANGUAGE=de
-APP_WHISPER_THREADS=2
+APP_WHISPER_THREADS=4
 APP_WHISPER_TEMPERATURE=0.0
-APP_WHISPER_MIN_SEC=0.35
-APP_WHISPER_MIN_PEAK=0.0015
+APP_WHISPER_MIN_SEC=1.0
+APP_WHISPER_MIN_PEAK=0.0020
+
+# pywhispercpp fallback model
+APP_WHISPER_MODEL_PATH=./models/ggml-base.bin
+
+# faster-whisper settings
+APP_FASTER_WHISPER_MODEL=small
+APP_FASTER_WHISPER_DEVICE=cpu
+APP_FASTER_WHISPER_COMPUTE_TYPE=int8
+APP_FASTER_WHISPER_CPU_THREADS=4
+APP_FASTER_WHISPER_NUM_WORKERS=1
+APP_FASTER_WHISPER_BEAM_SIZE=5
+APP_FASTER_WHISPER_VAD_FILTER=1
+
+# Optional: weitere Whisper-Parameter
+APP_WHISPER_NO_SPEECH_THRESHOLD=0.6
+APP_WHISPER_LOGPROB_THRESHOLD=-1.0
+APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT=0
+
+# Persistenter Download/Cache
+APP_FASTER_WHISPER_DOWNLOAD_ROOT=./models/faster-whisper-cache
 
 # =========================
 # LLM prompt optimization via Ollama (local REST)

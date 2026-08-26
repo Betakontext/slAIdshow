@@ -746,7 +746,8 @@
 
     img.addEventListener('load', () => img.classList.add('loaded'));
     function setImage(filenameRel, captionText) {
-      const url = filenameRel.startsWith('/static/') ? filenameRel : `/static/${filenameRel.replace(/^\/+/, '')}`;
+      let url = filenameRel.startsWith('/static/') ? filenameRel : `/static/${filenameRel.replace(/^\/+/, '')}`;
+      url += (url.includes('?') ? '&' : '?') + 't=' + Date.now();
       img.classList.remove('loaded');
       img.src = url;
       caption.textContent = captionText || filenameRel;
@@ -865,6 +866,16 @@
           // NEW: Insert/refresh thumbnail on new image
           prependThumb({name: rel.replace(/^\/?static\//, ''), url: rel, modified: Date.now()/1000});
         }
+      });
+      // Reload gallery automatically when backend signals updates
+      sse.addEventListener('gallery:updated', (ev) => {
+        // Optional: advance a global bust token from payload.ts
+        try {
+          const payload = JSON.parse(ev?.data || '{}');
+          // payload.ts is seconds; convert to ms if you store it
+          // Not strictly needed because we bust per request below
+        } catch {}
+        loadGallery(50);
       });
     }
     connectSSE();
@@ -1223,7 +1234,8 @@
           log(statusLog, `direct image: ${j.rel}`);
           log(promptLog, prompt);
           // also insert thumb
-          prependThumb({name: j.rel.replace(/^\/?static\//, ''), url: j.rel, modified: Date.now()/1000});
+          const bustRel = j.rel + (j.rel.includes('?') ? '&' : '?') + 't=' + Date.now();
+          prependThumb({name: j.rel.replace(/^\/?static\//, ''), url: bustRel, modified: Date.now()/1000});
         } else {
           log(statusLog, `direct failed: ${j.detail || j.error || r.status}`);
         }
@@ -1601,7 +1613,7 @@
     async function loadGallery(limit = 50) {
       if (!thumbsEl) return;
       try {
-        const r = await fetch(`/api/images?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' });
+        const r = await fetch(`/api/images?limit=${encodeURIComponent(limit)}&t=${Date.now()}`, { cache: 'no-store' });
         const j = await r.json().catch(() => ({}));
         if (!r.ok || !j?.items) {
           log(statusLog, `gallery load failed: ${r.status}`);
@@ -1624,7 +1636,8 @@
       const div = document.createElement('div');
       div.className = 'thumb';
       const imgEl = document.createElement('img');
-      const url = it.url || (`/static/${it.name}`);
+      const base = it.url || (`/static/${it.name}`);
+      const url = base + (base.includes('?') ? '&' : '?') + 't=' + Date.now();
       imgEl.src = url;
       imgEl.alt = it.name || 'image';
       imgEl.loading = 'lazy';
@@ -1645,7 +1658,8 @@
       const div = document.createElement('div');
       div.className = 'thumb';
       const imgEl = document.createElement('img');
-      const url = it.url || (`/static/${it.name}`);
+      const base = it.url || (`/static/${it.name}`);
+      const url = base + (base.includes('?') ? '&' : '?') + 't=' + Date.now();
       imgEl.src = url;
       imgEl.alt = it.name || 'image';
       imgEl.loading = 'lazy';

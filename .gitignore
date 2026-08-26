@@ -78,4 +78,8 @@ plan.odt
 
 # Backup files
 app00.py
+image_backend00.py
+style_engine00.py
+comfyui_bridge00.py
+transcription_backend00.py
 web/index00.html
