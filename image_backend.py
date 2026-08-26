@@ -1,6 +1,9 @@
-
 # image_backend.py
-
+# Production-ready image backend layer for slAIdshow.
+# - ComfyUI local (same host or LAN with discovery)
+# - ComfyUI remote (cloudflared or any reachable host)
+# - Pollinations cloud (v1 or GET)
+# Adds SSE "gallery:updated" broadcasting after each saved image.
 
 from __future__ import annotations
 
@@ -14,12 +17,84 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Set, Tuple, List, Dict
+from typing import Optional, Set, Tuple, List, Dict, Callable, Awaitable
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from comfyui_bridge import generate_from_prompt_dict
+
+
+# ===========================
+# Event Broadcasting (SSE hook)
+# ===========================
+
+# Simple in-process async broadcaster. The FastAPI app should register exactly one
+# callback that knows how to deliver SSE events to connected clients.
+# This module does NOT import FastAPI objects directly to avoid cycles.
+
+_EventCallback = Callable[[str, dict], Awaitable[None]]
+_EVENT_LISTENERS: List[_EventCallback] = []
+
+
+def register_event_listener(cb: _EventCallback) -> None:
+    """
+    Register an async callback to deliver events.
+    Expected signature: async def cb(event_name: str, payload: dict) -> None
+    """
+    if cb not in _EVENT_LISTENERS:
+        _EVENT_LISTENERS.append(cb)
+
+
+def unregister_event_listener(cb: _EventCallback) -> None:
+    try:
+        _EVENT_LISTENERS.remove(cb)
+    except ValueError:
+        pass
+
+
+async def _send_event(name: str, payload: dict) -> None:
+    if not _EVENT_LISTENERS:
+        # No listeners registered (server not ready or running in offline tools)
+        return
+    # Deliver in parallel, but isolate failures.
+    tasks = []
+    for cb in list(_EVENT_LISTENERS):
+        try:
+            tasks.append(asyncio.create_task(cb(name, payload)))
+        except Exception as e:
+            print(f"[EVENT] scheduling error for {cb}: {e}")
+    if not tasks:
+        return
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
+    for d in done:
+        try:
+            _ = d.result()
+        except Exception as e:
+            print(f"[EVENT] listener failed: {type(e).__name__}: {e}")
+
+
+async def broadcast_gallery_updated(path: Path) -> None:
+    """
+    Broadcast 'gallery:updated' event after a new image is saved into outputs/images.
+    The frontend listens and reloads the gallery list via /api/images.
+    """
+    try:
+        stat = path.stat()
+        payload = {
+            "filename": path.name,
+            "rel": f"/static/{path.name}",
+            "size": stat.st_size,
+            "ts": int(stat.st_mtime),
+        }
+    except Exception:
+        # If stat fails (odd FS timing), send minimal payload
+        payload = {
+            "filename": path.name,
+            "rel": f"/static/{path.name}",
+            "ts": int(time.time()),
+        }
+    await _send_event("gallery:updated", payload)
 
 
 # ---------------------------
@@ -109,7 +184,6 @@ def _assert_image_backend_host_policy(host: str) -> None:
     """
     if _is_loopback(host):
         return
-    # Accept both static env flag and runtime flag set by build_image_backend_rt()
     allow_remote = (
         _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
         or _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0)
@@ -477,6 +551,8 @@ class PollinationsBackend(ImageBackend):
                     target.write_bytes(raw)
                     if target.stat().st_size < 1024:
                         raise RuntimeError("pollinations_v1_too_small")
+                    # Broadcast update
+                    await broadcast_gallery_updated(target)
                     return target
                 except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError, ValidationError) as e:
                     last_exc = e
@@ -518,6 +594,8 @@ class PollinationsBackend(ImageBackend):
                         raise RuntimeError("pollinations_get_too_small")
                     target = self.out_dir / f"img_{uuid.uuid4().hex}.jpg"
                     target.write_bytes(content)
+                    # Broadcast update
+                    await broadcast_gallery_updated(target)
                     return target
                 except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
                     last_exc = e
@@ -586,7 +664,6 @@ class ComfyConfig(BaseModel):
     @property
     def fallback_hosts(self) -> List[str]:
         items = [x.strip() for x in self.fallback_hosts_raw.replace(";", ",").split(",") if x.strip()]
-        # Deduplicate while preserving order
         out: List[str] = []
         seen: Set[str] = set()
         for h in items:
@@ -653,7 +730,6 @@ class LocalComfyBackend(ImageBackend):
         # 2) Optionally try fallback/discovery (only if remote backends are allowed)
         allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
         if not allow_remote or not self.cfg.auto_discovery_enable:
-            # Keep configured host; errors will be raised later if unavailable
             self._active_host = host
             self._discovery_done = True
             print("[DISCOVERY] auto-discovery disabled or remote not allowed; keeping configured host")
@@ -1050,10 +1126,20 @@ class LocalComfyBackend(ImageBackend):
         )
 
         if images:
+            # At least one image saved in out_dir by bridge; broadcast first
+            try:
+                first = images[0]
+                await broadcast_gallery_updated(first)
+            except Exception as e:
+                print(f"[EVENT] broadcast error (local comfy direct): {e}")
             return images[0]
 
         copied = self._copy_latest_from_comfy(since_ts=started_at)
         if copied:
+            try:
+                await broadcast_gallery_updated(copied)
+            except Exception as e:
+                print(f"[EVENT] broadcast error (local comfy copy): {e}")
             return copied
 
         raise RuntimeError("comfy_no_images")
@@ -1220,9 +1306,6 @@ class RemoteComfyBackend(ImageBackend):
                     ins["sampler_name"] = sampler_name
 
     async def _probe_history_remote(self) -> bool:
-        """
-        Quick health probe against remote /history using https (or configured scheme).
-        """
         url = f"{self.cfg.scheme}://{self.cfg.host}:{self.cfg.port}/history"
         try:
             async with httpx.AsyncClient(timeout=_timeout_probe(), limits=_httpx_limits()) as c:
@@ -1244,9 +1327,6 @@ class RemoteComfyBackend(ImageBackend):
     ) -> Path:
         """
         Generate via ComfyUI (Remote over Cloudflared).
-        - No discovery, host/port/scheme enforced from RemoteComfyConfig.
-        - Forces comfyui_bridge to https + query view mode via temporary env.
-        - Performs a quick health probe before the job to surface 'comfy_unavailable'.
         """
         if self.cfg.disabled:
             raise RuntimeError("ComfyUI disabled (APP_DISABLE_COMFYUI=1)")
@@ -1330,6 +1410,10 @@ class RemoteComfyBackend(ImageBackend):
             )
 
         if images:
+            try:
+                await broadcast_gallery_updated(images[0])
+            except Exception as e:
+                print(f"[EVENT] broadcast error (remote comfy): {e}")
             return images[0]
         raise RuntimeError("comfy_no_images")
 
@@ -1386,7 +1470,7 @@ def build_image_backend() -> ImageBackend:
 
 
 # ---------------------------
-# Optional helper for controllers (post-LLM guard)
+# Optional helpers for controllers
 # ---------------------------
 
 def merge_style_prompt(content_prompt: str, style_positive: Optional[str]) -> str:
@@ -1416,4 +1500,3 @@ def inject_negatives_for_final_prompt(prompt: str, negative: str | None) -> str:
         return prompt
     new_prompt, _preview = _inject_negatives_into_prompt_keyword(prompt, negative)
     return new_prompt
-
