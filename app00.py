@@ -204,10 +204,6 @@ CONTEXT_MAX_CHARS = _env_int("APP_CONTEXT_MAX_CHARS", 480)
 OUTPUT_DIR = Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")).resolve()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Gallery configuration. Only files directly inside OUTPUT_DIR are listed.
-GALLERY_IMAGE_LIMIT = max(1, min(100, _env_int("APP_GALLERY_IMAGE_LIMIT", 50)))
-GALLERY_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
-
 def rel_for_ui(p: Path) -> str:
     return Path(p).name
 
@@ -243,46 +239,6 @@ def ensure_in_output_dir(p: Path) -> Path:
     except Exception as e:
         print(f"[SAVE] failed to move/copy image: {e}")
         return p
-
-def _list_gallery_images(limit: int) -> List["GalleryImageItem"]:
-    """
-    Return recent generated images directly inside OUTPUT_DIR.
-
-    Non-recursive on purpose. Excludes:
-      - refs/ (reference uploads)
-      - bridge/ (tunnel sync artifacts)
-      - any subdirectories or symlinks
-    """
-    items: List[GalleryImageItem] = []
-    try:
-        entries = list(OUTPUT_DIR.iterdir())
-    except FileNotFoundError:
-        return items
-    except Exception as e:
-        print(f"[GALLERY] failed to read output directory: {e}")
-        return items
-
-    for path in entries:
-        try:
-            if path.is_symlink() or not path.is_file():
-                continue
-            if path.suffix.lower() not in GALLERY_IMAGE_SUFFIXES:
-                continue
-            st = path.stat()
-            items.append(
-                GalleryImageItem(
-                    name=path.name,
-                    url=f"/static/{path.name}",
-                    modified=float(st.st_mtime),
-                )
-            )
-        except FileNotFoundError:
-            continue
-        except Exception as e:
-            print(f"[GALLERY] skipped entry {path!s}: {e}")
-
-    items.sort(key=lambda it: it.modified, reverse=True)
-    return items[: max(1, int(limit))]
 
 # UI-defaults (initial)
 APP_IMAGE_WIDTH = _env_int("APP_IMAGE_WIDTH", 512)
@@ -475,16 +431,6 @@ class ImageResponse(BaseModel):
     rel: Optional[str] = None
     width: int | None = None
     height: int | None = None
-
-class GalleryImageItem(BaseModel):
-    """A generated image available for the UI thumbnail gallery."""
-    name: str
-    url: str
-    modified: float
-
-class GalleryImageList(BaseModel):
-    """Response payload for the generated-image gallery endpoint."""
-    items: List[GalleryImageItem]
 
 class ImageSizeSettings(BaseModel):
     width: int = Field(ge=_MIN_SIZE, le=_MAX_SIZE)
@@ -1248,24 +1194,6 @@ async def ping():
 async def status():
     return {"ok": True, "running": STATE.running, "shutting_down": STATE.shutting_down}
 
-@app.get("/api/images", response_model=GalleryImageList)
-async def api_list_images(
-    limit: int = Query(
-        default=GALLERY_IMAGE_LIMIT,
-        ge=1,
-        le=100,
-        description="Maximum number of recent generated images to return.",
-    ),
-) -> GalleryImageList:
-    """
-    Return recent generated images for the browser thumbnail gallery.
-
-    The directory scan runs in a worker thread so the event loop remains
-    responsive while image generation, SSE, and audio transcription are active.
-    """
-    items = await asyncio.to_thread(_list_gallery_images, limit)
-    return GalleryImageList(items=items)
-
 @app.get("/transcription/status")
 async def transcription_status():
     """
@@ -1824,7 +1752,7 @@ def _is_valid_hostname(host: str) -> bool:
         inside = host[1:-1]
         return 0 < len(inside) <= 253
     ipv4_pattern = r"^\d{1,3}(\.\d{1,3}){3}$"
-    if re.match(iv4 := ipv4_pattern, host):
+    if re.match(ipv4_pattern, host):
         try:
             parts = [int(p) for p in host.split(".")]
             return all(0 <= p <= 255 for p in parts)
