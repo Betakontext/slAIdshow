@@ -22,6 +22,10 @@ from typing import Any, Dict, List, Optional, Set
 import numpy as np
 
 
+# -----------------------
+# Environment helpers
+# -----------------------
+
 def _env_str(key: str, default: str = "") -> str:
     return (os.getenv(key, default) or "").strip()
 
@@ -46,6 +50,10 @@ def _env_bool(key: str, default: bool = False) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+# -----------------------
+# Regex helpers
+# -----------------------
+
 TEXT_FIELD_RE = re.compile(r"text\s*=\s*(.+?)(?:,|$)")
 META_RE = re.compile(
     r"\b(musik|music|applaus|applause|lachen|laugh|geräusch|noise|"
@@ -53,6 +61,10 @@ META_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+# -----------------------
+# Configuration dataclass
+# -----------------------
 
 @dataclass(frozen=True)
 class TranscriptionConfig:
@@ -64,6 +76,11 @@ class TranscriptionConfig:
     temperature: float
     min_seconds: float
     min_peak: float
+
+    # Optional Whisper-level thresholds (used by faster-whisper)
+    no_speech_threshold: Optional[float]
+    logprob_threshold: Optional[float]
+    condition_on_previous_text: bool
 
     pywhispercpp_model_path: str
 
@@ -102,6 +119,23 @@ class TranscriptionConfig:
         download_root_raw = _env_str("APP_FASTER_WHISPER_DOWNLOAD_ROOT", "")
         download_root = str(Path(download_root_raw).resolve()) if download_root_raw else None
 
+        # Optional decode controls; None means "do not pass" to keep library defaults
+        no_speech_threshold_env = _env_str("APP_WHISPER_NO_SPEECH_THRESHOLD", "")
+        no_speech_threshold: Optional[float] = None
+        if no_speech_threshold_env:
+            try:
+                no_speech_threshold = float(no_speech_threshold_env)
+            except Exception:
+                print("[TRANSCRIBE] Ignoring invalid APP_WHISPER_NO_SPEECH_THRESHOLD")
+
+        logprob_threshold_env = _env_str("APP_WHISPER_LOGPROB_THRESHOLD", "")
+        logprob_threshold: Optional[float] = None
+        if logprob_threshold_env:
+            try:
+                logprob_threshold = float(logprob_threshold_env)
+            except Exception:
+                print("[TRANSCRIBE] Ignoring invalid APP_WHISPER_LOGPROB_THRESHOLD")
+
         return cls(
             requested_backend=requested_backend,
             language=_env_str("APP_WHISPER_LANGUAGE", "de"),
@@ -109,6 +143,9 @@ class TranscriptionConfig:
             temperature=max(0.0, _env_float("APP_WHISPER_TEMPERATURE", 0.0)),
             min_seconds=max(0.0, _env_float("APP_WHISPER_MIN_SEC", 0.35)),
             min_peak=max(0.0, _env_float("APP_WHISPER_MIN_PEAK", 0.0009)),
+            no_speech_threshold=no_speech_threshold,
+            logprob_threshold=logprob_threshold,
+            condition_on_previous_text=_env_bool("APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT", False),
             pywhispercpp_model_path=_env_str("APP_WHISPER_MODEL_PATH", ""),
             faster_whisper_model=_env_str("APP_FASTER_WHISPER_MODEL", "small"),
             faster_whisper_device=faster_device,
@@ -135,6 +172,10 @@ class TranscriptionConfig:
             faster_whisper_download_root=download_root,
         )
 
+
+# -----------------------
+# Status dataclass
+# -----------------------
 
 @dataclass
 class TranscriptionStatus:
@@ -166,6 +207,10 @@ class TranscriptionStatus:
         return asdict(self)
 
 
+# -----------------------
+# Backend base
+# -----------------------
+
 class BaseTranscriptionBackend:
     """Common synchronous interface used by app.py through asyncio.to_thread."""
 
@@ -177,6 +222,10 @@ class BaseTranscriptionBackend:
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
         raise NotImplementedError
 
+
+# -----------------------
+# Faster-Whisper backend
+# -----------------------
 
 class FasterWhisperBackend(BaseTranscriptionBackend):
     """CTranslate2-backed faster-whisper implementation."""
@@ -212,6 +261,21 @@ class FasterWhisperBackend(BaseTranscriptionBackend):
         self.model_name = config.faster_whisper_model
         self.model = WhisperModel(config.faster_whisper_model, **model_kwargs)
 
+        # Log effective parameters for troubleshooting
+        print(
+            "[TRANSCRIBE] Faster-Whisper init: "
+            f"device={self.device} compute_type={self.compute_type} "
+            f"model={self.model_name} cpu_threads={config.faster_whisper_cpu_threads} "
+            f"workers={config.faster_whisper_num_workers} "
+            f"beam_size={config.faster_whisper_beam_size} "
+            f"vad_filter={int(config.faster_whisper_vad_filter)} "
+            f"lang={config.language} temp={config.temperature:.2f} "
+            f"min_sec={config.min_seconds:.2f} min_peak={config.min_peak:.4f} "
+            f"no_speech_thr={config.no_speech_threshold} "
+            f"logprob_thr={config.logprob_threshold} "
+            f"cond_prev={int(config.condition_on_previous_text)}"
+        )
+
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
         audio = _prepare_audio(
             samples=samples,
@@ -221,16 +285,22 @@ class FasterWhisperBackend(BaseTranscriptionBackend):
         if audio.size == 0:
             return ""
 
-        segments, _info = self.model.transcribe(
-            audio,
+        # Build kwargs conditionally to avoid overriding library defaults with None
+        kwargs: Dict[str, Any] = dict(
             language=self.config.language or None,
             beam_size=self.config.faster_whisper_beam_size,
             temperature=self.config.temperature,
             vad_filter=self.config.faster_whisper_vad_filter,
-            condition_on_previous_text=False,
+            condition_on_previous_text=self.config.condition_on_previous_text,
             word_timestamps=False,
             without_timestamps=True,
         )
+        if self.config.no_speech_threshold is not None:
+            kwargs["no_speech_threshold"] = self.config.no_speech_threshold
+        if self.config.logprob_threshold is not None:
+            kwargs["log_prob_threshold"] = self.config.logprob_threshold
+
+        segments, _info = self.model.transcribe(audio, **kwargs)
 
         text_parts: List[str] = []
         for segment in segments:
@@ -240,6 +310,10 @@ class FasterWhisperBackend(BaseTranscriptionBackend):
 
         return clean_transcript(" ".join(text_parts))
 
+
+# -----------------------
+# pywhispercpp backend
+# -----------------------
 
 class PyWhisperCppBackend(BaseTranscriptionBackend):
     """Existing whisper.cpp-based fallback implementation."""
@@ -269,6 +343,13 @@ class PyWhisperCppBackend(BaseTranscriptionBackend):
             temperature=config.temperature,
         )
 
+        print(
+            "[TRANSCRIBE] pywhispercpp init: "
+            f"model={self.model_path.name} threads={config.threads} "
+            f"lang={config.language} temp={config.temperature:.2f} "
+            f"min_sec={config.min_seconds:.2f} min_peak={config.min_peak:.4f}"
+        )
+
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
         audio = _prepare_audio(
             samples=samples,
@@ -287,6 +368,10 @@ class PyWhisperCppBackend(BaseTranscriptionBackend):
 
         return clean_transcript(_parse_pywhispercpp_output(raw))
 
+
+# -----------------------
+# Manager and initialization
+# -----------------------
 
 class TranscriptionManager:
     """
@@ -576,6 +661,10 @@ class TranscriptionManager:
         return self.status.to_dict()
 
 
+# -----------------------
+# Capability helpers
+# -----------------------
+
 def _get_supported_compute_types(device: str) -> Set[str]:
     """
     Query CTranslate2 capabilities without relying on torch.cuda.is_available().
@@ -623,6 +712,10 @@ def _select_compute_type(
 
     return None
 
+
+# -----------------------
+# Audio preparation
+# -----------------------
 
 def _prepare_audio(
     samples: np.ndarray,
@@ -691,6 +784,10 @@ def _to_int16(samples: np.ndarray) -> np.ndarray:
     return (clipped * 32767.0).astype(np.int16, copy=False)
 
 
+# -----------------------
+# Output parsing/cleaning
+# -----------------------
+
 def _parse_pywhispercpp_output(raw: object) -> str:
     """Normalize several pywhispercpp return shapes into a text string."""
 
@@ -736,7 +833,10 @@ def _parse_pywhispercpp_output(raw: object) -> str:
 
 
 def clean_transcript(raw: str) -> str:
-    """Remove empty, whitespace-only, and known non-speech filler results."""
+    """
+    Remove empty, whitespace-only, and obvious non-speech fillers.
+    Keep short but plausible sentence starts (avoid over-filtering).
+    """
 
     if not raw:
         return ""
@@ -745,27 +845,36 @@ def clean_transcript(raw: str) -> str:
     if not text:
         return ""
 
-    if META_RE.search(text) and len(text.split()) <= 3:
-        return ""
-
-    if len(text.split()) == 1 and text.lower() in {
+    # Filter single-word trivial fillers only (more permissive than before)
+    single = text.lower()
+    if len(text.split()) == 1 and single in {
         "ja",
         "und",
         "also",
         "äh",
         "oh",
+        "ähm",
+        "hm",
+        "hmm",
     }:
+        return ""
+
+    # Remove meta/fx-only very short lines like "(Applaus)"
+    if META_RE.search(text) and len(text.split()) <= 3:
         return ""
 
     return text
 
+
+# -----------------------
+# Public API
+# -----------------------
 
 _MANAGER: Optional[TranscriptionManager] = None
 
 
 def get_transcription_manager() -> TranscriptionManager:
     """Return the process-wide manager without initializing model weights."""
-
     global _MANAGER
     if _MANAGER is None:
         _MANAGER = TranscriptionManager()
@@ -774,7 +883,6 @@ def get_transcription_manager() -> TranscriptionManager:
 
 def init_transcription_backend() -> TranscriptionManager:
     """Initialize the configured backend once during FastAPI lifespan startup."""
-
     manager = get_transcription_manager()
     manager.initialize()
     return manager
@@ -782,11 +890,9 @@ def init_transcription_backend() -> TranscriptionManager:
 
 def transcribe_chunk(samples: np.ndarray, sample_rate: int) -> str:
     """Application-facing synchronous transcription function."""
-
     return get_transcription_manager().transcribe(samples, sample_rate)
 
 
 def get_transcription_status() -> Dict[str, Any]:
     """Application-facing status payload for API/UI diagnostics."""
-
     return get_transcription_manager().get_status()
