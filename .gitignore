@@ -39,9 +39,6 @@ models/*.bin
 # Faster-Whisper runtime model cache
 models/faster-whisper-cache/
 
-# If you need to keep documentation in models/, whitelist it:
-# !models/README.md
-
 # ComfyUI workflows
 workflows/*.json
 !workflows/text2img_SD15-FP16.json
@@ -79,3 +76,6 @@ dist/
 # Plans
 plan.odt
 
+# Backup files
+app00.py
+web/index00.html
