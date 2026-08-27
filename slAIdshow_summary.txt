@@ -80,7 +80,6 @@ Hier die Dateien auf dem derzeitigen Stand:
 # app.py
 
 
-
 # app.py
 from __future__ import annotations
 
@@ -133,6 +132,7 @@ from transcription_backend import (
     get_transcription_status,
     init_transcription_backend,
     transcribe_chunk,
+    RealtimeTranscriber,
 )
 
 from fastapi import FastAPI, Request, UploadFile, File, Body, Query
@@ -149,9 +149,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, HttpUrl
 from starlette.responses import Response
 
 # Image backend factory and interface
-from image_backend import build_image_backend, ImageBackend
-from image_backend import merge_style_prompt  # helper
+from image_backend import build_image_backend, ImageBackend, merge_style_prompt, register_event_listener
+
 from utils.os_open import open_folder_os, OpenDirError
+
 
 try:
     from image_backend import LocalComfyBackend  # type: ignore
@@ -227,6 +228,14 @@ MIN_BUF_SEC = _env_float("APP_MIN_BUF_SEC", 0.35)
 MAX_SILENCE_MS = _env_int("APP_MAX_SILENCE_MS", 700)
 MAX_SEGMENT_SEC = _env_float("APP_MAX_SEGMENT_SEC", 12.0)
 FIRST_SNAPSHOT_DEADLINE_SEC = _env_float("APP_FIRST_SNAPSHOT_DEADLINE_SEC", 1.2)
+
+# Realtime session holder (one per active recording)
+class _RTSession:
+    def __init__(self) -> None:
+        self.transcriber: Optional[RealtimeTranscriber] = None
+        self.sample_rate: int = SAMPLE_RATE  # use existing SAMPLE_RATE from app.py
+
+RT = _RTSession()
 
 # ---------- SSE heartbeat ----------
 
@@ -764,6 +773,76 @@ async def broadcast(event: str, data: str) -> None:
 
 _context_buffer: deque[str] = deque(maxlen=CONTEXT_MAX_SEGMENTS)
 
+# Lightweight dedupe and partial blacklist for realtime transcripts
+_last_partial_text: Optional[str] = None
+_last_partial_ts: float = 0.0
+# Lowercased phrases that often appear as hallucinations in partials
+_PARTIAL_BLACKLIST = {
+    "copyright wdr 2020",
+    "untertitelung im auftrag",
+    "im auftrag des wdr",
+}
+
+def _should_suppress_partial(txt: str) -> bool:
+    """
+    Returns True if this partial should be suppressed:
+    - Empty after strip
+    - Matches blacklist of frequent hallucination fillers (lowercased)
+    - Identical to last partial within 1.0s
+    - Very small 'wiggle' update within 1.0s (prefix + <=2 chars)
+    """
+    global _last_partial_text, _last_partial_ts
+    now = time.time()
+    t = (txt or "").strip()
+    if not t:
+        return True
+    tl = t.lower()
+
+    # Blacklist check for obvious filler/hallucination phrases in partials
+    if tl in _PARTIAL_BLACKLIST:
+        return True
+
+    # Dedupe: same as last partial very recently
+    if _last_partial_text and t == _last_partial_text and (now - _last_partial_ts) < 1.0:
+        return True
+
+    # Very small "wiggle": last is prefix and new adds <=2 chars quickly
+    if _last_partial_text and t.startswith(_last_partial_text) and len(t) - len(_last_partial_text) <= 2 and (now - _last_partial_ts) < 1.0:
+        return True
+
+    return False
+
+# Bridge realtime events to existing UI broadcast (with dedupe)
+def _on_realtime_event(evt: dict) -> None:
+    # Declare globals before any assignment in this function
+    global _last_partial_text, _last_partial_ts
+
+    et = evt.get("type")
+    txt = (evt.get("text") or "").strip()
+    if not txt:
+        return
+
+    if et == "partial":
+        if _should_suppress_partial(txt):
+            return
+        # Track last partial for dedupe timing window
+        _last_partial_text = txt
+        _last_partial_ts = time.time()
+        asyncio.create_task(broadcast("transcript_partial", txt))
+        asyncio.create_task(broadcast("transcript", txt))  # Keep UI compatibility
+
+    elif et == "final":
+        # Clear partial memory on finalization
+        _last_partial_text = None
+        _last_partial_ts = 0.0
+        asyncio.create_task(broadcast("transcript_final", txt))
+        asyncio.create_task(broadcast("transcript", txt))  # Keep UI compatibility
+
+
+
+
+
+
 async def _close_sse_listeners(timeout: float = 0.25) -> None:
     listeners = getattr(STATE, "listeners", None)
     if not listeners:
@@ -954,6 +1033,7 @@ def is_meaningful_text(text: str, min_chars: int = 0, min_words: int = 0) -> boo
 # ---------- Audio transcription loop ----------
 
 async def audio_transcription_loop() -> None:
+    global _last_partial_text, _last_partial_ts
     sr = int(SAMPLE_RATE)
     frame_len = max(1, int(sr * (FRAME_MS / 1000.0)))
     STATE.audio_stopped_broadcasted = False
@@ -1018,8 +1098,17 @@ async def audio_transcription_loop() -> None:
             if not STATE.running:
                 break
 
+            # Feed realtime transcriber with the current frame (non-blocking safety)
+            if RT.transcriber is not None:
+                try:
+                    await RT.transcriber.feed(frame)
+                except Exception as e:
+                    print(f"[RT] feed error: {e}")
+
+
             buf = np.concatenate([buf, frame], axis=0)
             now = time.time()
+
 
             vad_ok = True
             if not DISABLE_VAD:
@@ -1056,13 +1145,28 @@ async def audio_transcription_loop() -> None:
 
                 text = (text or "").strip()
                 if text and STATE.running:
-                    await broadcast("transcript", text)
+                    # Apply meaningful-text guard before broadcasting finals
                     if FORCE_MEANINGFUL_CHECK and not is_meaningful_text(text, TEXT_MIN_CHARS, TEXT_MIN_WORDS):
+                        # Ignore meaningless finals (e.g., tiny fillers/punct)
                         pass
                     else:
+                        # Only broadcast snapshot transcripts if direct-live is off
+                        direct_live = bool(int(os.getenv("APP_DIRECT_LIVE_ONLY", "0")))
+                        if not direct_live:
+                            await broadcast("transcript_final", text)
+                            await broadcast("transcript", text)
+
+                        # Reset partial memory upon finalization (stabilizes next partials)
+                        try:
+                            _last_partial_text = None
+                            _last_partial_ts = 0.0
+                        except Exception:
+                            pass
+
                         ctx = update_context_buffer(text)
                         # NEW: Direct-live path or existing Ollama path, respecting interval
                         if (time.time() - STATE.last_llm_run_ts) >= float(LLM_INTERVAL_SEC):
+
                             if not STATE.running:
                                 break
                             STATE.last_llm_run_ts = time.time()
@@ -1276,6 +1380,27 @@ async def lifespan(app: FastAPI):
         f"{json.dumps(transcription_manager.get_status(), ensure_ascii=False)}"
     )
 
+    # Extra diagnostics for live stability
+    try:
+        st = transcription_manager.get_status()
+        print(
+            f"[TRANSCRIBE] Ready: backend={st.get('selected_backend')} "
+            f"device={st.get('selected_device')} compute_type={st.get('selected_compute_type')} "
+            f"model={st.get('model')} language={st.get('language')}"
+        )
+        # If your backend exposes these flags, this verifies .env took effect
+        print(
+            "[TRANSCRIBE]",
+            f"cond_prev={1 if os.getenv('APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT','0').strip().lower() in {'1','true','yes','on'} else 0} "
+            f"vad_filter={1 if os.getenv('APP_FASTER_WHISPER_VAD_FILTER','1').strip().lower() in {'1','true','yes','on'} else 0} "
+            f"beam_size={os.getenv('APP_FASTER_WHISPER_BEAM_SIZE','1')} "
+            f"no_speech_thr={os.getenv('APP_WHISPER_NO_SPEECH_THRESHOLD','')} "
+            f"logprob_thr={os.getenv('APP_WHISPER_LOGPROB_THRESHOLD','')}"
+        )
+    except Exception as e:
+        print(f"[TRANSCRIBE] diag-print failed: {e}")
+
+
 
     # Verify REFS_DIR early
     try:
@@ -1373,6 +1498,25 @@ if not any(route for route in app.router.routes if getattr(route, "path", "") ==
 web_dir = Path("web").resolve()
 if web_dir.exists():
     app.mount("/web", StaticFiles(directory=str(web_dir), html=True), name="web")
+
+# Bridge: route image_backend events into our SSE broadcaster
+async def sse_broadcast(event_name: str, payload: dict) -> None:
+    """
+    Accepts events from image_backend (e.g., 'gallery:updated') and forwards them
+    to existing SSE clients using the local 'broadcast' helper.
+    """
+    # Reuse your existing 'broadcast' function that enqueues SSE messages to STATE.listeners
+    # payload can be dict; if your broadcast expects plain strings for data,
+    # you can json.dumps(payload) here. The event_name stays as SSE 'event:' field.
+    try:
+        data = payload if isinstance(payload, (str, bytes)) else json.dumps(payload, ensure_ascii=False)
+        await broadcast(event_name, data)
+    except Exception as e:
+        print(f"[SSE-BRIDGE] failed to forward event {event_name}: {e}")
+
+# Register once at server startup time
+register_event_listener(sse_broadcast)
+
 
 @app.get("/", include_in_schema=False)
 async def root_redirect():
@@ -1610,17 +1754,34 @@ async def start_pipeline():
         return PlainTextResponse("already running", status_code=200)
     if STATE.shutting_down:
         return PlainTextResponse("shutting_down", status_code=409)
+
+    # NEW: start realtime transcriber for this session
+    try:
+        if RT.transcriber is None:
+            rt = RealtimeTranscriber(sample_rate=SAMPLE_RATE)
+            rt.subscribe(_on_realtime_event)
+            await rt.start()
+            RT.transcriber = rt
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[RT] failed to start realtime transcriber: {e}\n{tb}")
+
     STATE.running = True
     STATE.start_ts = time.time()
     STATE.task = asyncio.create_task(audio_transcription_loop())
     await broadcast("status", "server_start_recording")
     return PlainTextResponse("started")
 
+
 @app.post("/stop", response_class=PlainTextResponse)
 async def stop_pipeline():
     print("[HTTP] /stop called")
     STATE.running = False
+
+    # Stop audio input stream gracefully
     await safe_stop_audio_stream()
+
+    # Stop the main loop task
     if STATE.task:
         STATE.task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -1629,9 +1790,21 @@ async def stop_pipeline():
             except asyncio.TimeoutError:
                 pass
         STATE.task = None
+
+    # Stop realtime transcriber for this session
+    if RT.transcriber is not None:
+        try:
+            await RT.transcriber.stop()
+        except Exception as e:
+            print(f"[RT] stop error: {e}")
+        finally:
+            RT.transcriber = None
+
     await broadcast("status", "audio_stopped")
     print("[HTTP] /stop completed")
     return PlainTextResponse("stopped")
+
+
 
 @app.post("/shutdown", response_class=PlainTextResponse)
 async def shutdown_server():
@@ -2762,29 +2935,73 @@ if __name__ == "__main__":
 
 # transcription_backend.py
 
-
-"""
-Selectable local speech-to-text backends for slAIdshow.
-
-Supported backends:
-- faster_whisper: Preferred backend using CTranslate2.
-- pywhispercpp: Lightweight fallback using whisper.cpp Python bindings.
-- auto: faster-whisper CUDA -> faster-whisper CPU/int8 -> pywhispercpp.
-
-All comments and operational messages in this module are intentionally English.
-"""
+# transcription_backend.py
+#
+# Drop-in replacement with:
+# - Preserves existing public API, env keys, status structure, capability logic
+# - Primary backend: faster-whisper (CTranslate2), fallback: pywhispercpp.model.Model
+# - Keeps your established audio preparation and cleaning utilities
+# - Adds a low-latency RealtimeTranscriber:
+#     * RMS-based VAD + debounce to detect end-of-utterance
+#     * Rolling window + slice-cadence decodes for partial hypotheses
+#     * Optional file recording and file-transcription fallback if realtime-final is empty
+# - All operational messages remain in English
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import io
 import os
 import re
 import time
 import traceback
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
+
+
+# -----------------------
+# --- Realtime merging and sentence heuristics utilities ---
+# -----------------------
+
+SENTENCE_END_RE = re.compile(r"[\.!\?…]\s*$")
+
+
+def _merge_overlap(prev: str, new: str, min_overlap: int = 5, max_overlap: int = 18) -> str:
+    """
+    Merge 'new' into 'prev' with de-duplication by overlapping tail/head.
+    Returns the combined string.
+    """
+    prev = prev or ""
+    new = new or ""
+    if not prev:
+        return new
+    # Normalize spaces
+    prev_n = re.sub(r"\s+", " ", prev).strip()
+    new_n = re.sub(r"\s+", " ", new).strip()
+    if not new_n:
+        return prev_n
+    # Try largest overlap between end(prev) and start(new)
+    max_k = min(max_overlap, len(prev_n), len(new_n))
+    for k in range(max_k, min_overlap - 1, -1):
+        if prev_n.endswith(new_n[:k]):
+            return (prev_n + new_n[k:]).strip()
+    # Try the reverse (rare but cheap)
+    if new_n.endswith(prev_n[:max_k]):
+        return (prev_n + " " + new_n).strip()
+    return (prev_n + " " + new_n).strip()
+
+
+def _is_meaningful(text: str, min_chars: int = 12, min_words: int = 3) -> bool:
+    text_n = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(text_n) < min_chars:
+        return False
+    if len(text_n.split()) < min_words:
+        return False
+    return True
 
 
 # -----------------------
@@ -2858,9 +3075,19 @@ class TranscriptionConfig:
     faster_whisper_vad_filter: bool
     faster_whisper_download_root: Optional[str]
 
+    # Realtime parameters (new; defaults tuned for low latency)
+    rt_slice_sec: float
+    rt_window_sec: float
+    rt_end_debounce_ms: int
+    vad_enabled: bool
+    vad_rms_threshold: float
+    rt_fallback_record: bool
+    rt_fallback_dir: str
+
     @classmethod
     def from_environment(cls) -> "TranscriptionConfig":
         requested_backend = _env_str("APP_WHISPER_BACKEND", "auto").lower()
+        # Preserve legacy names
         if requested_backend not in {"auto", "faster_whisper", "pywhispercpp"}:
             print(
                 "[TRANSCRIBE] Invalid APP_WHISPER_BACKEND="
@@ -2876,10 +3103,7 @@ class TranscriptionConfig:
             )
             faster_device = "auto"
 
-        faster_compute_type = _env_str(
-            "APP_FASTER_WHISPER_COMPUTE_TYPE",
-            "auto",
-        ).lower()
+        faster_compute_type = _env_str("APP_FASTER_WHISPER_COMPUTE_TYPE", "auto").lower()
 
         download_root_raw = _env_str("APP_FASTER_WHISPER_DOWNLOAD_ROOT", "")
         download_root = str(Path(download_root_raw).resolve()) if download_root_raw else None
@@ -2900,6 +3124,15 @@ class TranscriptionConfig:
                 logprob_threshold = float(logprob_threshold_env)
             except Exception:
                 print("[TRANSCRIBE] Ignoring invalid APP_WHISPER_LOGPROB_THRESHOLD")
+
+        # Realtime params with sensible defaults
+        rt_slice_sec = _env_float("APP_RT_SLICE_SEC", 3.0)
+        rt_window_sec = _env_float("APP_RT_WINDOW_SEC", 30.0)
+        rt_end_debounce_ms = _env_int("APP_RT_END_DEBOUNCE_MS", 550)
+        vad_enabled = not _env_bool("APP_DISABLE_VAD", True)  # default True (enabled), inverted flag
+        vad_rms_threshold = _env_float("APP_RMS_VAD_THRESHOLD", 0.015)
+        rt_fallback_record = _env_bool("APP_RT_FALLBACK_RECORD", True)
+        rt_fallback_dir = _env_str("APP_RT_FALLBACK_DIR", "./outputs/voice_fallback")
 
         return cls(
             requested_backend=requested_backend,
@@ -2935,6 +3168,14 @@ class TranscriptionConfig:
                 False,
             ),
             faster_whisper_download_root=download_root,
+            # Realtime params
+            rt_slice_sec=rt_slice_sec,
+            rt_window_sec=rt_window_sec,
+            rt_end_debounce_ms=rt_end_debounce_ms,
+            vad_enabled=vad_enabled,
+            vad_rms_threshold=vad_rms_threshold,
+            rt_fallback_record=rt_fallback_record,
+            rt_fallback_dir=rt_fallback_dir,
         )
 
 
@@ -3026,7 +3267,6 @@ class FasterWhisperBackend(BaseTranscriptionBackend):
         self.model_name = config.faster_whisper_model
         self.model = WhisperModel(config.faster_whisper_model, **model_kwargs)
 
-        # Log effective parameters for troubleshooting
         print(
             "[TRANSCRIBE] Faster-Whisper init: "
             f"device={self.device} compute_type={self.compute_type} "
@@ -3081,7 +3321,7 @@ class FasterWhisperBackend(BaseTranscriptionBackend):
 # -----------------------
 
 class PyWhisperCppBackend(BaseTranscriptionBackend):
-    """Existing whisper.cpp-based fallback implementation."""
+    """whisper.cpp-based fallback implementation using pywhispercpp.model.Model."""
 
     backend_name = "pywhispercpp"
 
@@ -3111,8 +3351,8 @@ class PyWhisperCppBackend(BaseTranscriptionBackend):
         print(
             "[TRANSCRIBE] pywhispercpp init: "
             f"model={self.model_path.name} threads={config.threads} "
-            f"lang={config.language} temp={config.temperature:.2f} "
-            f"min_sec={config.min_seconds:.2f} min_peak={config.min_peak:.4f}"
+            f"lang={self.config.language} temp={self.config.temperature:.2f} "
+            f"min_sec={self.config.min_seconds:.2f} min_peak={self.config.min_peak:.4f}"
         )
 
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
@@ -3124,6 +3364,7 @@ class PyWhisperCppBackend(BaseTranscriptionBackend):
         if audio.size == 0:
             return ""
 
+        # Prefer float32 path if available
         if hasattr(self.model, "transcribe_float32"):
             raw = self.model.transcribe_float32(audio)
         elif hasattr(self.model, "transcribe"):
@@ -3314,9 +3555,7 @@ class TranscriptionManager:
         self.status.supported_cpu_compute_types = sorted(supported)
 
         if not supported:
-            raise RuntimeError(
-                "CTranslate2 reports no usable CPU compute types."
-            )
+            raise RuntimeError("CTranslate2 reports no usable CPU compute types.")
 
         compute_type = _select_compute_type(
             requested=self.config.faster_whisper_compute_type,
@@ -3479,7 +3718,7 @@ def _select_compute_type(
 
 
 # -----------------------
-# Audio preparation
+# Audio preparation (preserved)
 # -----------------------
 
 def _prepare_audio(
@@ -3550,7 +3789,7 @@ def _to_int16(samples: np.ndarray) -> np.ndarray:
 
 
 # -----------------------
-# Output parsing/cleaning
+# Output parsing/cleaning (preserved)
 # -----------------------
 
 def _parse_pywhispercpp_output(raw: object) -> str:
@@ -3632,7 +3871,7 @@ def clean_transcript(raw: str) -> str:
 
 
 # -----------------------
-# Public API
+# Public API (preserved)
 # -----------------------
 
 _MANAGER: Optional[TranscriptionManager] = None
@@ -3661,6 +3900,409 @@ def transcribe_chunk(samples: np.ndarray, sample_rate: int) -> str:
 def get_transcription_status() -> Dict[str, Any]:
     """Application-facing status payload for API/UI diagnostics."""
     return get_transcription_manager().get_status()
+
+
+# -----------------------
+# Realtime Transcriber (new)
+# -----------------------
+
+RealtimeEvent = Dict[str, Any]
+RealtimeCallback = Callable[[RealtimeEvent], None]
+
+
+class RealtimeTranscriber:
+    """
+    Low-latency realtime transcriber that reuses the already-initialized backend via
+    TranscriptionManager. Feed frames (float32 mono), receive 'partial' and 'final' events.
+
+    Events:
+      - {"type":"partial", "text": str, "process_ms": int, "record_ms": int}
+      - {"type":"final", "text": str, "process_ms": int, "record_ms": int, "fallback_used": bool}
+    """
+
+    def __init__(self, sample_rate: int, config: Optional[TranscriptionConfig] = None) -> None:
+        self.sample_rate = int(sample_rate)
+        self.manager = get_transcription_manager()
+        self.config = config or self.manager.config
+
+        # Rolling buffer and queue
+        self._queue: "asyncio.Queue[Optional[np.ndarray]]" = asyncio.Queue(maxsize=128)
+        self._subs: List[RealtimeCallback] = []
+        self._task: Optional[asyncio.Task] = None
+        self._stop_evt = asyncio.Event()
+
+        # Timers
+        self._started_ms: int = 0
+        self._last_voice_ms: int = 0
+
+        # Rolling audio
+        self._rolling = np.zeros(0, dtype=np.float32)
+
+        # Recording for file fallback
+        self._record_bytes: Optional[io.BytesIO] = None
+        self._record_path: Optional[Path] = None
+
+        # Running merged text and finalize debounce (NEW)
+        self._cur_utt: str = ""
+        self._finalize_task: Optional[asyncio.Task] = None
+        self._finalize_delay_sec: float = 0.35
+        self._min_chars: int = int(os.getenv("APP_TEXT_MIN_CHARS", "12") or "12")
+        self._min_words: int = int(os.getenv("APP_TEXT_MIN_WORDS", "3") or "3")
+
+        # Prepare fallback dir if needed
+        if self.config.rt_fallback_record:
+            Path(self.config.rt_fallback_dir).mkdir(parents=True, exist_ok=True)
+
+    def subscribe(self, cb: RealtimeCallback) -> None:
+        self._subs.append(cb)
+
+    async def start(self) -> None:
+        if self._task is not None:
+            return
+        # Ensure backend initialized lazily
+        self.manager.initialize()
+        self._started_ms = _now_ms()
+        self._last_voice_ms = self._started_ms
+        if self.config.rt_fallback_record:
+            self._record_bytes = io.BytesIO()
+        self._task = asyncio.create_task(self._worker())
+
+    async def stop(self) -> None:
+        if self._task is None:
+            return
+        self._stop_evt.set()
+        with contextlib.suppress(Exception):
+            self._queue.put_nowait(None)
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+        self._task = None
+
+        # Cancel pending finalize task
+        if self._finalize_task and not self._finalize_task.done():
+            self._finalize_task.cancel()
+            self._finalize_task = None
+
+        # Flush a meaningful remainder if present
+        if _is_meaningful(self._cur_utt, min_chars=self._min_chars, min_words=self._min_words):
+            self._emit({
+                "type": "final",
+                "text": self._cur_utt.strip(),
+                "process_ms": 0,
+                "record_ms": _now_ms() - self._started_ms if self._started_ms else 0,
+                "fallback_used": False,
+            })
+        self._cur_utt = ""
+
+    async def feed(self, frames: np.ndarray) -> None:
+        if self._task is None:
+            await self.start()
+        a = _float32_mono(frames)
+        if a.size == 0:
+            return
+        try:
+            self._queue.put_nowait(a)
+        except asyncio.QueueFull:
+            # Drop the oldest to keep latency low
+            with contextlib.suppress(Exception):
+                _ = self._queue.get_nowait()
+            with contextlib.suppress(Exception):
+                self._queue.put_nowait(a)
+
+    # -----------------------
+    # Internal worker
+    # -----------------------
+
+    async def _worker(self) -> None:
+        sr = self.sample_rate
+        slice_len = max(1, int(sr * float(self.config.rt_slice_sec)))
+        max_keep = max(1, int(sr * float(self.config.rt_window_sec)))
+
+        buf = self._rolling
+        last_decode_ms = _now_ms()
+
+        while not self._stop_evt.is_set():
+            try:
+                item = await asyncio.wait_for(self._queue.get(), timeout=0.25)
+            except asyncio.TimeoutError:
+                item = None
+
+            if isinstance(item, np.ndarray):
+                buf = np.concatenate([buf, item], axis=0)
+
+                if self.config.rt_fallback_record and self._record_bytes is not None:
+                    self._record_bytes.write(item.astype(np.float32, copy=False).tobytes())
+
+                if self.config.vad_enabled:
+                    if _rms(item) >= float(self.config.vad_rms_threshold):
+                        self._last_voice_ms = _now_ms()
+
+            # Truncate rolling buffer
+            if buf.size > (max_keep * 2):
+                buf = buf[-max_keep:]
+
+            now = _now_ms()
+            elapsed_ms = now - self._started_ms
+            since_last_voice = now - self._last_voice_ms
+
+            should_decode = False
+            if buf.size >= slice_len:
+                if (now - last_decode_ms) >= int(self.config.rt_slice_sec * 1000.0 * 0.6):
+                    should_decode = True
+
+            should_finalize = since_last_voice >= int(self.config.rt_end_debounce_ms)
+
+            if should_decode:
+                txt, proc_ms = await self._decode_partial(buf)
+                last_decode_ms = _now_ms()
+                if txt:
+                    # Merge into running utterance to avoid flicker and duplication
+                    self._cur_utt = _merge_overlap(self._cur_utt, txt, min_overlap=5, max_overlap=18)
+                    self._emit({
+                        "type": "partial",
+                        "text": self._cur_utt,
+                        "process_ms": proc_ms,
+                        "record_ms": elapsed_ms,
+                    })
+
+            if should_finalize and buf.size > 0:
+                # Decode what we have as candidate
+                candidate_txt, proc_ms = await self._decode_partial(buf, finalize=True)
+                candidate_txt = clean_transcript(candidate_txt)
+                fallback_used = False
+
+                # If empty, try file fallback
+                if not candidate_txt and self.config.rt_fallback_record:
+                    with contextlib.suppress(Exception):
+                        fp = await self._flush_recording_wav(sr)
+                        if fp is not None:
+                            fb_txt = await transcribe_file_for_fallback(fp)
+                            fb_txt = clean_transcript(fb_txt)
+                            if fb_txt:
+                                candidate_txt = fb_txt
+                                fallback_used = True
+
+                # Merge into running utterance (dedupe)
+                if candidate_txt:
+                    self._cur_utt = _merge_overlap(self._cur_utt, candidate_txt, min_overlap=5, max_overlap=18)
+
+                # Decide if we can finalize now; otherwise arm a delayed finalize
+                if self._cur_utt and SENTENCE_END_RE.search(self._cur_utt):
+                    self._schedule_finalize(delay=self._finalize_delay_sec * 0.6,
+                                            process_ms=proc_ms,
+                                            record_ms=elapsed_ms,
+                                            fallback_used=fallback_used)
+                else:
+                    # Not clearly sentence-ended; emit a partial update
+                    if self._cur_utt:
+                        self._emit({
+                            "type": "partial",
+                            "text": self._cur_utt,
+                            "process_ms": proc_ms,
+                            "record_ms": elapsed_ms,
+                        })
+                    # Arm a slower finalize in case this truly was the end of speech
+                    self._schedule_finalize(delay=max(self._finalize_delay_sec, 0.5),
+                                            process_ms=proc_ms,
+                                            record_ms=elapsed_ms,
+                                            fallback_used=fallback_used)
+
+                # Reset raw rolling buffer for next turn of speech
+                buf = np.zeros(0, dtype=np.float32)
+                self._last_voice_ms = _now_ms()
+                if self.config.rt_fallback_record:
+                    self._record_bytes = io.BytesIO()
+                    self._record_path = None
+
+        # Optionally flush on shutdown (non-critical)
+        with contextlib.suppress(Exception):
+            await self._flush_recording_wav(sr)
+
+    async def _decode_partial(self, audio: np.ndarray, finalize: bool = False) -> Tuple[str, int]:
+        """
+        Decode current rolling window using the already-selected backend.
+        Returns (text, process_ms).
+        """
+        start_ms = _now_ms()
+
+        backend = self.manager.backend
+        if backend is None:
+            # Should not happen; ensure initialized
+            self.manager.initialize()
+            backend = self.manager.backend
+        txt = ""
+        try:
+            txt = backend.transcribe(audio, sample_rate=self.sample_rate) if backend else ""
+        except Exception as e:
+            print(f"[RT] decode error: {e}")
+
+        end_ms = _now_ms()
+        return clean_transcript(txt), (end_ms - start_ms)
+
+    def _schedule_finalize(self, delay: float, process_ms: int, record_ms: int, fallback_used: bool) -> None:
+        """
+        Debounced scheduling of final emit. Cancels any pending finalize task.
+        """
+        # Cancel any previous finalize
+        if self._finalize_task and not self._finalize_task.done():
+            self._finalize_task.cancel()
+        loop = asyncio.get_running_loop()
+        self._finalize_task = loop.create_task(
+            self._delayed_finalize(delay, process_ms, record_ms, fallback_used)
+        )
+
+    async def _delayed_finalize(self, delay: float, process_ms: int, record_ms: int, fallback_used: bool) -> None:
+        """
+        Wait a short delay; if the accumulated utterance is still meaningful, emit final.
+        """
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        text = re.sub(r"\s+", " ", (self._cur_utt or "")).strip()
+        if not _is_meaningful(text, min_chars=self._min_chars, min_words=self._min_words):
+            # Keep as partial; do not finalize meaningless fragments
+            return
+        # Emit final
+        self._emit({
+            "type": "final",
+            "text": text,
+            "process_ms": process_ms,
+            "record_ms": record_ms,
+            "fallback_used": bool(fallback_used),
+        })
+        # Reset current utterance buffer
+        self._cur_utt = ""
+
+    def _emit(self, evt: RealtimeEvent) -> None:
+        for cb in list(self._subs):
+            try:
+                cb(evt)
+            except Exception as e:
+                print(f"[RT] subscriber error: {e}")
+
+    async def _flush_recording_wav(self, sr: int) -> Optional[Path]:
+        """
+        Write in-memory float32 mono PCM to a WAV file for fallback transcription.
+        """
+        if not self.config.rt_fallback_record or self._record_bytes is None:
+            return None
+
+        try:
+            raw = self._record_bytes.getvalue()
+            if not raw:
+                return None
+
+            import wave
+            out_dir = Path(self.config.rt_fallback_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            p = out_dir / f"rt_{int(time.time())}.wav"
+            with wave.open(str(p), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(4)  # float32
+                wf.setframerate(int(sr))
+                wf.writeframes(raw)
+            self._record_path = p
+            return p
+        except Exception as e:
+            print(f"[RT] writing fallback WAV failed: {e}")
+            return None
+
+
+# -----------------------
+# Helpers for realtime
+# -----------------------
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _float32_mono(arr: np.ndarray) -> np.ndarray:
+    if arr is None:
+        return np.zeros(0, dtype=np.float32)
+    a = np.asarray(arr)
+    if a.dtype != np.float32:
+        a = a.astype(np.float32, copy=False)
+    if a.ndim == 2 and a.shape[1] > 1:
+        a = a[:, 0]
+    return a
+
+
+def _rms(frame: np.ndarray) -> float:
+    if frame.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(np.square(frame, dtype=np.float32), dtype=np.float64)))
+
+
+# -----------------------
+# File transcription fallback (reuses existing backends)
+# -----------------------
+
+async def transcribe_file_for_fallback(path: Union[str, Path]) -> str:
+    """
+    Transcribe an audio file using the already-initialized backend.
+    For faster-whisper we can pass a path. For pywhispercpp, we decode to float32 16k first.
+    """
+    manager = get_transcription_manager()
+    manager.initialize()
+    backend = manager.backend
+    if backend is None:
+        return ""
+
+    # If faster-whisper backend is active, try path directly via its .transcribe by loading file
+    if isinstance(backend, FasterWhisperBackend):
+        try:
+            # Build kwargs conditionally, same as in FasterWhisperBackend.transcribe
+            kwargs: Dict[str, Any] = dict(
+                language=manager.config.language or None,
+                beam_size=manager.config.faster_whisper_beam_size,
+                temperature=manager.config.temperature,
+                vad_filter=manager.config.faster_whisper_vad_filter,
+                condition_on_previous_text=manager.config.condition_on_previous_text,
+                word_timestamps=False,
+                without_timestamps=True,
+            )
+            if manager.config.no_speech_threshold is not None:
+                kwargs["no_speech_threshold"] = manager.config.no_speech_threshold
+            if manager.config.logprob_threshold is not None:
+                kwargs["log_prob_threshold"] = manager.config.logprob_threshold
+
+            segments, _info = backend.model.transcribe(str(path), **kwargs)  # type: ignore
+            parts: List[str] = []
+            for seg in segments:
+                t = getattr(seg, "text", "")
+                if isinstance(t, str) and t.strip():
+                    parts.append(t.strip())
+            return clean_transcript(" ".join(parts))
+        except Exception as e:
+            print(f"[FALLBACK] faster-whisper file transcribe failed: {e}")
+            return ""
+
+    # For pywhispercpp backend: decode file to float32 mono 16k and pass into backend.transcribe
+    try:
+        data, sr = _load_audio_as_f32_mono(path, target_sr=16000)
+        return backend.transcribe(data, sr)  # type: ignore
+    except Exception as e:
+        print(f"[FALLBACK] pywhispercpp file transcribe failed: {e}")
+        return ""
+
+
+def _load_audio_as_f32_mono(path: Union[str, Path], target_sr: int = 16000) -> Tuple[np.ndarray, int]:
+    """
+    Load arbitrary audio file and return float32 mono resampled to target_sr.
+    Uses soundfile; keeps dependencies minimal.
+    """
+    import soundfile as sf  # type: ignore
+
+    data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+    if data.shape[1] > 1:
+        data = data[:, 0:1]
+    data = data[:, 0]
+    if sr != target_sr:
+        ratio = float(target_sr) / float(sr)
+        x_idx = np.arange(0, data.size) * ratio
+        data = np.interp(x_idx, np.arange(data.size), data).astype(np.float32)
+        sr = target_sr
+    return data, sr
 
 
 
@@ -8663,7 +9305,8 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
 
     img.addEventListener('load', () => img.classList.add('loaded'));
     function setImage(filenameRel, captionText) {
-      const url = filenameRel.startsWith('/static/') ? filenameRel : `/static/${filenameRel.replace(/^\/+/, '')}`;
+      let url = filenameRel.startsWith('/static/') ? filenameRel : `/static/${filenameRel.replace(/^\/+/, '')}`;
+      url += (url.includes('?') ? '&' : '?') + 't=' + Date.now();
       img.classList.remove('loaded');
       img.src = url;
       caption.textContent = captionText || filenameRel;
@@ -8782,6 +9425,16 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
           // NEW: Insert/refresh thumbnail on new image
           prependThumb({name: rel.replace(/^\/?static\//, ''), url: rel, modified: Date.now()/1000});
         }
+      });
+      // Reload gallery automatically when backend signals updates
+      sse.addEventListener('gallery:updated', (ev) => {
+        // Optional: advance a global bust token from payload.ts
+        try {
+          const payload = JSON.parse(ev?.data || '{}');
+          // payload.ts is seconds; convert to ms if you store it
+          // Not strictly needed because we bust per request below
+        } catch {}
+        loadGallery(50);
       });
     }
     connectSSE();
@@ -9140,7 +9793,8 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
           log(statusLog, `direct image: ${j.rel}`);
           log(promptLog, prompt);
           // also insert thumb
-          prependThumb({name: j.rel.replace(/^\/?static\//, ''), url: j.rel, modified: Date.now()/1000});
+          const bustRel = j.rel + (j.rel.includes('?') ? '&' : '?') + 't=' + Date.now();
+          prependThumb({name: j.rel.replace(/^\/?static\//, ''), url: bustRel, modified: Date.now()/1000});
         } else {
           log(statusLog, `direct failed: ${j.detail || j.error || r.status}`);
         }
@@ -9518,7 +10172,7 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
     async function loadGallery(limit = 50) {
       if (!thumbsEl) return;
       try {
-        const r = await fetch(`/api/images?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' });
+        const r = await fetch(`/api/images?limit=${encodeURIComponent(limit)}&t=${Date.now()}`, { cache: 'no-store' });
         const j = await r.json().catch(() => ({}));
         if (!r.ok || !j?.items) {
           log(statusLog, `gallery load failed: ${r.status}`);
@@ -9541,7 +10195,8 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       const div = document.createElement('div');
       div.className = 'thumb';
       const imgEl = document.createElement('img');
-      const url = it.url || (`/static/${it.name}`);
+      const base = it.url || (`/static/${it.name}`);
+      const url = base + (base.includes('?') ? '&' : '?') + 't=' + Date.now();
       imgEl.src = url;
       imgEl.alt = it.name || 'image';
       imgEl.loading = 'lazy';
@@ -9562,7 +10217,8 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       const div = document.createElement('div');
       div.className = 'thumb';
       const imgEl = document.createElement('img');
-      const url = it.url || (`/static/${it.name}`);
+      const base = it.url || (`/static/${it.name}`);
+      const url = base + (base.includes('?') ? '&' : '?') + 't=' + Date.now();
       imgEl.src = url;
       imgEl.alt = it.name || 'image';
       imgEl.loading = 'lazy';
@@ -9775,11 +10431,14 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
 
 
 
-
 # .env :
 
 # =========================
 # Base settings (local & cloud)
+# =========================
+
+# =========================
+# Audio / Realtime / SSE
 # =========================
 APP_AUDIO_DEVICE=pipewire
 APP_SAMPLE_RATE=16000
@@ -9787,54 +10446,54 @@ APP_FRAME_DURATION_MS=20
 APP_STREAM_LATENCY_SEC=0.08
 APP_SSE_TICK_SEC=30.0
 
-# VAD (Voice Activity Detection)
+# =========================
+# VAD (robuster, weniger Früh-Abbrüche)
+# =========================
 APP_DISABLE_VAD=0
-APP_USE_WEBRTC_VAD=0
-APP_VAD_AGGRESSIVENESS=2
-APP_RMS_VAD_THRESHOLD=0.017
+APP_USE_WEBRTC_VAD=1
+APP_VAD_AGGRESSIVENESS=1
+APP_RMS_VAD_THRESHOLD=0.014
 
-# Snapshot / segmentation (satzorientiert + 8s-Flush)
-APP_SNAPSHOT_SEC=1.0
-APP_MIN_BUF_SEC=1.2
-APP_MAX_SILENCE_MS=1000
-APP_MAX_SEGMENT_SEC=12.0
-APP_FIRST_SNAPSHOT_DEADLINE_SEC=2.2
+# =========================
+# Snapshot / Segmentation (satzorientiert)
+# =========================
+APP_SNAPSHOT_SEC=1.6
+APP_MIN_BUF_SEC=1.8
+APP_MAX_SILENCE_MS=1400
+APP_MAX_SEGMENT_SEC=16.0
+APP_FIRST_SNAPSHOT_DEADLINE_SEC=2.6
 
-# Frontend text filter
-APP_TEXT_MIN_CHARS=6
-APP_TEXT_MIN_WORDS=2
+# =========================
+# Frontend Textfilter (vermeide Mini-Fetzen)
+# =========================
+APP_TEXT_MIN_CHARS=12
+APP_TEXT_MIN_WORDS=3
 APP_FORCE_MEANINGFUL_CHECK=1
 
 # ==========================================
-# Speech-to-text backend selection
+# Whisper (gemeinsam)
 # ==========================================
 APP_WHISPER_BACKEND=faster_whisper
-
-# Shared transcription settings (frontend/VAD-gating)
 APP_WHISPER_LANGUAGE=de
 APP_WHISPER_THREADS=4
 APP_WHISPER_TEMPERATURE=0.0
-APP_WHISPER_MIN_SEC=1.0
-APP_WHISPER_MIN_PEAK=0.0020
+APP_WHISPER_MIN_SEC=1.4
+APP_WHISPER_MIN_PEAK=0.0015
+APP_WHISPER_NO_SPEECH_THRESHOLD=0.8
+APP_WHISPER_LOGPROB_THRESHOLD=-0.8
+APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT=0
+APP_WHISPER_COMPRESSION_RATIO_THRESHOLD=2.4
 
-# pywhispercpp fallback model
-APP_WHISPER_MODEL_PATH=./models/ggml-base.bin
-
-# faster-whisper settings
+# ==========================================
+# Faster-Whisper spezifisch
+# ==========================================
 APP_FASTER_WHISPER_MODEL=small
 APP_FASTER_WHISPER_DEVICE=cpu
 APP_FASTER_WHISPER_COMPUTE_TYPE=int8
 APP_FASTER_WHISPER_CPU_THREADS=4
-APP_FASTER_WHISPER_NUM_WORKERS=1
-APP_FASTER_WHISPER_BEAM_SIZE=5
+APP_FASTER_WHISPER_NUM_WORKERS=2
+APP_FASTER_WHISPER_BEAM_SIZE=1
 APP_FASTER_WHISPER_VAD_FILTER=1
-
-# Optional: weitere Whisper-Parameter
-APP_WHISPER_NO_SPEECH_THRESHOLD=0.6
-APP_WHISPER_LOGPROB_THRESHOLD=-1.0
-APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT=0
-
-# Persistenter Download/Cache
 APP_FASTER_WHISPER_DOWNLOAD_ROOT=./models/faster-whisper-cache
 
 # =========================
@@ -9954,8 +10613,6 @@ APP_BIND_PORT=8080
 # =========================
 APP_COMFY_OUTPUT_DIR=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/output/
 APP_OUTPUT_DIR=./outputs/images
-
-
 
 
 
