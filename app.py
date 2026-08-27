@@ -50,6 +50,7 @@ from transcription_backend import (
     get_transcription_status,
     init_transcription_backend,
     transcribe_chunk,
+    RealtimeTranscriber,
 )
 
 from fastapi import FastAPI, Request, UploadFile, File, Body, Query
@@ -69,6 +70,7 @@ from starlette.responses import Response
 from image_backend import build_image_backend, ImageBackend, merge_style_prompt, register_event_listener
 
 from utils.os_open import open_folder_os, OpenDirError
+
 
 try:
     from image_backend import LocalComfyBackend  # type: ignore
@@ -144,6 +146,14 @@ MIN_BUF_SEC = _env_float("APP_MIN_BUF_SEC", 0.35)
 MAX_SILENCE_MS = _env_int("APP_MAX_SILENCE_MS", 700)
 MAX_SEGMENT_SEC = _env_float("APP_MAX_SEGMENT_SEC", 12.0)
 FIRST_SNAPSHOT_DEADLINE_SEC = _env_float("APP_FIRST_SNAPSHOT_DEADLINE_SEC", 1.2)
+
+# Realtime session holder (one per active recording)
+class _RTSession:
+    def __init__(self) -> None:
+        self.transcriber: Optional[RealtimeTranscriber] = None
+        self.sample_rate: int = SAMPLE_RATE  # use existing SAMPLE_RATE from app.py
+
+RT = _RTSession()
 
 # ---------- SSE heartbeat ----------
 
@@ -681,6 +691,76 @@ async def broadcast(event: str, data: str) -> None:
 
 _context_buffer: deque[str] = deque(maxlen=CONTEXT_MAX_SEGMENTS)
 
+# Lightweight dedupe and partial blacklist for realtime transcripts
+_last_partial_text: Optional[str] = None
+_last_partial_ts: float = 0.0
+# Lowercased phrases that often appear as hallucinations in partials
+_PARTIAL_BLACKLIST = {
+    "copyright wdr 2020",
+    "untertitelung im auftrag",
+    "im auftrag des wdr",
+}
+
+def _should_suppress_partial(txt: str) -> bool:
+    """
+    Returns True if this partial should be suppressed:
+    - Empty after strip
+    - Matches blacklist of frequent hallucination fillers (lowercased)
+    - Identical to last partial within 1.0s
+    - Very small 'wiggle' update within 1.0s (prefix + <=2 chars)
+    """
+    global _last_partial_text, _last_partial_ts
+    now = time.time()
+    t = (txt or "").strip()
+    if not t:
+        return True
+    tl = t.lower()
+
+    # Blacklist check for obvious filler/hallucination phrases in partials
+    if tl in _PARTIAL_BLACKLIST:
+        return True
+
+    # Dedupe: same as last partial very recently
+    if _last_partial_text and t == _last_partial_text and (now - _last_partial_ts) < 1.0:
+        return True
+
+    # Very small "wiggle": last is prefix and new adds <=2 chars quickly
+    if _last_partial_text and t.startswith(_last_partial_text) and len(t) - len(_last_partial_text) <= 2 and (now - _last_partial_ts) < 1.0:
+        return True
+
+    return False
+
+# Bridge realtime events to existing UI broadcast (with dedupe)
+def _on_realtime_event(evt: dict) -> None:
+    # Declare globals before any assignment in this function
+    global _last_partial_text, _last_partial_ts
+
+    et = evt.get("type")
+    txt = (evt.get("text") or "").strip()
+    if not txt:
+        return
+
+    if et == "partial":
+        if _should_suppress_partial(txt):
+            return
+        # Track last partial for dedupe timing window
+        _last_partial_text = txt
+        _last_partial_ts = time.time()
+        asyncio.create_task(broadcast("transcript_partial", txt))
+        asyncio.create_task(broadcast("transcript", txt))  # Keep UI compatibility
+
+    elif et == "final":
+        # Clear partial memory on finalization
+        _last_partial_text = None
+        _last_partial_ts = 0.0
+        asyncio.create_task(broadcast("transcript_final", txt))
+        asyncio.create_task(broadcast("transcript", txt))  # Keep UI compatibility
+
+
+
+
+
+
 async def _close_sse_listeners(timeout: float = 0.25) -> None:
     listeners = getattr(STATE, "listeners", None)
     if not listeners:
@@ -871,6 +951,7 @@ def is_meaningful_text(text: str, min_chars: int = 0, min_words: int = 0) -> boo
 # ---------- Audio transcription loop ----------
 
 async def audio_transcription_loop() -> None:
+    global _last_partial_text, _last_partial_ts
     sr = int(SAMPLE_RATE)
     frame_len = max(1, int(sr * (FRAME_MS / 1000.0)))
     STATE.audio_stopped_broadcasted = False
@@ -935,8 +1016,17 @@ async def audio_transcription_loop() -> None:
             if not STATE.running:
                 break
 
+            # Feed realtime transcriber with the current frame (non-blocking safety)
+            if RT.transcriber is not None:
+                try:
+                    await RT.transcriber.feed(frame)
+                except Exception as e:
+                    print(f"[RT] feed error: {e}")
+
+
             buf = np.concatenate([buf, frame], axis=0)
             now = time.time()
+
 
             vad_ok = True
             if not DISABLE_VAD:
@@ -973,13 +1063,28 @@ async def audio_transcription_loop() -> None:
 
                 text = (text or "").strip()
                 if text and STATE.running:
-                    await broadcast("transcript", text)
+                    # Apply meaningful-text guard before broadcasting finals
                     if FORCE_MEANINGFUL_CHECK and not is_meaningful_text(text, TEXT_MIN_CHARS, TEXT_MIN_WORDS):
+                        # Ignore meaningless finals (e.g., tiny fillers/punct)
                         pass
                     else:
+                        # Only broadcast snapshot transcripts if direct-live is off
+                        direct_live = bool(int(os.getenv("APP_DIRECT_LIVE_ONLY", "0")))
+                        if not direct_live:
+                            await broadcast("transcript_final", text)
+                            await broadcast("transcript", text)
+
+                        # Reset partial memory upon finalization (stabilizes next partials)
+                        try:
+                            _last_partial_text = None
+                            _last_partial_ts = 0.0
+                        except Exception:
+                            pass
+
                         ctx = update_context_buffer(text)
                         # NEW: Direct-live path or existing Ollama path, respecting interval
                         if (time.time() - STATE.last_llm_run_ts) >= float(LLM_INTERVAL_SEC):
+
                             if not STATE.running:
                                 break
                             STATE.last_llm_run_ts = time.time()
@@ -1192,6 +1297,27 @@ async def lifespan(app: FastAPI):
         "[TRANSCRIBE] startup_status="
         f"{json.dumps(transcription_manager.get_status(), ensure_ascii=False)}"
     )
+
+    # Extra diagnostics for live stability
+    try:
+        st = transcription_manager.get_status()
+        print(
+            f"[TRANSCRIBE] Ready: backend={st.get('selected_backend')} "
+            f"device={st.get('selected_device')} compute_type={st.get('selected_compute_type')} "
+            f"model={st.get('model')} language={st.get('language')}"
+        )
+        # If your backend exposes these flags, this verifies .env took effect
+        print(
+            "[TRANSCRIBE]",
+            f"cond_prev={1 if os.getenv('APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT','0').strip().lower() in {'1','true','yes','on'} else 0} "
+            f"vad_filter={1 if os.getenv('APP_FASTER_WHISPER_VAD_FILTER','1').strip().lower() in {'1','true','yes','on'} else 0} "
+            f"beam_size={os.getenv('APP_FASTER_WHISPER_BEAM_SIZE','1')} "
+            f"no_speech_thr={os.getenv('APP_WHISPER_NO_SPEECH_THRESHOLD','')} "
+            f"logprob_thr={os.getenv('APP_WHISPER_LOGPROB_THRESHOLD','')}"
+        )
+    except Exception as e:
+        print(f"[TRANSCRIBE] diag-print failed: {e}")
+
 
 
     # Verify REFS_DIR early
@@ -1546,17 +1672,34 @@ async def start_pipeline():
         return PlainTextResponse("already running", status_code=200)
     if STATE.shutting_down:
         return PlainTextResponse("shutting_down", status_code=409)
+
+    # NEW: start realtime transcriber for this session
+    try:
+        if RT.transcriber is None:
+            rt = RealtimeTranscriber(sample_rate=SAMPLE_RATE)
+            rt.subscribe(_on_realtime_event)
+            await rt.start()
+            RT.transcriber = rt
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[RT] failed to start realtime transcriber: {e}\n{tb}")
+
     STATE.running = True
     STATE.start_ts = time.time()
     STATE.task = asyncio.create_task(audio_transcription_loop())
     await broadcast("status", "server_start_recording")
     return PlainTextResponse("started")
 
+
 @app.post("/stop", response_class=PlainTextResponse)
 async def stop_pipeline():
     print("[HTTP] /stop called")
     STATE.running = False
+
+    # Stop audio input stream gracefully
     await safe_stop_audio_stream()
+
+    # Stop the main loop task
     if STATE.task:
         STATE.task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -1565,9 +1708,21 @@ async def stop_pipeline():
             except asyncio.TimeoutError:
                 pass
         STATE.task = None
+
+    # Stop realtime transcriber for this session
+    if RT.transcriber is not None:
+        try:
+            await RT.transcriber.stop()
+        except Exception as e:
+            print(f"[RT] stop error: {e}")
+        finally:
+            RT.transcriber = None
+
     await broadcast("status", "audio_stopped")
     print("[HTTP] /stop completed")
     return PlainTextResponse("stopped")
+
+
 
 @app.post("/shutdown", response_class=PlainTextResponse)
 async def shutdown_server():
