@@ -166,7 +166,8 @@ APP_SSE_TICK_SEC = _env_float("APP_SSE_TICK_SEC", 1.0)
 # them for the audio pipeline configuration display.
 WHISPER_BACKEND_REQUESTED = _env_str("APP_WHISPER_BACKEND", "auto").lower()
 WHISPER_MODEL_PATH = _env_str("APP_WHISPER_MODEL_PATH", "")
-WHISPER_LANGUAGE = _env_str("APP_WHISPER_LANGUAGE", "de")
+WHISPER_LANGUAGE_RAW = _env_str("APP_WHISPER_LANGUAGE", "")
+WHISPER_LANGUAGE = WHISPER_LANGUAGE_RAW.strip() or None
 WHISPER_THREADS = _env_int("APP_WHISPER_THREADS", 2)
 WHISPER_TEMPERATURE = _env_float("APP_WHISPER_TEMPERATURE", 0.0)
 WHISPER_MIN_SEC = _env_float("APP_WHISPER_MIN_SEC", 0.35)
@@ -198,6 +199,9 @@ FASTER_WHISPER_DOWNLOAD_ROOT = _env_str(
     "APP_FASTER_WHISPER_DOWNLOAD_ROOT",
     "",
 )
+# ---------- Transcription input-locale hint (runtime-aware) ----------
+INPUT_LOCALE_HINT = (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip() or None
+
 
 
 # ---------- Text filtering ----------
@@ -1515,6 +1519,7 @@ async def get_config():
         "transcription": {
             "requested_backend": WHISPER_BACKEND_REQUESTED,
             "language": WHISPER_LANGUAGE,
+            "input_locale_hint": INPUT_LOCALE_HINT,
             "threads": WHISPER_THREADS,
             "temperature": WHISPER_TEMPERATURE,
             "min_sec": WHISPER_MIN_SEC,
@@ -2354,6 +2359,28 @@ async def get_ollama_vision():
         cloud_url=VISION.cloud_url,
     )
 
+
+
+
+class TranscriptionHintPayload(BaseModel):
+    hint: Optional[str] = Field(default=None, description="Language hint like 'de', 'en', 'fr'. Empty or null clears the hint.")
+
+@app.post("/api/settings/transcription_hint")
+async def set_transcription_hint(payload: TranscriptionHintPayload):
+    global INPUT_LOCALE_HINT
+    val = (payload.hint or "").strip().lower()
+    os.environ["APP_INPUT_LOCALE_HINT"] = val  # runtime-aware for Faster-Whisper
+    INPUT_LOCALE_HINT = val or None
+    # Optional: Status-Broadcast, damit UI sofort aktualisieren kann
+    await broadcast("status", f"transcription_hint:{INPUT_LOCALE_HINT or ''}")
+    return {"ok": True, "input_locale_hint": INPUT_LOCALE_HINT}
+
+@app.get("/api/settings/transcription_hint")
+async def get_transcription_hint():
+    return {"input_locale_hint": (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip() or None}
+
+print(f"[TRANSCRIBE] runtime_hint={os.getenv('APP_INPUT_LOCALE_HINT', '')}")
+
 @app.post("/api/settings/ollama_vision", response_model=OllamaVisionSettings)
 async def set_ollama_vision(cfg: OllamaVisionSettings):
     VISION.enabled = bool(cfg.enabled)
@@ -2363,6 +2390,7 @@ async def set_ollama_vision(cfg: OllamaVisionSettings):
     VISION.cloud_url = (cfg.cloud_url or "").strip()
     await broadcast("status", "ollama_vision:updated")
     return await get_ollama_vision()
+
 
 # ---------- Style API (upload/save_url/build/reset) with no fallback ----------
 

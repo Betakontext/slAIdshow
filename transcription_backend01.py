@@ -11,7 +11,6 @@
 #     * Partial dedupe + growth + meaningful-light + punct-only skip
 #     * Adaptive finalize delay (sentence-end vs no-sentence-end)
 #     * Optional file recording and file-transcription fallback if realtime-final is empty
-# - Low-end profile switch via APP_LOWEND_MODE=1 to improve latency on weak CPUs
 # - All operational messages remain in English
 
 from __future__ import annotations
@@ -124,84 +123,6 @@ META_RE = re.compile(
 
 
 # -----------------------
-# Low-end profile helpers
-# -----------------------
-
-def _only_if_unset_str(key: str, value: str) -> None:
-    if os.getenv(key, "") == "":
-        os.environ[key] = str(value)
-
-
-def _only_if_unset_int(key: str, value: int) -> None:
-    if os.getenv(key, "") == "":
-        os.environ[key] = str(int(value))
-
-
-def _only_if_unset_float(key: str, value: float) -> None:
-    if os.getenv(key, "") == "":
-        os.environ[key] = str(float(value))
-
-
-def _only_if_unset_bool(key: str, value: bool) -> None:
-    if os.getenv(key, "") == "":
-        os.environ[key] = "1" if value else "0"
-
-
-def _apply_low_end_overrides_if_enabled() -> None:
-    """
-    Apply conservative, latency-oriented defaults for weak CPUs when APP_LOWEND_MODE=1.
-    Only sets values that are not explicitly configured in the environment.
-    """
-    if not _env_bool("APP_LOWEND_MODE", False):
-        return
-
-    print("[TRANSCRIBE] APP_LOWEND_MODE=1 detected – applying low-end defaults for latency")
-
-    # Model/compute/threads tuned for older mobile CPUs
-    _only_if_unset_str("APP_FASTER_WHISPER_MODEL", "tiny")
-    # Prefer int8_float32 when available (CTranslate2 may fall back if unsupported)
-    _only_if_unset_str("APP_FASTER_WHISPER_COMPUTE_TYPE", "int8_float32")
-    _only_if_unset_int("APP_FASTER_WHISPER_CPU_THREADS", 3)
-    _only_if_unset_int("APP_FASTER_WHISPER_NUM_WORKERS", 1)
-    _only_if_unset_int("APP_FASTER_WHISPER_BEAM_SIZE", 1)
-    # Disable FW-internal VAD – app-level VAD is cheaper for CPU
-    _only_if_unset_bool("APP_FASTER_WHISPER_VAD_FILTER", False)
-
-    # Shared whisper
-    _only_if_unset_float("APP_WHISPER_MIN_SEC", 0.35)
-    _only_if_unset_float("APP_WHISPER_TEMPERATURE", 0.0)
-    _only_if_unset_int("APP_WHISPER_THREADS", 3)
-    # Encourage explicit language for speed if user sets it later; do not force here
-
-    # Realtime decoding cadence and windows
-    _only_if_unset_float("APP_RT_SLICE_SEC", 1.0)
-    _only_if_unset_float("APP_RT_TAIL_DECODE_SEC", 6.0)
-    _only_if_unset_int("APP_RT_END_DEBOUNCE_MS", 600)
-    _only_if_unset_int("APP_MIN_PARTIAL_DECODE_MS", 300)
-    _only_if_unset_int("APP_MIN_PARTIAL_EMIT_MS", 450)
-    _only_if_unset_int("APP_PARTIAL_MIN_GROWTH_CHARS", 2)
-    _only_if_unset_int("APP_PARTIAL_MIN_GROWTH_WORDS", 1)
-    _only_if_unset_int("APP_PARTIAL_MIN_CHARS", 8)
-    _only_if_unset_int("APP_PARTIAL_MIN_WORDS", 2)
-    _only_if_unset_float("APP_FINALIZE_BASE_DELAY_SEC", 0.35)
-    _only_if_unset_float("APP_FINALIZE_NOSENT_DELAY_SEC", 0.95)
-
-    # VAD suggestions (keep app-level VAD enabled)
-    _only_if_unset_bool("APP_DISABLE_VAD", False)
-    _only_if_unset_int("APP_VAD_AGGRESSIVENESS", 2)
-    _only_if_unset_float("APP_RMS_VAD_THRESHOLD", 0.012)
-
-    # Frontend meaningfulness (allow earlier but readable partials)
-    _only_if_unset_int("APP_TEXT_MIN_CHARS", 12)
-    _only_if_unset_int("APP_TEXT_MIN_WORDS", 3)
-
-    # Fallback recording defaults
-    _only_if_unset_bool("APP_RT_FALLBACK_RECORD", True)
-    _only_if_unset_str("APP_RT_FALLBACK_DIR", "./outputs/voice_fallback")
-    _only_if_unset_int("APP_RT_FALLBACK_MIN_RECORD_MS", 1500)
-
-
-# -----------------------
 # Configuration dataclass
 # -----------------------
 
@@ -210,7 +131,7 @@ class TranscriptionConfig:
     """Configuration loaded once from environment variables."""
 
     requested_backend: str
-    language: Optional[str]
+    language: str
     threads: int
     temperature: float
     min_seconds: float
@@ -241,28 +162,10 @@ class TranscriptionConfig:
     rt_fallback_record: bool
     rt_fallback_dir: str
 
-    # Partials/debounce tunables
-    min_partial_decode_interval_ms: int
-    min_partial_emit_interval_ms: int
-    partial_min_growth_chars: int
-    partial_min_growth_words: int
-    partial_min_chars: int
-    partial_min_words: int
-
-    # Adaptive finalization delays
-    finalize_base_delay_sec: float
-    finalize_nosent_delay_sec: float
-
-    # Fallback recording minimum record time
-    fallback_min_record_ms: int
-
     @classmethod
     def from_environment(cls) -> "TranscriptionConfig":
-        # Apply low-end latency defaults first (only if APP_LOWEND_MODE=1)
-        # This only sets values that are currently unset in the environment.
-        _apply_low_end_overrides_if_enabled()
-
         requested_backend = _env_str("APP_WHISPER_BACKEND", "auto").lower()
+        # Preserve legacy names
         if requested_backend not in {"auto", "faster_whisper", "pywhispercpp"}:
             print(
                 "[TRANSCRIBE] Invalid APP_WHISPER_BACKEND="
@@ -300,7 +203,7 @@ class TranscriptionConfig:
             except Exception:
                 print("[TRANSCRIBE] Ignoring invalid APP_WHISPER_LOGPROB_THRESHOLD")
 
-        # Realtime params with sensible defaults; can be overridden by APP_LOWEND_MODE
+        # Realtime params with sensible defaults
         rt_slice_sec = _env_float("APP_RT_SLICE_SEC", 3.0)
         rt_window_sec = _env_float("APP_RT_WINDOW_SEC", 30.0)
         rt_end_debounce_ms = _env_int("APP_RT_END_DEBOUNCE_MS", 550)
@@ -351,18 +254,6 @@ class TranscriptionConfig:
             vad_rms_threshold=vad_rms_threshold,
             rt_fallback_record=rt_fallback_record,
             rt_fallback_dir=rt_fallback_dir,
-            # Partials/debounce (with low-end capable defaults)
-            min_partial_decode_interval_ms=_env_int("APP_MIN_PARTIAL_DECODE_MS", 350),
-            min_partial_emit_interval_ms=_env_int("APP_MIN_PARTIAL_EMIT_MS", 600),
-            partial_min_growth_chars=_env_int("APP_PARTIAL_MIN_GROWTH_CHARS", 3),
-            partial_min_growth_words=_env_int("APP_PARTIAL_MIN_GROWTH_WORDS", 1),
-            partial_min_chars=_env_int("APP_PARTIAL_MIN_CHARS", 10),
-            partial_min_words=_env_int("APP_PARTIAL_MIN_WORDS", 2),
-            # Adaptive finalization
-            finalize_base_delay_sec=_env_float("APP_FINALIZE_BASE_DELAY_SEC", 0.35),
-            finalize_nosent_delay_sec=_env_float("APP_FINALIZE_NOSENT_DELAY_SEC", 0.85),
-            # Fallback recording threshold
-            fallback_min_record_ms=_env_int("APP_RT_FALLBACK_MIN_RECORD_MS", 1500),
         )
 
 
@@ -389,7 +280,6 @@ class TranscriptionStatus:
     initialized_at_unix: Optional[float] = None
     last_transcription_ms: Optional[float] = None
     last_transcription_error: Optional[str] = None
-    lowend_mode: bool = False
 
     def __post_init__(self) -> None:
         if self.supported_cuda_compute_types is None:
@@ -590,7 +480,6 @@ class TranscriptionManager:
         self.status = TranscriptionStatus(
             requested_backend=self.config.requested_backend,
             language=self.config.language,
-            lowend_mode=_env_bool("APP_LOWEND_MODE", False),
         )
 
     def initialize(self) -> None:
@@ -603,7 +492,6 @@ class TranscriptionManager:
         self.status = TranscriptionStatus(
             requested_backend=self.config.requested_backend,
             language=self.config.language,
-            lowend_mode=_env_bool("APP_LOWEND_MODE", False),
         )
         attempts: List[str] = []
 
@@ -793,8 +681,7 @@ class TranscriptionManager:
         print(
             "[TRANSCRIBE] Ready: backend=faster_whisper "
             f"device={backend.device} compute_type={backend.compute_type} "
-            f"model={backend.model_name} language={self.config.language} "
-            f"lowend_mode={int(_env_bool('APP_LOWEND_MODE', False))}"
+            f"model={backend.model_name} language={self.config.language}"
         )
 
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
@@ -850,19 +737,6 @@ class TranscriptionManager:
 
     def get_status(self) -> Dict[str, Any]:
         return self.status.to_dict()
-
-    # Convenience to preserve previous behavior
-    def _initialize_pywhispercpp_or_fail(self, attempts: List[str]) -> None:
-        try:
-            self._initialize_pywhispercpp()
-        except Exception as exc:
-            msg = f"pywhispercpp unavailable: {exc}"
-            attempts.append(msg)
-            print(f"[TRANSCRIBE] {msg}")
-            self.backend = None
-            self.status.selected_backend = "unavailable"
-            self.status.ready = False
-            self.status.initialization_error = " | ".join(attempts)
 
 
 # -----------------------
