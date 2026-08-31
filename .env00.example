@@ -146,7 +146,7 @@ PULL_URL=https://dev.betakontext.de/slAIdshow/bridge/tunnel_url.json
 # Pollinations (cloud image backend; always reachable)
 # =========================
 POLLINATIONS_API_BASE=https://gen.pollinations.ai
-POLLINATIONS_SECRET=sk_iFIDaZ4xsL0v4cUwV2JMDBxnEk5dfm9l
+POLLINATIONS_SECRET=
 POLLINATIONS_MODEL=flux
 POLLINATIONS_NOLOGO=1
 POLLINATIONS_SEED=1234
