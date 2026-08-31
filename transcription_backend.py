@@ -199,7 +199,7 @@ class TranscriptionConfig:
 
         return cls(
             requested_backend=requested_backend,
-            language=_env_str("APP_WHISPER_LANGUAGE", "de"),
+            language=(_env_str("APP_WHISPER_LANGUAGE", "").strip() or None),
             threads=max(1, _env_int("APP_WHISPER_THREADS", 2)),
             temperature=max(0.0, _env_float("APP_WHISPER_TEMPERATURE", 0.0)),
             min_seconds=max(0.0, _env_float("APP_WHISPER_MIN_SEC", 0.35)),
@@ -353,9 +353,15 @@ class FasterWhisperBackend(BaseTranscriptionBackend):
         if audio.size == 0:
             return ""
 
+        # Determine effective language at runtime:
+        # Priority: (no explicit per-call override here) config.language > APP_INPUT_LOCALE_HINT > None
+        hint_lang = (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip().lower() or None
+        conf_lang = self.config.language or None
+        eff_lang = conf_lang or hint_lang or None
+
         # Build kwargs conditionally to avoid overriding library defaults with None
         kwargs: Dict[str, Any] = dict(
-            language=self.config.language or None,
+            language=eff_lang,  # None enables auto-detect
             beam_size=self.config.faster_whisper_beam_size,
             temperature=self.config.temperature,
             vad_filter=self.config.faster_whisper_vad_filter,
@@ -363,6 +369,7 @@ class FasterWhisperBackend(BaseTranscriptionBackend):
             word_timestamps=False,
             without_timestamps=True,
         )
+
         if self.config.no_speech_threshold is not None:
             kwargs["no_speech_threshold"] = self.config.no_speech_threshold
         if self.config.logprob_threshold is not None:
@@ -406,10 +413,12 @@ class PyWhisperCppBackend(BaseTranscriptionBackend):
             n_threads=config.threads,
             print_progress=False,
             print_realtime=False,
-            language=config.language or None,
+            # Force auto-detect to avoid re-init on runtime hint changes:
+            language=None,
             translate=False,
             temperature=config.temperature,
         )
+
 
         print(
             "[TRANSCRIBE] pywhispercpp init: "
@@ -417,6 +426,7 @@ class PyWhisperCppBackend(BaseTranscriptionBackend):
             f"lang={self.config.language} temp={self.config.temperature:.2f} "
             f"min_sec={self.config.min_seconds:.2f} min_peak={self.config.min_peak:.4f}"
         )
+
 
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
         audio = _prepare_audio(
@@ -1314,9 +1324,13 @@ async def transcribe_file_for_fallback(path: Union[str, Path]) -> str:
     # If faster-whisper backend is active, try path directly via its .transcribe by loading file
     if isinstance(backend, FasterWhisperBackend):
         try:
-            # Build kwargs conditionally, same as in FasterWhisperBackend.transcribe
+            # Determine effective language at runtime also for file fallback
+            hint_lang = (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip().lower() or None
+            conf_lang = manager.config.language or None
+            eff_lang = conf_lang or hint_lang or None
+
             kwargs: Dict[str, Any] = dict(
-                language=manager.config.language or None,
+                language=eff_lang,  # None enables auto-detect
                 beam_size=manager.config.faster_whisper_beam_size,
                 temperature=manager.config.temperature,
                 vad_filter=manager.config.faster_whisper_vad_filter,
@@ -1330,6 +1344,8 @@ async def transcribe_file_for_fallback(path: Union[str, Path]) -> str:
                 kwargs["log_prob_threshold"] = manager.config.logprob_threshold
 
             segments, _info = backend.model.transcribe(str(path), **kwargs)  # type: ignore
+
+
             parts: List[str] = []
             for seg in segments:
                 t = getattr(seg, "text", "")
