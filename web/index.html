@@ -208,6 +208,19 @@
             <span class="pill" id="sr-pill">SR: ?</span>
             <span class="pill" id="size-pill">Size: ?</span>
           </div>
+
+          <!-- MOVED: Galerie direkt unter Bild + Buttons in die linke Spalte -->
+          <section class="card" style="margin-top:12px;">
+            <h3 id="title-gallery">Galerie</h3>
+            <div class="body">
+              <div class="gallery-controls">
+                <button id="btn-refresh-gallery" title="Neu laden">Neu laden</button>
+                <span class="subtle" id="gallery-hint"></span>
+              </div>
+              <div id="thumbs" aria-live="polite"></div>
+            </div>
+          </section>
+          <!-- ENDE: Verschobene Galerie -->
         </div>
       </section>
 
@@ -355,17 +368,7 @@
       </aside>
     </div>
 
-    <!-- NEW: Thumbnail Gallery card -->
-    <section class="card">
-      <h3 id="title-gallery">Galerie</h3>
-      <div class="body">
-        <div class="gallery-controls">
-          <button id="btn-refresh-gallery" title="Neu laden">Neu laden</button>
-          <span class="subtle" id="gallery-hint"></span>
-        </div>
-        <div id="thumbs" aria-live="polite"></div>
-      </div>
-    </section>
+    <!-- Galerie war hier vorher als eigenständige Card; wurde in die linke Card verschoben -->
   </main>
 
   <script>
@@ -662,15 +665,29 @@
       if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
     }
 
-    const langSelectEl = document.getElementById('lang-select');
-    langSelectEl.addEventListener('change', () => {
-      LANG = langSelectEl.value;
-      localStorage.setItem('ui_lang', LANG);
-      document.documentElement.lang = LANG;
-      applyI18N();
-      syncVisionHint();
-      syncDirectLiveHint();
-    });
+
+      const langSelectEl = document.getElementById('lang-select');
+      langSelectEl.addEventListener('change', () => {
+        LANG = langSelectEl.value;
+        localStorage.setItem('ui_lang', LANG);
+        document.documentElement.lang = LANG;
+        applyI18N();
+        syncVisionHint();
+        syncDirectLiveHint();
+
+        // Post the transcription hint based on current UI language
+        fetch('/api/settings/transcription_hint', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ input_locale: LANG }) // 'de' | 'en'
+        })
+        .then(r => r.json())
+        .then(j => {
+          console.log('[settings] transcription_hint set', j);
+          try { log(statusLog, `[settings] input_locale_hint -> ${j.input_locale_hint || 'none'}`); } catch {}
+        })
+        .catch(err => console.warn('failed to set transcription_hint', err));
+      });
 
     // ---------- Utility ----------
     const $ = (s) => document.querySelector(s);
@@ -869,11 +886,8 @@
       });
       // Reload gallery automatically when backend signals updates
       sse.addEventListener('gallery:updated', (ev) => {
-        // Optional: advance a global bust token from payload.ts
         try {
           const payload = JSON.parse(ev?.data || '{}');
-          // payload.ts is seconds; convert to ms if you store it
-          // Not strictly needed because we bust per request below
         } catch {}
         loadGallery(50);
       });
@@ -1800,3 +1814,7 @@
   </div>
 </body>
 </html>
+
+
+
+
