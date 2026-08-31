@@ -1022,6 +1022,15 @@ class RealtimeTranscriber:
         self._min_chars: int = int(os.getenv("APP_TEXT_MIN_CHARS", "12") or "12")
         self._min_words: int = int(os.getenv("APP_TEXT_MIN_WORDS", "3") or "3")
 
+        self._last_partial_emit_ms: int = 0
+        self._last_emitted_partial_norm: str = ""
+        self._min_partial_emit_interval_ms: int = int(os.getenv("APP_MIN_PARTIAL_EMIT_MS", "600") or "600")
+        self._partial_min_growth_chars: int = int(os.getenv("APP_PARTIAL_MIN_GROWTH_CHARS", "3") or "3")
+        self._partial_min_growth_words: int = int(os.getenv("APP_PARTIAL_MIN_GROWTH_WORDS", "1") or "1")
+        self._tail_decode_sec: float = float(os.getenv("APP_RT_TAIL_DECODE_SEC", "10.0") or "10.0")
+        self._finalize_base_delay_sec: float = float(os.getenv("APP_FINALIZE_BASE_DELAY_SEC", "0.35") or "0.35")
+        self._finalize_nosent_delay_sec: float = float(os.getenv("APP_FINALIZE_NOSENT_DELAY_SEC", "0.85") or "0.85")
+
         # Prepare fallback dir if needed
         if self.config.rt_fallback_record:
             Path(self.config.rt_fallback_dir).mkdir(parents=True, exist_ok=True)
@@ -1125,22 +1134,41 @@ class RealtimeTranscriber:
             should_finalize = since_last_voice >= int(self.config.rt_end_debounce_ms)
 
             if should_decode:
-                txt, proc_ms = await self._decode_partial(buf)
+                # Use only the last tail window for decoding
+                tail_frames = int(self.sample_rate * max(2.5, min(self._tail_decode_sec, self.config.rt_window_sec)))
+                audio_for_decode = buf[-tail_frames:] if buf.size > tail_frames else buf
+                txt, proc_ms = await self._decode_partial(audio_for_decode)
                 last_decode_ms = _now_ms()
                 if txt:
-                    # Merge into running utterance to avoid flicker and duplication
-                    self._cur_utt = _merge_overlap(self._cur_utt, txt, min_overlap=5, max_overlap=18)
-                    self._emit({
-                        "type": "partial",
-                        "text": self._cur_utt,
-                        "process_ms": proc_ms,
-                        "record_ms": elapsed_ms,
-                    })
+                    merged = _merge_overlap(self._cur_utt, txt, min_overlap=5, max_overlap=18)
+                    # Debounce and dedupe partials
+                    now_ms = _now_ms()
+                    merged_norm = re.sub(r"\s+", " ", merged).strip().lower()
+                    # Require growth
+                    growth_chars = len(merged_norm) - len(self._last_emitted_partial_norm)
+                    growth_words = max(0, len(merged_norm.split()) - len(self._last_emitted_partial_norm.split()))
+                    interval_ok = (now_ms - self._last_partial_emit_ms) >= self._min_partial_emit_interval_ms
+                    growth_ok = (growth_chars >= self._partial_min_growth_chars) or (growth_words >= self._partial_min_growth_words)
+                    changed_ok = merged_norm != self._last_emitted_partial_norm
+
+                    self._cur_utt = merged
+                    if interval_ok and changed_ok and growth_ok:
+                        self._emit({
+                            "type": "partial",
+                            "text": self._cur_utt,
+                            "process_ms": proc_ms,
+                            "record_ms": elapsed_ms,
+                        })
+                        self._last_partial_emit_ms = now_ms
+                        self._last_emitted_partial_norm = merged_norm
+
 
             if should_finalize and buf.size > 0:
-                # Decode what we have as candidate
-                candidate_txt, proc_ms = await self._decode_partial(buf, finalize=True)
+                tail_frames = int(self.sample_rate * max(3.0, min(self._tail_decode_sec, self.config.rt_window_sec)))
+                audio_for_decode = buf[-tail_frames:] if buf.size > tail_frames else buf
+                candidate_txt, proc_ms = await self._decode_partial(audio_for_decode, finalize=True)
                 candidate_txt = clean_transcript(candidate_txt)
+
                 fallback_used = False
 
                 # If empty, try file fallback
@@ -1158,23 +1186,12 @@ class RealtimeTranscriber:
                 if candidate_txt:
                     self._cur_utt = _merge_overlap(self._cur_utt, candidate_txt, min_overlap=5, max_overlap=18)
 
-                # Decide if we can finalize now; otherwise arm a delayed finalize
-                if self._cur_utt and SENTENCE_END_RE.search(self._cur_utt):
-                    self._schedule_finalize(delay=self._finalize_delay_sec * 0.6,
-                                            process_ms=proc_ms,
-                                            record_ms=elapsed_ms,
-                                            fallback_used=fallback_used)
-                else:
-                    # Not clearly sentence-ended; emit a partial update
-                    if self._cur_utt:
-                        self._emit({
-                            "type": "partial",
-                            "text": self._cur_utt,
-                            "process_ms": proc_ms,
-                            "record_ms": elapsed_ms,
-                        })
-                    # Arm a slower finalize in case this truly was the end of speech
-                    self._schedule_finalize(delay=max(self._finalize_delay_sec, 0.5),
+                if self._cur_utt:
+                    if SENTENCE_END_RE.search(self._cur_utt):
+                        delay = max(0.2, self._finalize_base_delay_sec * 0.6)
+                    else:
+                        delay = self._finalize_nosent_delay_sec
+                    self._schedule_finalize(delay=delay,
                                             process_ms=proc_ms,
                                             record_ms=elapsed_ms,
                                             fallback_used=fallback_used)
@@ -1245,6 +1262,8 @@ class RealtimeTranscriber:
         })
         # Reset current utterance buffer
         self._cur_utt = ""
+        self._last_emitted_partial_norm = ""
+        self._last_partial_emit_ms = _now_ms()
 
     def _emit(self, evt: RealtimeEvent) -> None:
         for cb in list(self._subs):
