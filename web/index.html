@@ -133,7 +133,7 @@
       display:flex; align-items:center; gap:8px;
     }
 
-    /* NEW: inline toggle look */
+    /* inline toggle look (used by existing Direct live and the new Low-End toggle) */
     .toggle {
       display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
       padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: #10141b;
@@ -141,7 +141,7 @@
     .toggle input { transform: scale(1.05); }
     .muted { color: var(--muted); }
 
-    /* NEW: Gallery styles */
+    /* Gallery styles */
     .gallery-controls { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
     #thumbs {
       display: grid;
@@ -201,15 +201,27 @@
             <div class="caption" id="img-caption">Kein Bild</div>
           </div>
           <div class="row" style="margin-top:10px;">
+            <!-- NEW: Low-End toggle (only addition) -->
+            <label class="toggle" id="lowend-toggle-wrap" title="Low-End-Modus: Latenz-optimierte Transkription für schwächere CPUs">
+              <input type="checkbox" id="toggle-lowend" />
+              <span>Low-End</span>
+            </label>
+            <!-- END NEW -->
+
             <button id="btn-start" class="btn-ok">Aufnahme starten</button>
             <button id="btn-stop" class="btn-danger">Stop</button>
+
+            <!-- NEW: optional, minimal status pill -->
+            <span class="pill" id="lowend-pill" style="display:none;">Low-End: off</span>
+            <!-- END NEW -->
+
             <span class="pill" id="ollama-pill">Ollama: ?</span>
             <span class="pill" id="poll-pill">Images: ?</span>
             <span class="pill" id="sr-pill">SR: ?</span>
             <span class="pill" id="size-pill">Size: ?</span>
           </div>
 
-          <!-- MOVED: Galerie direkt unter Bild + Buttons in die linke Spalte -->
+          <!-- Galerie -->
           <section class="card" style="margin-top:12px;">
             <h3 id="title-gallery">Galerie</h3>
             <div class="body">
@@ -220,7 +232,7 @@
               <div id="thumbs" aria-live="polite"></div>
             </div>
           </section>
-          <!-- ENDE: Verschobene Galerie -->
+          <!-- ENDE Galerie -->
         </div>
       </section>
 
@@ -341,7 +353,7 @@
           </div>
 
           <div class="row" style="margin-bottom:8px;">
-            <!-- "Send to Ollama" (left) ... and NEW Direct live toggle (right next to it) -->
+            <!-- "Send to Ollama" (left) ... and Direct live toggle (right next to it) -->
             <button id="btn-plan">Senden</button>
             <label class="toggle right" title="Bypass text LLM; use raw Whisper transcripts">
               <input type="checkbox" id="toggle-direct-live" />
@@ -466,7 +478,6 @@
         direct_live_label: "Direkt live",
         direct_live_title: "LLM-Optimierung umgehen; rohe Whisper-Transkripte verwenden",
         direct_live_on_hint: "Direktmodus aktiv: Rohtranskripte (ohne LLM)",
-        // NEW i18n for gallery
         title_gallery: "Galerie",
         btn_gallery_refresh: "Neu laden",
         gallery_hint: "Klicke auf ein Miniaturbild, um es anzuzeigen.",
@@ -563,7 +574,6 @@
         direct_live_label: "Direct live",
         direct_live_title: "Bypass text LLM; use raw Whisper transcripts",
         direct_live_on_hint: "Direct mode active: raw transcripts (no LLM)",
-        // NEW i18n for gallery
         title_gallery: "Gallery",
         btn_gallery_refresh: "Refresh",
         gallery_hint: "Click a thumbnail to view it.",
@@ -653,7 +663,7 @@
         toggleDirect.parentElement.title = t('direct_live_title');
       }
 
-      // NEW: Gallery i18n
+      // Gallery i18n
       const titleGallery = document.getElementById('title-gallery');
       if (titleGallery) titleGallery.textContent = t('title_gallery');
       const btnGallery = document.getElementById('btn-refresh-gallery');
@@ -679,7 +689,7 @@
         fetch('/api/settings/transcription_hint', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ input_locale: LANG }) // 'de' | 'en'
+          body: JSON.stringify({ hint: LANG }) // 'de' | 'en'
         })
         .then(r => r.json())
         .then(j => {
@@ -737,7 +747,11 @@
     const toggleDirectLive = document.getElementById('toggle-direct-live');
     const labelDirectLive = document.getElementById('label-direct-live');
 
-    // NEW: Gallery elements
+    // NEW: Low-End elements
+    const toggleLowEnd = document.getElementById('toggle-lowend');
+    const lowendPill = document.getElementById('lowend-pill');
+
+    // Gallery elements
     const thumbsEl = document.getElementById('thumbs');
     const btnRefreshGallery = document.getElementById('btn-refresh-gallery');
 
@@ -748,6 +762,14 @@
       el.textContent = `[${ts}] ${msg}\n` + el.textContent;
       if (el.textContent.length > 20000) el.textContent = el.textContent.slice(0, 20000);
     }
+    function appendStatusLog(message) {
+      try {
+        log(statusLog, message);
+      } catch (e) {
+        console.log('[UI]', message);
+      }
+    }
+
     function clampSize(v) {
       const n = Math.round(Number(v) || 0);
       return Math.max(64, Math.min(2048, n));
@@ -880,7 +902,7 @@
         const rel = (ev?.data || '').trim();
         if (rel) {
           setImage(rel, caption.textContent || rel);
-          // NEW: Insert/refresh thumbnail on new image
+          // Insert/refresh thumbnail on new image
           prependThumb({name: rel.replace(/^\/?static\//, ''), url: rel, modified: Date.now()/1000});
         }
       });
@@ -1623,6 +1645,103 @@
       }
     }
 
+    // ---------- NEW: Low-End toggle wiring (additive only) ----------
+    function syncLowEndUI(enabled) {
+      if (!lowendPill) return;
+      lowendPill.style.display = '';
+      if (enabled) {
+        lowendPill.textContent = 'Low-End: on';
+      } else {
+        lowendPill.textContent = 'Low-End: off';
+      }
+    }
+    // Debounced toggle for Low-End mode with verification GET and config refresh
+    async function setLowEndMode(enabled) {
+      const checkbox = document.getElementById('toggle-lowend');
+      const pill = document.getElementById('lowend-pill');
+      const prevChecked = checkbox ? checkbox.checked : false;
+
+      // Prevent double clicks while request in flight
+      if (checkbox) checkbox.disabled = true;
+
+      try {
+        // POST desired state
+        const res = await fetch('/api/settings/lowend_mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !!enabled }),
+        });
+
+        if (!res.ok) {
+          const msg = await res.text().catch(() => 'toggle failed');
+          throw new Error(`POST /api/settings/lowend_mode failed: ${msg}`);
+        }
+
+        // Verify with immediate GET
+        const verify = await fetch('/api/settings/lowend_mode', { method: 'GET' });
+        if (!verify.ok) {
+          const msg = await verify.text().catch(() => 'verification failed');
+          throw new Error(`GET /api/settings/lowend_mode failed: ${msg}`);
+        }
+        const data = await verify.json();
+
+        // Update UI from server truth
+        if (checkbox) checkbox.checked = !!data.enabled;
+        if (pill) {
+          pill.classList.toggle('on', !!data.enabled);
+          pill.classList.toggle('off', !data.enabled);
+          pill.textContent = data.enabled ? 'Low-End ON' : 'Low-End OFF';
+        }
+
+        // Log and refresh global config so all status pills reflect new backend
+        appendStatusLog(`[LOWEND] Server confirmed enabled=${!!data.enabled}`);
+        await refreshConfig(); // assumes existing function that GETs /config and updates UI
+      } catch (err) {
+        // Rollback UI to previous state on error
+        if (checkbox) checkbox.checked = prevChecked;
+        if (pill) {
+          pill.classList.toggle('on', !!prevChecked);
+          pill.classList.toggle('off', !prevChecked);
+          pill.textContent = prevChecked ? 'Low-End ON' : 'Low-End OFF';
+        }
+        appendStatusLog(`[LOWEND][ERROR] ${err && err.message ? err.message : err}`);
+      } finally {
+        if (checkbox) checkbox.disabled = false;
+      }
+    }
+
+    // Ensure initial UI matches server and refresh full config afterward
+    async function fetchCurrentLowEnd() {
+      const checkbox = document.getElementById('toggle-lowend');
+      const pill = document.getElementById('lowend-pill');
+      try {
+        const res = await fetch('/api/settings/lowend_mode', { method: 'GET' });
+        if (!res.ok) {
+          const msg = await res.text().catch(() => 'error');
+          throw new Error(`GET /api/settings/lowend_mode failed: ${msg}`);
+        }
+        const data = await res.json();
+        if (checkbox) checkbox.checked = !!data.enabled;
+        if (pill) {
+          pill.classList.toggle('on', !!data.enabled);
+          pill.classList.toggle('off', !data.enabled);
+          pill.textContent = data.enabled ? 'Low-End ON' : 'Low-End OFF';
+        }
+        appendStatusLog(`[LOWEND] Initial enabled=${!!data.enabled}`);
+        // Load full config so UI pills are in sync at startup
+        await refreshConfig();
+      } catch (err) {
+        appendStatusLog(`[LOWEND][ERROR] ${err && err.message ? err.message : err}`);
+      }
+    }
+
+    if (toggleLowEnd) {
+      toggleLowEnd.addEventListener('change', () => {
+        setLowEndMode(toggleLowEnd.checked);
+      });
+    }
+    // ---------- END NEW ----------
+
     // ---------- Gallery: fetch + render ----------
     async function loadGallery(limit = 50) {
       if (!thumbsEl) return;
@@ -1805,6 +1924,9 @@
 
       // Initial gallery load
       await loadGallery(50);
+
+      // NEW: initial low-end fetch (non-intrusive)
+      await fetchCurrentLowEnd();
     })();
   </script>
 
@@ -1814,7 +1936,3 @@
   </div>
 </body>
 </html>
-
-
-
-

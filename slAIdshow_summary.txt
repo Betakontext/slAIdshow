@@ -76,10 +76,6 @@ Hier die Dateien auf dem derzeitigen Stand:
 
 
 
-
-# app.py
-
-
 # app.py
 from __future__ import annotations
 
@@ -248,7 +244,8 @@ APP_SSE_TICK_SEC = _env_float("APP_SSE_TICK_SEC", 1.0)
 # them for the audio pipeline configuration display.
 WHISPER_BACKEND_REQUESTED = _env_str("APP_WHISPER_BACKEND", "auto").lower()
 WHISPER_MODEL_PATH = _env_str("APP_WHISPER_MODEL_PATH", "")
-WHISPER_LANGUAGE = _env_str("APP_WHISPER_LANGUAGE", "de")
+WHISPER_LANGUAGE_RAW = _env_str("APP_WHISPER_LANGUAGE", "")
+WHISPER_LANGUAGE = WHISPER_LANGUAGE_RAW.strip() or None
 WHISPER_THREADS = _env_int("APP_WHISPER_THREADS", 2)
 WHISPER_TEMPERATURE = _env_float("APP_WHISPER_TEMPERATURE", 0.0)
 WHISPER_MIN_SEC = _env_float("APP_WHISPER_MIN_SEC", 0.35)
@@ -280,6 +277,9 @@ FASTER_WHISPER_DOWNLOAD_ROOT = _env_str(
     "APP_FASTER_WHISPER_DOWNLOAD_ROOT",
     "",
 )
+# ---------- Transcription input-locale hint (runtime-aware) ----------
+INPUT_LOCALE_HINT = (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip() or None
+
 
 
 # ---------- Text filtering ----------
@@ -614,6 +614,11 @@ class WorkflowSelect(BaseModel):
         if not re.fullmatch(r"[A-Za-z0-9._\\-]+", v):
             raise ValueError("Illegal characters in filename")
         return v
+# ---------- Low-end mode settings API model ----------
+
+class LowEndSettings(BaseModel):
+    enabled: bool
+
 
 # ---------- Audio utils ----------
 
@@ -1597,10 +1602,12 @@ async def get_config():
         "transcription": {
             "requested_backend": WHISPER_BACKEND_REQUESTED,
             "language": WHISPER_LANGUAGE,
+            "input_locale_hint": INPUT_LOCALE_HINT,
             "threads": WHISPER_THREADS,
             "temperature": WHISPER_TEMPERATURE,
             "min_sec": WHISPER_MIN_SEC,
             "min_peak": WHISPER_MIN_PEAK,
+            "lowend_mode": (os.getenv("APP_LOWEND_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}),
             "pywhispercpp": {
                 "model_path": masked,
             },
@@ -1653,6 +1660,87 @@ async def get_config():
         },
         "direct_live": {"enabled": STATE.direct_live},  # NEW: expose direct-live flag
     }
+
+
+# ---------- Low-end mode settings endpoints ----------
+
+@app.get("/api/settings/lowend_mode", response_model=LowEndSettings)
+async def get_lowend_mode():
+    enabled = (os.getenv("APP_LOWEND_MODE", "0").strip().lower() in {"1", "true", "yes", "on"})
+    return LowEndSettings(enabled=enabled)
+
+@app.post("/api/settings/lowend_mode", response_model=LowEndSettings)
+async def set_lowend_mode(cfg: LowEndSettings):
+    # Current state
+    cur_enabled = (os.getenv("APP_LOWEND_MODE", "0").strip().lower() in {"1", "true", "yes", "on"})
+    new_enabled = bool(cfg.enabled)
+
+    if new_enabled == cur_enabled:
+        # No change, but still broadcast so UI syncs if needed
+        await broadcast("status", f"lowend_mode:{'on' if new_enabled else 'off'}")
+        return LowEndSettings(enabled=new_enabled)
+
+    # If recording is running, stop realtime transcriber gracefully
+    # to allow re-init parameters to take effect cleanly.
+    if RT.transcriber is not None:
+        try:
+            await RT.transcriber.stop()
+        except Exception as e:
+            print(f"[LOWEND] stopping realtime transcriber failed: {e}")
+        finally:
+            RT.transcriber = None
+
+    # Flip environment flag
+    if new_enabled:
+        os.environ["APP_LOWEND_MODE"] = "1"
+    else:
+        with contextlib.suppress(Exception):
+            del os.environ["APP_LOWEND_MODE"]
+
+    # Reinitialize the transcription backend to apply overrides.
+    try:
+        # DEBUG: log raw env just before re-init to verify the source of truth.
+        env_before = os.getenv("APP_LOWEND_MODE", "")
+        print(f"[LOWEND] env_before_reinit: APP_LOWEND_MODE='{env_before}' (new_enabled={new_enabled})")
+
+        # init_transcription_backend() calls get_transcription_manager().initialize()
+        # which reloads configuration from environment and sets status.lowend_mode accordingly.
+        tm = init_transcription_backend()
+        st = tm.get_status()
+
+        print(
+            f"[LOWEND] reinitialized: "
+            f"backend={st.get('selected_backend')} "
+            f"device={st.get('selected_device')} "
+            f"lowend={st.get('lowend_mode')}"
+        )
+
+        # DEBUG: log env again after re-init to detect any overwrite by other code paths.
+        env_after = os.getenv("APP_LOWEND_MODE", "")
+        print(f"[LOWEND] env_after_reinit: APP_LOWEND_MODE='{env_after}' manager_lowend={st.get('lowend_mode')}")
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[LOWEND] reinit failed: {e}\n{tb}")
+        # Even if reinit fails, we return the new flag so UI reflects the chosen state.
+        # The backend status will still show initialization_error if present.
+
+    # If pipeline is running, auto-start a new realtime transcriber so the session continues.
+    if STATE.running and RT.transcriber is None:
+        try:
+            rt = RealtimeTranscriber(sample_rate=SAMPLE_RATE)
+            rt.subscribe(_on_realtime_event)
+            await rt.start()
+            RT.transcriber = rt
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[LOWEND] failed to restart realtime transcriber: {e}\n{tb}")
+
+    await broadcast("status", f"lowend_mode:{'on' if new_enabled else 'off'}")
+    return LowEndSettings(enabled=new_enabled)
+
+
+
+
 
 # ---------- Workflows API ----------
 
@@ -2436,6 +2524,28 @@ async def get_ollama_vision():
         cloud_url=VISION.cloud_url,
     )
 
+
+
+
+class TranscriptionHintPayload(BaseModel):
+    hint: Optional[str] = Field(default=None, description="Language hint like 'de', 'en', 'fr'. Empty or null clears the hint.")
+
+@app.post("/api/settings/transcription_hint")
+async def set_transcription_hint(payload: TranscriptionHintPayload):
+    global INPUT_LOCALE_HINT
+    val = (payload.hint or "").strip().lower()
+    os.environ["APP_INPUT_LOCALE_HINT"] = val  # runtime-aware for Faster-Whisper
+    INPUT_LOCALE_HINT = val or None
+    # Optional: Status-Broadcast, damit UI sofort aktualisieren kann
+    await broadcast("status", f"transcription_hint:{INPUT_LOCALE_HINT or ''}")
+    return {"ok": True, "input_locale_hint": INPUT_LOCALE_HINT}
+
+@app.get("/api/settings/transcription_hint")
+async def get_transcription_hint():
+    return {"input_locale_hint": (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip() or None}
+
+print(f"[TRANSCRIBE] runtime_hint={os.getenv('APP_INPUT_LOCALE_HINT', '')}")
+
 @app.post("/api/settings/ollama_vision", response_model=OllamaVisionSettings)
 async def set_ollama_vision(cfg: OllamaVisionSettings):
     VISION.enabled = bool(cfg.enabled)
@@ -2445,6 +2555,7 @@ async def set_ollama_vision(cfg: OllamaVisionSettings):
     VISION.cloud_url = (cfg.cloud_url or "").strip()
     await broadcast("status", "ollama_vision:updated")
     return await get_ollama_vision()
+
 
 # ---------- Style API (upload/save_url/build/reset) with no fallback ----------
 
@@ -2928,13 +3039,6 @@ if __name__ == "__main__":
 
 
 
-
-
-
-
-
-# transcription_backend.py
-
 # transcription_backend.py
 #
 # Drop-in replacement with:
@@ -2943,8 +3047,13 @@ if __name__ == "__main__":
 # - Keeps your established audio preparation and cleaning utilities
 # - Adds a low-latency RealtimeTranscriber:
 #     * RMS-based VAD + debounce to detect end-of-utterance
-#     * Rolling window + slice-cadence decodes for partial hypotheses
+#     * Determistic decode ticker for partials (low jitter)
+#     * Tail-window decodes for stability (avoid reinterpreting old text)
+#     * Partial dedupe + growth + meaningful-light + punct-only skip
+#     * Adaptive finalize delay (sentence-end vs no-sentence-end)
 #     * Optional file recording and file-transcription fallback if realtime-final is empty
+# - Low-end profile switch via APP_LOWEND_MODE=1 to improve latency on weak CPUs
+# - Low-end switch is LIMITED to Whisper/Faster-Whisper keys (no changes to VAD/segmentation/LLM/etc.)
 # - All operational messages remain in English
 
 from __future__ import annotations
@@ -2961,6 +3070,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
+
+print(f"[TRANSCRIBE][FILE] loaded: {__file__}")
 
 
 # -----------------------
@@ -3004,6 +3115,18 @@ def _is_meaningful(text: str, min_chars: int = 12, min_words: int = 3) -> bool:
     return True
 
 
+def _is_punct_only_change(prev_norm: str, new_norm: str) -> bool:
+    """
+    Return True if the only difference between prev and new is a terminal punctuation change.
+    This reduces UI "flicker" when Whisper only toggles a trailing '.' or '…' etc.
+    """
+    if prev_norm == new_norm:
+        return False
+    prev_core = re.sub(r"[\.!\?…]+\s*$", "", prev_norm)
+    new_core = re.sub(r"[\.!\?…]+\s*$", "", new_norm)
+    return prev_core == new_core
+
+
 # -----------------------
 # Environment helpers
 # -----------------------
@@ -3027,6 +3150,10 @@ def _env_float(key: str, default: float) -> float:
 
 
 def _env_bool(key: str, default: bool = False) -> bool:
+    """
+    Returns True if env var is one of: 1, true, yes, on (case-insensitive).
+    A missing key falls back to 'default'.
+    """
     default_text = "1" if default else "0"
     value = (os.getenv(key, default_text) or "").strip().lower()
     return value in {"1", "true", "yes", "on"}
@@ -3045,6 +3172,155 @@ META_RE = re.compile(
 
 
 # -----------------------
+# Low-end profile helpers (Whisper-only scope)
+# -----------------------
+
+def _only_if_unset_str(key: str, value: str) -> None:
+    if os.getenv(key, "") == "":
+        os.environ[key] = str(value)
+
+
+def _only_if_unset_int(key: str, value: int) -> None:
+    if os.getenv(key, "") == "":
+        os.environ[key] = str(int(value))
+
+
+def _only_if_unset_float(key: str, value: float) -> None:
+    if os.getenv(key, "") == "":
+        os.environ[key] = str(float(value))
+
+
+def _only_if_unset_bool(key: str, value: bool) -> None:
+    if os.getenv(key, "") == "":
+        os.environ[key] = "1" if value else "0"
+
+
+def _override_from_lowend_or_default(
+    app_key: str,
+    lowend_key: str,
+    fallback_setter: Callable[[str], None],
+) -> None:
+    """
+    If LOWEND_* env exists (non-empty), override APP_* with its value (hard override).
+    Otherwise, call fallback_setter(app_key) which should fill APP_* only-if-unset.
+    """
+    lowend_val = os.getenv(lowend_key, "")
+    if lowend_val != "":
+        os.environ[app_key] = lowend_val
+        print(f"[LOWEND] {app_key} <- {lowend_key} ({lowend_val})")
+        return
+    # No LOWEND value: use conservative default only if APP_* is currently unset
+    fallback_setter(app_key)
+
+
+def _apply_low_end_overrides_if_enabled() -> None:
+    """
+    Apply Whisper-only low-end overrides when APP_LOWEND_MODE=1.
+    - Reads LOWEND_* variables and assigns them to their APP_* counterparts (hard override).
+    - If LOWEND_* is absent, uses conservative defaults but only when APP_* is unset.
+    - No changes to non-Whisper domains (VAD, segmentation, UI, LLM, image backends).
+    """
+    if not _env_bool("APP_LOWEND_MODE", False):
+        return
+
+    print("[TRANSCRIBE] APP_LOWEND_MODE=1 detected – applying Whisper low-end overrides")
+
+    # Whisper (shared)
+    _override_from_lowend_or_default(
+        "APP_WHISPER_BACKEND",
+        "LOWEND_WHISPER_BACKEND",
+        lambda k: _only_if_unset_str(k, "faster_whisper"),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_LANGUAGE",
+        "LOWEND_WHISPER_LANGUAGE",
+        lambda k: _only_if_unset_str(k, ""),  # keep auto-detect unless explicitly set
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_THREADS",
+        "LOWEND_WHISPER_THREADS",
+        lambda k: _only_if_unset_int(k, 2),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_TEMPERATURE",
+        "LOWEND_WHISPER_TEMPERATURE",
+        lambda k: _only_if_unset_float(k, 0.0),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_MIN_SEC",
+        "LOWEND_WHISPER_MIN_SEC",
+        lambda k: _only_if_unset_float(k, 0.8),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_MIN_PEAK",
+        "LOWEND_WHISPER_MIN_PEAK",
+        lambda k: _only_if_unset_float(k, 0.0015),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_NO_SPEECH_THRESHOLD",
+        "LOWEND_WHISPER_NO_SPEECH_THRESHOLD",
+        lambda k: _only_if_unset_float(k, 0.8),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_LOGPROB_THRESHOLD",
+        "LOWEND_WHISPER_LOGPROB_THRESHOLD",
+        lambda k: _only_if_unset_float(k, -0.8),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT",
+        "LOWEND_WHISPER_CONDITION_ON_PREVIOUS_TEXT",
+        lambda k: _only_if_unset_bool(k, True),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_COMPRESSION_RATIO_THRESHOLD",
+        "LOWEND_WHISPER_COMPRESSION_RATIO_THRESHOLD",
+        lambda k: _only_if_unset_float(k, 2.4),
+    )
+
+    # Faster-Whisper (CTranslate2)
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_MODEL",
+        "LOWEND_FASTER_WHISPER_MODEL",
+        lambda k: _only_if_unset_str(k, "tiny"),
+    )
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_DEVICE",
+        "LOWEND_FASTER_WHISPER_DEVICE",
+        lambda k: _only_if_unset_str(k, "cpu"),
+    )
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_COMPUTE_TYPE",
+        "LOWEND_FASTER_WHISPER_COMPUTE_TYPE",
+        lambda k: _only_if_unset_str(k, "int8"),
+    )
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_CPU_THREADS",
+        "LOWEND_FASTER_WHISPER_CPU_THREADS",
+        lambda k: _only_if_unset_int(k, 2),
+    )
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_NUM_WORKERS",
+        "LOWEND_FASTER_WHISPER_NUM_WORKERS",
+        lambda k: _only_if_unset_int(k, 1),
+    )
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_BEAM_SIZE",
+        "LOWEND_FASTER_WHISPER_BEAM_SIZE",
+        lambda k: _only_if_unset_int(k, 1),
+    )
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_VAD_FILTER",
+        "LOWEND_FASTER_WHISPER_VAD_FILTER",
+        lambda k: _only_if_unset_bool(k, False),
+    )
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_DOWNLOAD_ROOT",
+        "LOWEND_FASTER_WHISPER_DOWNLOAD_ROOT",
+        lambda k: _only_if_unset_str(k, "./models/faster-whisper-cache"),
+    )
+
+
+# -----------------------
 # Configuration dataclass
 # -----------------------
 
@@ -3053,7 +3329,7 @@ class TranscriptionConfig:
     """Configuration loaded once from environment variables."""
 
     requested_backend: str
-    language: str
+    language: Optional[str]
     threads: int
     temperature: float
     min_seconds: float
@@ -3075,7 +3351,7 @@ class TranscriptionConfig:
     faster_whisper_vad_filter: bool
     faster_whisper_download_root: Optional[str]
 
-    # Realtime parameters (new; defaults tuned for low latency)
+    # Realtime parameters (unchanged; low-end switch does not touch them)
     rt_slice_sec: float
     rt_window_sec: float
     rt_end_debounce_ms: int
@@ -3084,10 +3360,37 @@ class TranscriptionConfig:
     rt_fallback_record: bool
     rt_fallback_dir: str
 
+    # Partials/debounce tunables (unchanged by low-end switch)
+    min_partial_decode_interval_ms: int
+    min_partial_emit_interval_ms: int
+    partial_min_growth_chars: int
+    partial_min_growth_words: int
+    partial_min_chars: int
+    partial_min_words: int
+
+    # Adaptive finalization delays (unchanged by low-end switch)
+    finalize_base_delay_sec: float
+    finalize_nosent_delay_sec: float
+
+    # Fallback recording minimum record time
+    fallback_min_record_ms: int
+
     @classmethod
     def from_environment(cls) -> "TranscriptionConfig":
+        # Log raw env before applying overrides
+        print(f"[LOWEND][CFG] from_env: APP_LOWEND_MODE='{os.getenv('APP_LOWEND_MODE', '')}'")
+        # Apply whisper-only low-end overrides first (if APP_LOWEND_MODE=1)
+        _apply_low_end_overrides_if_enabled()
+        # Log selected core keys after env-based overrides (note: no cfg object yet)
+        print(
+            "[LOWEND][CFG] after_overrides_env: "
+            f"APP_WHISPER_BACKEND='{os.getenv('APP_WHISPER_BACKEND', '')}' "
+            f"APP_FASTER_WHISPER_DEVICE='{os.getenv('APP_FASTER_WHISPER_DEVICE', '')}' "
+            f"APP_FASTER_WHISPER_MODEL='{os.getenv('APP_FASTER_WHISPER_MODEL', '')}' "
+            f"APP_FASTER_WHISPER_COMPUTE_TYPE='{os.getenv('APP_FASTER_WHISPER_COMPUTE_TYPE', '')}'"
+        )
+
         requested_backend = _env_str("APP_WHISPER_BACKEND", "auto").lower()
-        # Preserve legacy names
         if requested_backend not in {"auto", "faster_whisper", "pywhispercpp"}:
             print(
                 "[TRANSCRIBE] Invalid APP_WHISPER_BACKEND="
@@ -3134,16 +3437,16 @@ class TranscriptionConfig:
         rt_fallback_record = _env_bool("APP_RT_FALLBACK_RECORD", True)
         rt_fallback_dir = _env_str("APP_RT_FALLBACK_DIR", "./outputs/voice_fallback")
 
-        return cls(
+        cfg = cls(
             requested_backend=requested_backend,
-            language=_env_str("APP_WHISPER_LANGUAGE", "de"),
+            language=(_env_str("APP_WHISPER_LANGUAGE", "").strip() or None),
             threads=max(1, _env_int("APP_WHISPER_THREADS", 2)),
             temperature=max(0.0, _env_float("APP_WHISPER_TEMPERATURE", 0.0)),
-            min_seconds=max(0.0, _env_float("APP_WHISPER_MIN_SEC", 0.35)),
+            min_seconds=max(0.0, _env_float("APP_WHISPER_MIN_SEC", 0.8)),
             min_peak=max(0.0, _env_float("APP_WHISPER_MIN_PEAK", 0.0009)),
             no_speech_threshold=no_speech_threshold,
             logprob_threshold=logprob_threshold,
-            condition_on_previous_text=_env_bool("APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT", False),
+            condition_on_previous_text=_env_bool("APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT", True),
             pywhispercpp_model_path=_env_str("APP_WHISPER_MODEL_PATH", ""),
             faster_whisper_model=_env_str("APP_FASTER_WHISPER_MODEL", "small"),
             faster_whisper_device=faster_device,
@@ -3168,7 +3471,7 @@ class TranscriptionConfig:
                 False,
             ),
             faster_whisper_download_root=download_root,
-            # Realtime params
+            # Realtime params (unchanged by low-end switch)
             rt_slice_sec=rt_slice_sec,
             rt_window_sec=rt_window_sec,
             rt_end_debounce_ms=rt_end_debounce_ms,
@@ -3176,8 +3479,42 @@ class TranscriptionConfig:
             vad_rms_threshold=vad_rms_threshold,
             rt_fallback_record=rt_fallback_record,
             rt_fallback_dir=rt_fallback_dir,
+            # Partials/debounce (unchanged by low-end switch)
+            min_partial_decode_interval_ms=_env_int("APP_MIN_PARTIAL_DECODE_MS", 350),
+            min_partial_emit_interval_ms=_env_int("APP_MIN_PARTIAL_EMIT_MS", 600),
+            partial_min_growth_chars=_env_int("APP_PARTIAL_MIN_GROWTH_CHARS", 3),
+            partial_min_growth_words=_env_int("APP_PARTIAL_MIN_GROWTH_WORDS", 1),
+            partial_min_chars=_env_int("APP_PARTIAL_MIN_CHARS", 10),
+            partial_min_words=_env_int("APP_PARTIAL_MIN_WORDS", 2),
+            # Adaptive finalization (unchanged by low-end switch)
+            finalize_base_delay_sec=_env_float("APP_FINALIZE_BASE_DELAY_SEC", 0.35),
+            finalize_nosent_delay_sec=_env_float("APP_FINALIZE_NOSENT_DELAY_SEC", 0.85),
+            # Fallback recording threshold
+            fallback_min_record_ms=_env_int("APP_RT_FALLBACK_MIN_RECORD_MS", 1500),
         )
 
+        # Final, effective config log
+        print(
+            "[LOWEND][CFG] effective_config: "
+            f"lowend_mode={_env_bool('APP_LOWEND_MODE', False)} "
+            f"requested_backend={cfg.requested_backend} "
+            f"faster_device={cfg.faster_whisper_device} "
+            f"compute_type={cfg.faster_whisper_compute_type} "
+            f"model={cfg.faster_whisper_model} "
+            f"threads={cfg.faster_whisper_cpu_threads} "
+            f"workers={cfg.faster_whisper_num_workers} "
+            f"beam_size={cfg.faster_whisper_beam_size} "
+            f"vad_filter={int(cfg.faster_whisper_vad_filter)} "
+            f"language={cfg.language} "
+            f"temperature={cfg.temperature:.2f} "
+            f"min_sec={cfg.min_seconds:.2f} "
+            f"min_peak={cfg.min_peak:.4f} "
+            f"no_speech_thr={cfg.no_speech_threshold} "
+            f"logprob_thr={cfg.logprob_threshold} "
+            f"cond_prev={int(cfg.condition_on_previous_text)}"
+        )
+
+        return cfg
 
 # -----------------------
 # Status dataclass
@@ -3202,6 +3539,7 @@ class TranscriptionStatus:
     initialized_at_unix: Optional[float] = None
     last_transcription_ms: Optional[float] = None
     last_transcription_error: Optional[str] = None
+    lowend_mode: bool = False
 
     def __post_init__(self) -> None:
         if self.supported_cuda_compute_types is None:
@@ -3290,9 +3628,15 @@ class FasterWhisperBackend(BaseTranscriptionBackend):
         if audio.size == 0:
             return ""
 
+        # Determine effective language at runtime:
+        # Priority: (no explicit per-call override here) config.language > APP_INPUT_LOCALE_HINT > None
+        hint_lang = (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip().lower() or None
+        conf_lang = self.config.language or None
+        eff_lang = conf_lang or hint_lang or None
+
         # Build kwargs conditionally to avoid overriding library defaults with None
         kwargs: Dict[str, Any] = dict(
-            language=self.config.language or None,
+            language=eff_lang,  # None enables auto-detect
             beam_size=self.config.faster_whisper_beam_size,
             temperature=self.config.temperature,
             vad_filter=self.config.faster_whisper_vad_filter,
@@ -3300,6 +3644,7 @@ class FasterWhisperBackend(BaseTranscriptionBackend):
             word_timestamps=False,
             without_timestamps=True,
         )
+
         if self.config.no_speech_threshold is not None:
             kwargs["no_speech_threshold"] = self.config.no_speech_threshold
         if self.config.logprob_threshold is not None:
@@ -3343,7 +3688,8 @@ class PyWhisperCppBackend(BaseTranscriptionBackend):
             n_threads=config.threads,
             print_progress=False,
             print_realtime=False,
-            language=config.language or None,
+            # Force auto-detect to avoid re-init on runtime hint changes:
+            language=None,
             translate=False,
             temperature=config.temperature,
         )
@@ -3394,19 +3740,33 @@ class TranscriptionManager:
         self.status = TranscriptionStatus(
             requested_backend=self.config.requested_backend,
             language=self.config.language,
+            lowend_mode=_env_bool("APP_LOWEND_MODE", False),
         )
 
     def initialize(self) -> None:
         """Initialize the best permitted backend according to configuration."""
 
-        if self.status.ready:
-            return
+        # Always re-read ENV and (re)initialize to reflect lowend toggle
 
         self.config = TranscriptionConfig.from_environment()
+        print(
+            "[LOWEND][TM] initialize with: "
+            f"lowend_mode={_env_bool('APP_LOWEND_MODE', False)} "
+            f"requested_backend={self.config.requested_backend} "
+            f"faster_device={self.config.faster_whisper_device} "
+            f"compute_type={self.config.faster_whisper_compute_type} "
+            f"model={self.config.faster_whisper_model}"
+        )
         self.status = TranscriptionStatus(
             requested_backend=self.config.requested_backend,
             language=self.config.language,
+            lowend_mode=_env_bool("APP_LOWEND_MODE", False),
         )
+
+        # CRITICAL: Ensure status reflects current ENV immediately after rebuild (runtime toggle safe)
+        self.status.lowend_mode = _env_bool("APP_LOWEND_MODE", False)
+        print(f"[LOWEND][TM] initialize(): status.lowend_mode={int(self.status.lowend_mode)}")
+
         attempts: List[str] = []
 
         if self.config.requested_backend == "pywhispercpp":
@@ -3509,18 +3869,6 @@ class TranscriptionManager:
             f"Details: {self.status.initialization_error}"
         )
 
-    def _initialize_pywhispercpp_or_fail(self, attempts: List[str]) -> None:
-        try:
-            self._initialize_pywhispercpp()
-        except Exception as exc:
-            message = f"pywhispercpp initialization failed: {exc}"
-            attempts.append(message)
-            self.backend = None
-            self.status.selected_backend = "unavailable"
-            self.status.ready = False
-            self.status.initialization_error = " | ".join(attempts)
-            print(f"[TRANSCRIBE] {message}")
-
     def _initialize_faster_whisper_cuda(self) -> None:
         supported = _get_supported_compute_types("cuda")
         self.status.supported_cuda_compute_types = sorted(supported)
@@ -3548,7 +3896,26 @@ class TranscriptionManager:
             device="cuda",
             compute_type=compute_type,
         )
-        self._set_ready_faster_whisper(backend)
+
+        # Mark ready and synchronize low-end mode from ENV at the success point
+        self.backend = backend
+        self.status.selected_backend = backend.backend_name
+        self.status.selected_device = backend.device
+        self.status.selected_compute_type = backend.compute_type
+        self.status.model = backend.model_name
+        self.status.ready = True
+        self.status.initialized_at_unix = time.time()
+        self.status.initialization_error = None
+
+        # CRITICAL: ensure runtime low-end toggle is reflected in status immediately
+        self.status.lowend_mode = _env_bool("APP_LOWEND_MODE", False)
+
+        print(
+            "[TRANSCRIBE] Ready: backend=faster_whisper "
+            f"device={backend.device} compute_type={backend.compute_type} "
+            f"model={backend.model_name} language={self.config.language} "
+            f"lowend_mode={int(self.status.lowend_mode)}"
+        )
 
     def _initialize_faster_whisper_cpu(self) -> None:
         supported = _get_supported_compute_types("cpu")
@@ -3574,7 +3941,26 @@ class TranscriptionManager:
             device="cpu",
             compute_type=compute_type,
         )
-        self._set_ready_faster_whisper(backend)
+
+        # Mark ready and synchronize low-end mode from ENV at the success point
+        self.backend = backend
+        self.status.selected_backend = backend.backend_name
+        self.status.selected_device = backend.device
+        self.status.selected_compute_type = backend.compute_type
+        self.status.model = backend.model_name
+        self.status.ready = True
+        self.status.initialized_at_unix = time.time()
+        self.status.initialization_error = None
+
+        # CRITICAL: ensure runtime low-end toggle is reflected in status immediately
+        self.status.lowend_mode = _env_bool("APP_LOWEND_MODE", False)
+
+        print(
+            "[TRANSCRIBE] Ready: backend=faster_whisper "
+            f"device={backend.device} compute_type={backend.compute_type} "
+            f"model={backend.model_name} language={self.config.language} "
+            f"lowend_mode={int(self.status.lowend_mode)}"
+        )
 
     def _initialize_pywhispercpp(self) -> None:
         backend = PyWhisperCppBackend(config=self.config)
@@ -3586,28 +3972,14 @@ class TranscriptionManager:
         self.status.ready = True
         self.status.initialized_at_unix = time.time()
         self.status.initialization_error = None
+
+        # CRITICAL: ensure runtime low-end toggle is reflected in status immediately
+        self.status.lowend_mode = _env_bool("APP_LOWEND_MODE", False)
+
         print(
             "[TRANSCRIBE] Ready: backend=pywhispercpp "
             f"model={backend.model_path.name} threads={self.config.threads} "
-            f"language={self.config.language}"
-        )
-
-    def _set_ready_faster_whisper(
-        self,
-        backend: FasterWhisperBackend,
-    ) -> None:
-        self.backend = backend
-        self.status.selected_backend = backend.backend_name
-        self.status.selected_device = backend.device
-        self.status.selected_compute_type = backend.compute_type
-        self.status.model = backend.model_name
-        self.status.ready = True
-        self.status.initialized_at_unix = time.time()
-        self.status.initialization_error = None
-        print(
-            "[TRANSCRIBE] Ready: backend=faster_whisper "
-            f"device={backend.device} compute_type={backend.compute_type} "
-            f"model={backend.model_name} language={self.config.language}"
+            f"language={self.config.language} lowend_mode={int(self.status.lowend_mode)}"
         )
 
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
@@ -3663,6 +4035,19 @@ class TranscriptionManager:
 
     def get_status(self) -> Dict[str, Any]:
         return self.status.to_dict()
+
+    # Convenience to preserve previous behavior
+    def _initialize_pywhispercpp_or_fail(self, attempts: List[str]) -> None:
+        try:
+            self._initialize_pywhispercpp()
+        except Exception as exc:
+            msg = f"pywhispercpp unavailable: {exc}"
+            attempts.append(msg)
+            print(f"[TRANSCRIBE] {msg}")
+            self.backend = None
+            self.status.selected_backend = "unavailable"
+            self.status.ready = False
+            self.status.initialization_error = " | ".join(attempts)
 
 
 # -----------------------
@@ -3903,7 +4288,7 @@ def get_transcription_status() -> Dict[str, Any]:
 
 
 # -----------------------
-# Realtime Transcriber (new)
+# Realtime Transcriber (preserved)
 # -----------------------
 
 RealtimeEvent = Dict[str, Any]
@@ -3942,12 +4327,40 @@ class RealtimeTranscriber:
         self._record_bytes: Optional[io.BytesIO] = None
         self._record_path: Optional[Path] = None
 
-        # Running merged text and finalize debounce (NEW)
+        # Running merged text and finalize debounce
         self._cur_utt: str = ""
         self._finalize_task: Optional[asyncio.Task] = None
-        self._finalize_delay_sec: float = 0.35
-        self._min_chars: int = int(os.getenv("APP_TEXT_MIN_CHARS", "12") or "12")
-        self._min_words: int = int(os.getenv("APP_TEXT_MIN_WORDS", "3") or "3")
+
+        # Base finalize delay (kept for backward-compat but adaptive delays will be used)
+        self._finalize_delay_sec: float = _env_float("APP_FINALIZE_BASE_DELAY_SEC", 0.35)
+
+        # Final "meaningfulness" thresholds
+        self._min_chars: int = _env_int("APP_TEXT_MIN_CHARS", 12)
+        self._min_words: int = _env_int("APP_TEXT_MIN_WORDS", 3)
+
+        # Partial emit debouncing and tail-window decode
+        self._last_partial_emit_ms: int = 0
+        self._last_emitted_partial_norm: str = ""
+        self._min_partial_emit_interval_ms: int = _env_int("APP_MIN_PARTIAL_EMIT_MS", 600)
+        self._partial_min_growth_chars: int = _env_int("APP_PARTIAL_MIN_GROWTH_CHARS", 3)
+        self._partial_min_growth_words: int = _env_int("APP_PARTIAL_MIN_GROWTH_WORDS", 1)
+        self._partial_min_chars: int = _env_int("APP_PARTIAL_MIN_CHARS", 10)  # meaningful-light
+        self._partial_min_words: int = _env_int("APP_PARTIAL_MIN_WORDS", 2)   # meaningful-light
+
+        # Decode ticker for partials (deterministic cadence, avoids bursty re-decodes)
+        self._min_partial_decode_interval_ms: int = _env_int("APP_MIN_PARTIAL_DECODE_MS", 350)
+
+        # Tail decode windows
+        self._tail_decode_sec: float = _env_float("APP_RT_TAIL_DECODE_SEC", 10.0)
+        self._tail_min_sec: float = _env_float("APP_RT_TAIL_MIN_SEC", 6.0)   # reserved for future dynamic tail
+        self._tail_max_sec: float = _env_float("APP_RT_TAIL_MAX_SEC", 12.0)  # reserved for future dynamic tail
+
+        # Adaptive finalize delays depending on sentence-end detection
+        self._finalize_base_delay_sec: float = _env_float("APP_FINALIZE_BASE_DELAY_SEC", 0.35)
+        self._finalize_nosent_delay_sec: float = _env_float("APP_FINALIZE_NOSENT_DELAY_SEC", 0.85)
+
+        # File fallback minimum record time (ms) to avoid over-triggering on tiny utterances
+        self._fallback_min_record_ms: int = _env_int("APP_RT_FALLBACK_MIN_RECORD_MS", 1500)
 
         # Prepare fallback dir if needed
         if self.config.rt_fallback_record:
@@ -4036,7 +4449,7 @@ class RealtimeTranscriber:
                     if _rms(item) >= float(self.config.vad_rms_threshold):
                         self._last_voice_ms = _now_ms()
 
-            # Truncate rolling buffer
+            # Truncate rolling buffer (keep up to 2x max_keep to avoid growth bursts)
             if buf.size > (max_keep * 2):
                 buf = buf[-max_keep:]
 
@@ -4044,34 +4457,63 @@ class RealtimeTranscriber:
             elapsed_ms = now - self._started_ms
             since_last_voice = now - self._last_voice_ms
 
+            # Deterministic partial decode ticker
             should_decode = False
             if buf.size >= slice_len:
-                if (now - last_decode_ms) >= int(self.config.rt_slice_sec * 1000.0 * 0.6):
+                if (now - last_decode_ms) >= self._min_partial_decode_interval_ms:
                     should_decode = True
 
+            # End-of-utterance detection via silence debounce
             should_finalize = since_last_voice >= int(self.config.rt_end_debounce_ms)
 
             if should_decode:
-                txt, proc_ms = await self._decode_partial(buf)
+                # Use only the last tail window for decoding (stable partials)
+                tail_frames = int(self.sample_rate * max(2.5, min(self._tail_decode_sec, self.config.rt_window_sec)))
+                audio_for_decode = buf[-tail_frames:] if buf.size > tail_frames else buf
+                txt, proc_ms = await self._decode_partial(audio_for_decode)
                 last_decode_ms = _now_ms()
                 if txt:
-                    # Merge into running utterance to avoid flicker and duplication
-                    self._cur_utt = _merge_overlap(self._cur_utt, txt, min_overlap=5, max_overlap=18)
-                    self._emit({
-                        "type": "partial",
-                        "text": self._cur_utt,
-                        "process_ms": proc_ms,
-                        "record_ms": elapsed_ms,
-                    })
+                    merged = _merge_overlap(self._cur_utt, txt, min_overlap=5, max_overlap=18)
+                    # Debounce and dedupe partials
+                    now_ms = _now_ms()
+                    merged_norm = re.sub(r"\s+", " ", merged).strip().lower()
+
+                    # Require growth
+                    growth_chars = len(merged_norm) - len(self._last_emitted_partial_norm)
+                    growth_words = max(0, len(merged_norm.split()) - len(self._last_emitted_partial_norm.split()))
+                    interval_ok = (now_ms - self._last_partial_emit_ms) >= self._min_partial_emit_interval_ms
+                    growth_ok = (growth_chars >= self._partial_min_growth_chars) or (growth_words >= self._partial_min_growth_words)
+                    changed_ok = merged_norm != self._last_emitted_partial_norm
+
+                    # Light meaningfulness on partials to reduce 1-word flicker
+                    meaningful_light = (len(merged_norm) >= self._partial_min_chars) or (len(merged_norm.split()) >= self._partial_min_words)
+
+                    # Skip punct-only terminal changes (reduce flicker)
+                    if _is_punct_only_change(self._last_emitted_partial_norm, merged_norm):
+                        changed_ok = False
+
+                    self._cur_utt = merged
+                    if interval_ok and changed_ok and growth_ok and meaningful_light:
+                        self._emit({
+                            "type": "partial",
+                            "text": self._cur_utt,
+                            "process_ms": proc_ms,
+                            "record_ms": elapsed_ms,
+                        })
+                        self._last_partial_emit_ms = now_ms
+                        self._last_emitted_partial_norm = merged_norm
 
             if should_finalize and buf.size > 0:
-                # Decode what we have as candidate
-                candidate_txt, proc_ms = await self._decode_partial(buf, finalize=True)
+                # Use a slightly longer tail for finalize than for partial
+                tail_frames = int(self.sample_rate * max(3.0, min(self._tail_decode_sec, self.config.rt_window_sec)))
+                audio_for_decode = buf[-tail_frames:] if buf.size > tail_frames else buf
+                candidate_txt, proc_ms = await self._decode_partial(audio_for_decode, finalize=True)
                 candidate_txt = clean_transcript(candidate_txt)
+
                 fallback_used = False
 
-                # If empty, try file fallback
-                if not candidate_txt and self.config.rt_fallback_record:
+                # If empty AND recording was sufficiently long, try file fallback
+                if (not candidate_txt) and self.config.rt_fallback_record and (elapsed_ms >= self._fallback_min_record_ms):
                     with contextlib.suppress(Exception):
                         fp = await self._flush_recording_wav(sr)
                         if fp is not None:
@@ -4085,23 +4527,16 @@ class RealtimeTranscriber:
                 if candidate_txt:
                     self._cur_utt = _merge_overlap(self._cur_utt, candidate_txt, min_overlap=5, max_overlap=18)
 
-                # Decide if we can finalize now; otherwise arm a delayed finalize
-                if self._cur_utt and SENTENCE_END_RE.search(self._cur_utt):
-                    self._schedule_finalize(delay=self._finalize_delay_sec * 0.6,
-                                            process_ms=proc_ms,
-                                            record_ms=elapsed_ms,
-                                            fallback_used=fallback_used)
-                else:
-                    # Not clearly sentence-ended; emit a partial update
-                    if self._cur_utt:
-                        self._emit({
-                            "type": "partial",
-                            "text": self._cur_utt,
-                            "process_ms": proc_ms,
-                            "record_ms": elapsed_ms,
-                        })
-                    # Arm a slower finalize in case this truly was the end of speech
-                    self._schedule_finalize(delay=max(self._finalize_delay_sec, 0.5),
+                # Adaptive finalize scheduling
+                if self._cur_utt:
+                    if SENTENCE_END_RE.search(self._cur_utt):
+                        # If a clear sentence end exists, shorten delay
+                        delay = max(0.2, self._finalize_base_delay_sec * 0.6)
+                    else:
+                        # No obvious sentence end, wait a bit longer
+                        delay = self._finalize_nosent_delay_sec
+
+                    self._schedule_finalize(delay=delay,
                                             process_ms=proc_ms,
                                             record_ms=elapsed_ms,
                                             fallback_used=fallback_used)
@@ -4131,6 +4566,7 @@ class RealtimeTranscriber:
             backend = self.manager.backend
         txt = ""
         try:
+            # Keep same low-latency decode path for both partial and finalize
             txt = backend.transcribe(audio, sample_rate=self.sample_rate) if backend else ""
         except Exception as e:
             print(f"[RT] decode error: {e}")
@@ -4170,8 +4606,10 @@ class RealtimeTranscriber:
             "record_ms": record_ms,
             "fallback_used": bool(fallback_used),
         })
-        # Reset current utterance buffer
+        # Reset current utterance buffer and partial-debounce trackers
         self._cur_utt = ""
+        self._last_emitted_partial_norm = ""
+        self._last_partial_emit_ms = _now_ms()
 
     def _emit(self, evt: RealtimeEvent) -> None:
         for cb in list(self._subs):
@@ -4251,9 +4689,13 @@ async def transcribe_file_for_fallback(path: Union[str, Path]) -> str:
     # If faster-whisper backend is active, try path directly via its .transcribe by loading file
     if isinstance(backend, FasterWhisperBackend):
         try:
-            # Build kwargs conditionally, same as in FasterWhisperBackend.transcribe
+            # Determine effective language at runtime also for file fallback
+            hint_lang = (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip().lower() or None
+            conf_lang = manager.config.language or None
+            eff_lang = conf_lang or hint_lang or None
+
             kwargs: Dict[str, Any] = dict(
-                language=manager.config.language or None,
+                language=eff_lang,  # None enables auto-detect
                 beam_size=manager.config.faster_whisper_beam_size,
                 temperature=manager.config.temperature,
                 vad_filter=manager.config.faster_whisper_vad_filter,
@@ -4267,6 +4709,7 @@ async def transcribe_file_for_fallback(path: Union[str, Path]) -> str:
                 kwargs["log_prob_threshold"] = manager.config.logprob_threshold
 
             segments, _info = backend.model.transcribe(str(path), **kwargs)  # type: ignore
+
             parts: List[str] = []
             for seg in segments:
                 t = getattr(seg, "text", "")
@@ -4303,8 +4746,6 @@ def _load_audio_as_f32_mono(path: Union[str, Path], target_sr: int = 16000) -> T
         data = np.interp(x_idx, np.arange(data.size), data).astype(np.float32)
         sr = target_sr
     return data, sr
-
-
 
 
 
@@ -8555,8 +8996,6 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
 
 #web/index.html
 
-
-
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -8692,7 +9131,7 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       display:flex; align-items:center; gap:8px;
     }
 
-    /* NEW: inline toggle look */
+    /* inline toggle look (used by existing Direct live and the new Low-End toggle) */
     .toggle {
       display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
       padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: #10141b;
@@ -8700,7 +9139,7 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
     .toggle input { transform: scale(1.05); }
     .muted { color: var(--muted); }
 
-    /* NEW: Gallery styles */
+    /* Gallery styles */
     .gallery-controls { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
     #thumbs {
       display: grid;
@@ -8760,13 +9199,38 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
             <div class="caption" id="img-caption">Kein Bild</div>
           </div>
           <div class="row" style="margin-top:10px;">
+            <!-- NEW: Low-End toggle (only addition) -->
+            <label class="toggle" id="lowend-toggle-wrap" title="Low-End-Modus: Latenz-optimierte Transkription für schwächere CPUs">
+              <input type="checkbox" id="toggle-lowend" />
+              <span>Low-End</span>
+            </label>
+            <!-- END NEW -->
+
             <button id="btn-start" class="btn-ok">Aufnahme starten</button>
             <button id="btn-stop" class="btn-danger">Stop</button>
+
+            <!-- NEW: optional, minimal status pill -->
+            <span class="pill" id="lowend-pill" style="display:none;">Low-End: off</span>
+            <!-- END NEW -->
+
             <span class="pill" id="ollama-pill">Ollama: ?</span>
             <span class="pill" id="poll-pill">Images: ?</span>
             <span class="pill" id="sr-pill">SR: ?</span>
             <span class="pill" id="size-pill">Size: ?</span>
           </div>
+
+          <!-- Galerie -->
+          <section class="card" style="margin-top:12px;">
+            <h3 id="title-gallery">Galerie</h3>
+            <div class="body">
+              <div class="gallery-controls">
+                <button id="btn-refresh-gallery" title="Neu laden">Neu laden</button>
+                <span class="subtle" id="gallery-hint"></span>
+              </div>
+              <div id="thumbs" aria-live="polite"></div>
+            </div>
+          </section>
+          <!-- ENDE Galerie -->
         </div>
       </section>
 
@@ -8887,7 +9351,7 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
           </div>
 
           <div class="row" style="margin-bottom:8px;">
-            <!-- "Send to Ollama" (left) ... and NEW Direct live toggle (right next to it) -->
+            <!-- "Send to Ollama" (left) ... and Direct live toggle (right next to it) -->
             <button id="btn-plan">Senden</button>
             <label class="toggle right" title="Bypass text LLM; use raw Whisper transcripts">
               <input type="checkbox" id="toggle-direct-live" />
@@ -8914,17 +9378,7 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       </aside>
     </div>
 
-    <!-- NEW: Thumbnail Gallery card -->
-    <section class="card">
-      <h3 id="title-gallery">Galerie</h3>
-      <div class="body">
-        <div class="gallery-controls">
-          <button id="btn-refresh-gallery" title="Neu laden">Neu laden</button>
-          <span class="subtle" id="gallery-hint"></span>
-        </div>
-        <div id="thumbs" aria-live="polite"></div>
-      </div>
-    </section>
+    <!-- Galerie war hier vorher als eigenständige Card; wurde in die linke Card verschoben -->
   </main>
 
   <script>
@@ -9022,7 +9476,6 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
         direct_live_label: "Direkt live",
         direct_live_title: "LLM-Optimierung umgehen; rohe Whisper-Transkripte verwenden",
         direct_live_on_hint: "Direktmodus aktiv: Rohtranskripte (ohne LLM)",
-        // NEW i18n for gallery
         title_gallery: "Galerie",
         btn_gallery_refresh: "Neu laden",
         gallery_hint: "Klicke auf ein Miniaturbild, um es anzuzeigen.",
@@ -9119,7 +9572,6 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
         direct_live_label: "Direct live",
         direct_live_title: "Bypass text LLM; use raw Whisper transcripts",
         direct_live_on_hint: "Direct mode active: raw transcripts (no LLM)",
-        // NEW i18n for gallery
         title_gallery: "Gallery",
         btn_gallery_refresh: "Refresh",
         gallery_hint: "Click a thumbnail to view it.",
@@ -9209,7 +9661,7 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
         toggleDirect.parentElement.title = t('direct_live_title');
       }
 
-      // NEW: Gallery i18n
+      // Gallery i18n
       const titleGallery = document.getElementById('title-gallery');
       if (titleGallery) titleGallery.textContent = t('title_gallery');
       const btnGallery = document.getElementById('btn-refresh-gallery');
@@ -9221,15 +9673,29 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
     }
 
-    const langSelectEl = document.getElementById('lang-select');
-    langSelectEl.addEventListener('change', () => {
-      LANG = langSelectEl.value;
-      localStorage.setItem('ui_lang', LANG);
-      document.documentElement.lang = LANG;
-      applyI18N();
-      syncVisionHint();
-      syncDirectLiveHint();
-    });
+
+      const langSelectEl = document.getElementById('lang-select');
+      langSelectEl.addEventListener('change', () => {
+        LANG = langSelectEl.value;
+        localStorage.setItem('ui_lang', LANG);
+        document.documentElement.lang = LANG;
+        applyI18N();
+        syncVisionHint();
+        syncDirectLiveHint();
+
+        // Post the transcription hint based on current UI language
+        fetch('/api/settings/transcription_hint', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hint: LANG }) // 'de' | 'en'
+        })
+        .then(r => r.json())
+        .then(j => {
+          console.log('[settings] transcription_hint set', j);
+          try { log(statusLog, `[settings] input_locale_hint -> ${j.input_locale_hint || 'none'}`); } catch {}
+        })
+        .catch(err => console.warn('failed to set transcription_hint', err));
+      });
 
     // ---------- Utility ----------
     const $ = (s) => document.querySelector(s);
@@ -9279,7 +9745,11 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
     const toggleDirectLive = document.getElementById('toggle-direct-live');
     const labelDirectLive = document.getElementById('label-direct-live');
 
-    // NEW: Gallery elements
+    // NEW: Low-End elements
+    const toggleLowEnd = document.getElementById('toggle-lowend');
+    const lowendPill = document.getElementById('lowend-pill');
+
+    // Gallery elements
     const thumbsEl = document.getElementById('thumbs');
     const btnRefreshGallery = document.getElementById('btn-refresh-gallery');
 
@@ -9290,6 +9760,14 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       el.textContent = `[${ts}] ${msg}\n` + el.textContent;
       if (el.textContent.length > 20000) el.textContent = el.textContent.slice(0, 20000);
     }
+    function appendStatusLog(message) {
+      try {
+        log(statusLog, message);
+      } catch (e) {
+        console.log('[UI]', message);
+      }
+    }
+
     function clampSize(v) {
       const n = Math.round(Number(v) || 0);
       return Math.max(64, Math.min(2048, n));
@@ -9422,17 +9900,14 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
         const rel = (ev?.data || '').trim();
         if (rel) {
           setImage(rel, caption.textContent || rel);
-          // NEW: Insert/refresh thumbnail on new image
+          // Insert/refresh thumbnail on new image
           prependThumb({name: rel.replace(/^\/?static\//, ''), url: rel, modified: Date.now()/1000});
         }
       });
       // Reload gallery automatically when backend signals updates
       sse.addEventListener('gallery:updated', (ev) => {
-        // Optional: advance a global bust token from payload.ts
         try {
           const payload = JSON.parse(ev?.data || '{}');
-          // payload.ts is seconds; convert to ms if you store it
-          // Not strictly needed because we bust per request below
         } catch {}
         loadGallery(50);
       });
@@ -10168,6 +10643,103 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
       }
     }
 
+    // ---------- NEW: Low-End toggle wiring (additive only) ----------
+    function syncLowEndUI(enabled) {
+      if (!lowendPill) return;
+      lowendPill.style.display = '';
+      if (enabled) {
+        lowendPill.textContent = 'Low-End: on';
+      } else {
+        lowendPill.textContent = 'Low-End: off';
+      }
+    }
+    // Debounced toggle for Low-End mode with verification GET and config refresh
+    async function setLowEndMode(enabled) {
+      const checkbox = document.getElementById('toggle-lowend');
+      const pill = document.getElementById('lowend-pill');
+      const prevChecked = checkbox ? checkbox.checked : false;
+
+      // Prevent double clicks while request in flight
+      if (checkbox) checkbox.disabled = true;
+
+      try {
+        // POST desired state
+        const res = await fetch('/api/settings/lowend_mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !!enabled }),
+        });
+
+        if (!res.ok) {
+          const msg = await res.text().catch(() => 'toggle failed');
+          throw new Error(`POST /api/settings/lowend_mode failed: ${msg}`);
+        }
+
+        // Verify with immediate GET
+        const verify = await fetch('/api/settings/lowend_mode', { method: 'GET' });
+        if (!verify.ok) {
+          const msg = await verify.text().catch(() => 'verification failed');
+          throw new Error(`GET /api/settings/lowend_mode failed: ${msg}`);
+        }
+        const data = await verify.json();
+
+        // Update UI from server truth
+        if (checkbox) checkbox.checked = !!data.enabled;
+        if (pill) {
+          pill.classList.toggle('on', !!data.enabled);
+          pill.classList.toggle('off', !data.enabled);
+          pill.textContent = data.enabled ? 'Low-End ON' : 'Low-End OFF';
+        }
+
+        // Log and refresh global config so all status pills reflect new backend
+        appendStatusLog(`[LOWEND] Server confirmed enabled=${!!data.enabled}`);
+        await refreshConfig(); // assumes existing function that GETs /config and updates UI
+      } catch (err) {
+        // Rollback UI to previous state on error
+        if (checkbox) checkbox.checked = prevChecked;
+        if (pill) {
+          pill.classList.toggle('on', !!prevChecked);
+          pill.classList.toggle('off', !prevChecked);
+          pill.textContent = prevChecked ? 'Low-End ON' : 'Low-End OFF';
+        }
+        appendStatusLog(`[LOWEND][ERROR] ${err && err.message ? err.message : err}`);
+      } finally {
+        if (checkbox) checkbox.disabled = false;
+      }
+    }
+
+    // Ensure initial UI matches server and refresh full config afterward
+    async function fetchCurrentLowEnd() {
+      const checkbox = document.getElementById('toggle-lowend');
+      const pill = document.getElementById('lowend-pill');
+      try {
+        const res = await fetch('/api/settings/lowend_mode', { method: 'GET' });
+        if (!res.ok) {
+          const msg = await res.text().catch(() => 'error');
+          throw new Error(`GET /api/settings/lowend_mode failed: ${msg}`);
+        }
+        const data = await res.json();
+        if (checkbox) checkbox.checked = !!data.enabled;
+        if (pill) {
+          pill.classList.toggle('on', !!data.enabled);
+          pill.classList.toggle('off', !data.enabled);
+          pill.textContent = data.enabled ? 'Low-End ON' : 'Low-End OFF';
+        }
+        appendStatusLog(`[LOWEND] Initial enabled=${!!data.enabled}`);
+        // Load full config so UI pills are in sync at startup
+        await refreshConfig();
+      } catch (err) {
+        appendStatusLog(`[LOWEND][ERROR] ${err && err.message ? err.message : err}`);
+      }
+    }
+
+    if (toggleLowEnd) {
+      toggleLowEnd.addEventListener('change', () => {
+        setLowEndMode(toggleLowEnd.checked);
+      });
+    }
+    // ---------- END NEW ----------
+
     // ---------- Gallery: fetch + render ----------
     async function loadGallery(limit = 50) {
       if (!thumbsEl) return;
@@ -10350,6 +10922,9 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
 
       // Initial gallery load
       await loadGallery(50);
+
+      // NEW: initial low-end fetch (non-intrusive)
+      await fetchCurrentLowEnd();
     })();
   </script>
 
@@ -10430,9 +11005,7 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
 
 
 
-
 # .env :
-
 # =========================
 # Base settings (local & cloud)
 # =========================
@@ -10451,37 +11024,37 @@ APP_SSE_TICK_SEC=30.0
 # =========================
 APP_DISABLE_VAD=0
 APP_USE_WEBRTC_VAD=1
-APP_VAD_AGGRESSIVENESS=1
-APP_RMS_VAD_THRESHOLD=0.014
+APP_VAD_AGGRESSIVENESS=2
+APP_RMS_VAD_THRESHOLD=0.013
 
 # =========================
 # Snapshot / Segmentation (satzorientiert)
 # =========================
-APP_SNAPSHOT_SEC=1.6
-APP_MIN_BUF_SEC=1.8
-APP_MAX_SILENCE_MS=1400
-APP_MAX_SEGMENT_SEC=16.0
-APP_FIRST_SNAPSHOT_DEADLINE_SEC=2.6
+APP_SNAPSHOT_SEC=2.4
+APP_MIN_BUF_SEC=2.6
+APP_MAX_SILENCE_MS=2000
+APP_MAX_SEGMENT_SEC=20.0
+APP_FIRST_SNAPSHOT_DEADLINE_SEC=3.4
 
 # =========================
 # Frontend Textfilter (vermeide Mini-Fetzen)
 # =========================
-APP_TEXT_MIN_CHARS=12
-APP_TEXT_MIN_WORDS=3
+APP_TEXT_MIN_CHARS=18
+APP_TEXT_MIN_WORDS=4
 APP_FORCE_MEANINGFUL_CHECK=1
 
 # ==========================================
 # Whisper (gemeinsam)
 # ==========================================
 APP_WHISPER_BACKEND=faster_whisper
-APP_WHISPER_LANGUAGE=de
+APP_WHISPER_LANGUAGE=
 APP_WHISPER_THREADS=4
 APP_WHISPER_TEMPERATURE=0.0
-APP_WHISPER_MIN_SEC=1.4
+APP_WHISPER_MIN_SEC=1.9
 APP_WHISPER_MIN_PEAK=0.0015
 APP_WHISPER_NO_SPEECH_THRESHOLD=0.8
 APP_WHISPER_LOGPROB_THRESHOLD=-0.8
-APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT=0
+APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT=1
 APP_WHISPER_COMPRESSION_RATIO_THRESHOLD=2.4
 
 # ==========================================
@@ -10613,6 +11186,7 @@ APP_BIND_PORT=8080
 # =========================
 APP_COMFY_OUTPUT_DIR=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/output/
 APP_OUTPUT_DIR=./outputs/images
+
 
 
 

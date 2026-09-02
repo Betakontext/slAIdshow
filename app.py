@@ -536,6 +536,11 @@ class WorkflowSelect(BaseModel):
         if not re.fullmatch(r"[A-Za-z0-9._\\-]+", v):
             raise ValueError("Illegal characters in filename")
         return v
+# ---------- Low-end mode settings API model ----------
+
+class LowEndSettings(BaseModel):
+    enabled: bool
+
 
 # ---------- Audio utils ----------
 
@@ -1524,6 +1529,7 @@ async def get_config():
             "temperature": WHISPER_TEMPERATURE,
             "min_sec": WHISPER_MIN_SEC,
             "min_peak": WHISPER_MIN_PEAK,
+            "lowend_mode": (os.getenv("APP_LOWEND_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}),
             "pywhispercpp": {
                 "model_path": masked,
             },
@@ -1576,6 +1582,161 @@ async def get_config():
         },
         "direct_live": {"enabled": STATE.direct_live},  # NEW: expose direct-live flag
     }
+
+
+# ---------- Low-end mode settings endpoints ----------
+
+def _env_lowend_requested() -> bool:
+    return (os.getenv("APP_LOWEND_MODE", "0").strip().lower() in {"1", "true", "yes", "on"})
+
+@app.get("/api/settings/lowend_mode", response_model=LowEndSettings)
+async def get_lowend_mode():
+    """
+    Return the requested low-end flag (legacy shape). For full diagnostics use /config which
+    also includes runtime.get_transcription_status() under 'transcription.runtime'.
+    """
+    enabled = _env_lowend_requested()
+    return LowEndSettings(enabled=enabled)
+
+
+@app.post("/api/settings/lowend_mode", response_model=LowEndSettings)
+async def set_lowend_mode(cfg: LowEndSettings):
+    """
+    Toggle low-end mode. This function:
+      - Stops realtime transcriber (if running)
+      - Requests the transcription manager to atomically set/unset APP_LOWEND_MODE and reinitialize
+      - Restarts realtime transcriber if pipeline is running
+      - Broadcasts and returns the requested enabled flag (legacy response)
+
+    Implementation notes:
+      - Uses init_transcription_backend() (already imported) to obtain the manager instance.
+      - Calls TranscriptionManager.set_lowend_mode(enable: bool) inside asyncio.to_thread
+        if available; otherwise falls back to legacy env flip + init_transcription_backend().
+    """
+    # Current state
+    cur_enabled = _env_lowend_requested()
+    new_enabled = bool(cfg.enabled)
+
+    if new_enabled == cur_enabled:
+        # No change, but still broadcast so UI syncs if needed
+        await broadcast("status", f"lowend_mode:{'on' if new_enabled else 'off'}")
+        return LowEndSettings(enabled=new_enabled)
+
+    # If recording is running, stop realtime transcriber gracefully to allow re-init parameters to take effect.
+    if RT.transcriber is not None:
+        try:
+            await RT.transcriber.stop()
+        except Exception as e:
+            print(f"[LOWEND] stopping realtime transcriber failed: {e}")
+        finally:
+            RT.transcriber = None
+
+    # --- Delegate flip+reinit to manager when possible; fall back to legacy path otherwise ---
+    tm = None
+    st: dict = {}
+    try:
+        # Obtain manager via init_transcription_backend() which returns the manager (and initializes it if needed)
+        # This avoids NameError if get_transcription_manager is not in scope.
+        tm = init_transcription_backend()
+
+        if tm is None:
+            # If still None, perform legacy env flip + init fallback.
+            if new_enabled:
+                os.environ["APP_LOWEND_MODE"] = "1"
+            else:
+                with contextlib.suppress(Exception):
+                    del os.environ["APP_LOWEND_MODE"]
+            try:
+                tm = init_transcription_backend()
+                st = tm.get_status() if tm is not None else {}
+                print("[LOWEND] fallback init_transcription_backend path used")
+            except Exception as e:
+                tb = traceback.format_exc()
+                print(f"[LOWEND] fallback reinit failed: {e}\n{tb}")
+                st = {}
+        else:
+            # Prefer manager-provided atomic setter if available
+            if hasattr(tm, "set_lowend_mode") and callable(getattr(tm, "set_lowend_mode")):
+                try:
+                    st_res = await asyncio.to_thread(tm.set_lowend_mode, bool(new_enabled))
+                    if isinstance(st_res, dict):
+                        st = st_res
+                    else:
+                        # Coerce to dict for downstream logging
+                        st = {"lowend_mode": bool(new_enabled)}
+                    print(f"[LOWEND] tm.set_lowend_mode completed; manager reported lowend_mode={st.get('lowend_mode')}")
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    print(f"[LOWEND] tm.set_lowend_mode failed: {e}\n{tb}")
+                    # Best-effort fallback: ensure env matches request, then try reinit
+                    if new_enabled:
+                        os.environ["APP_LOWEND_MODE"] = "1"
+                    else:
+                        with contextlib.suppress(Exception):
+                            del os.environ["APP_LOWEND_MODE"]
+                    try:
+                        tm = init_transcription_backend()
+                        st = tm.get_status() if tm is not None else {}
+                        print("[LOWEND] fallback init_transcription_backend executed after set_lowend_mode failure")
+                    except Exception as e2:
+                        tb2 = traceback.format_exc()
+                        print(f"[LOWEND] fallback reinit also failed: {e2}\n{tb2}")
+                        st = {}
+            else:
+                # Manager lacks setter: follow legacy behavior but using the initialized manager
+                if new_enabled:
+                    os.environ["APP_LOWEND_MODE"] = "1"
+                else:
+                    with contextlib.suppress(Exception):
+                        del os.environ["APP_LOWEND_MODE"]
+                try:
+                    # Reinitialize manager to apply env changes
+                    tm.initialize()
+                    st = tm.get_status() or {}
+                    print("[LOWEND] tm.initialize() used as fallback (no set_lowend_mode available)")
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    print(f"[LOWEND] tm.initialize() fallback failed: {e}\n{tb}")
+                    st = {}
+    except Exception as outer_e:
+        tb = traceback.format_exc()
+        print(f"[LOWEND] unexpected error in set_lowend_mode flow: {outer_e}\n{tb}")
+        # Ensure env matches request for UI consistency even on unexpected errors
+        if new_enabled:
+            os.environ["APP_LOWEND_MODE"] = "1"
+        else:
+            with contextlib.suppress(Exception):
+                del os.environ["APP_LOWEND_MODE"]
+        st = {}
+
+    # At this point 'st' is the best-effort authoritative manager status dict (may be empty).
+    # For logging clarity, compute reported_after for manager_lowend display.
+    reported_after = None
+    if isinstance(st, dict):
+        reported_after = st.get("lowend_mode")
+    if reported_after is None:
+        # If manager didn't provide a status, fall back to the requested value (for logs only)
+        reported_after = bool(new_enabled)
+    env_after = os.getenv("APP_LOWEND_MODE", "")
+    print(f"[LOWEND] final state: APP_LOWEND_MODE='{env_after}' manager_lowend={reported_after}")
+
+    # If pipeline is running, auto-start a new realtime transcriber so the session continues.
+    if STATE.running and RT.transcriber is None:
+        try:
+            rt = RealtimeTranscriber(sample_rate=SAMPLE_RATE)
+            rt.subscribe(_on_realtime_event)
+            await rt.start()
+            RT.transcriber = rt
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[LOWEND] failed to restart realtime transcriber: {e}\n{tb}")
+
+    await broadcast("status", f"lowend_mode:{'on' if new_enabled else 'off'}")
+    return LowEndSettings(enabled=new_enabled)
+
+
+
+
 
 # ---------- Workflows API ----------
 
