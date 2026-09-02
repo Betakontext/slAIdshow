@@ -12,19 +12,20 @@ Drei Bild-Backends, in allen drei Modi
 # Tree:
 
 ### Repository Layout
-── app.py
+
+├── app.py
 ├── comfyui_bridge.py
 ├── comfyui.service
-├── .env   # create from .env.example and add f.e. Pollinations secret
-├── .env.exampe
 ├── image_backend.py
 ├── models
+│   ├── faster-whisper-cache
 │   └── ggml-base.bin
 ├── outputs
-│   └── images
-│ 		├── bridge
-│   	│	└── tunnel_url.json
-│     	└── refs
+│   ├── images
+│   │   ├── bridge
+│   │   │   └── tunnel_url.json
+│   │   └── refs
+│   └── voice_fallback
 ├── __pycache__
 ├── README.md
 ├── requirements.txt
@@ -33,11 +34,16 @@ Drei Bild-Backends, in allen drei Modi
 ├── static
 │   └── style
 ├── style_engine.py
-├── transcribtion_backend.py
+├── transcription_backend.py
 ├── utils
-│   ├── audio_test.py
+│   ├── ComfyUI_QuickTunnel
+│   │   ├── cf_quicktunnel_writer.py
+│   │   └── README.txt
 │   ├── dev_check.py
 │   ├── mic_check_whisper.py
+│   ├── os_open.py
+│   ├── __pycache__
+│   │   └── os_open.cpython-314.pyc
 │   ├── style_features.py
 │   ├── test_comfy_local.py
 │   ├── test_pollinations_style_ref_auto_style.py
@@ -45,7 +51,7 @@ Drei Bild-Backends, in allen drei Modi
 ├── web
 │   └── index.html
 └── workflows
-	└── text2img_SD15-FP16_Infografic.json
+    └── text2img_SD15-FP16.json
 
 
 
@@ -69,7 +75,6 @@ Drei Bild-Backends, in allen drei Modi
 
 
 Hier die Dateien auf dem derzeitigen Stand:
-
 
 
 
@@ -1664,15 +1669,35 @@ async def get_config():
 
 # ---------- Low-end mode settings endpoints ----------
 
+def _env_lowend_requested() -> bool:
+    return (os.getenv("APP_LOWEND_MODE", "0").strip().lower() in {"1", "true", "yes", "on"})
+
 @app.get("/api/settings/lowend_mode", response_model=LowEndSettings)
 async def get_lowend_mode():
-    enabled = (os.getenv("APP_LOWEND_MODE", "0").strip().lower() in {"1", "true", "yes", "on"})
+    """
+    Return the requested low-end flag (legacy shape). For full diagnostics use /config which
+    also includes runtime.get_transcription_status() under 'transcription.runtime'.
+    """
+    enabled = _env_lowend_requested()
     return LowEndSettings(enabled=enabled)
+
 
 @app.post("/api/settings/lowend_mode", response_model=LowEndSettings)
 async def set_lowend_mode(cfg: LowEndSettings):
+    """
+    Toggle low-end mode. This function:
+      - Stops realtime transcriber (if running)
+      - Requests the transcription manager to atomically set/unset APP_LOWEND_MODE and reinitialize
+      - Restarts realtime transcriber if pipeline is running
+      - Broadcasts and returns the requested enabled flag (legacy response)
+
+    Implementation notes:
+      - Uses init_transcription_backend() (already imported) to obtain the manager instance.
+      - Calls TranscriptionManager.set_lowend_mode(enable: bool) inside asyncio.to_thread
+        if available; otherwise falls back to legacy env flip + init_transcription_backend().
+    """
     # Current state
-    cur_enabled = (os.getenv("APP_LOWEND_MODE", "0").strip().lower() in {"1", "true", "yes", "on"})
+    cur_enabled = _env_lowend_requested()
     new_enabled = bool(cfg.enabled)
 
     if new_enabled == cur_enabled:
@@ -1680,8 +1705,7 @@ async def set_lowend_mode(cfg: LowEndSettings):
         await broadcast("status", f"lowend_mode:{'on' if new_enabled else 'off'}")
         return LowEndSettings(enabled=new_enabled)
 
-    # If recording is running, stop realtime transcriber gracefully
-    # to allow re-init parameters to take effect cleanly.
+    # If recording is running, stop realtime transcriber gracefully to allow re-init parameters to take effect.
     if RT.transcriber is not None:
         try:
             await RT.transcriber.stop()
@@ -1690,39 +1714,94 @@ async def set_lowend_mode(cfg: LowEndSettings):
         finally:
             RT.transcriber = None
 
-    # Flip environment flag
-    if new_enabled:
-        os.environ["APP_LOWEND_MODE"] = "1"
-    else:
-        with contextlib.suppress(Exception):
-            del os.environ["APP_LOWEND_MODE"]
-
-    # Reinitialize the transcription backend to apply overrides.
+    # --- Delegate flip+reinit to manager when possible; fall back to legacy path otherwise ---
+    tm = None
+    st: dict = {}
     try:
-        # DEBUG: log raw env just before re-init to verify the source of truth.
-        env_before = os.getenv("APP_LOWEND_MODE", "")
-        print(f"[LOWEND] env_before_reinit: APP_LOWEND_MODE='{env_before}' (new_enabled={new_enabled})")
-
-        # init_transcription_backend() calls get_transcription_manager().initialize()
-        # which reloads configuration from environment and sets status.lowend_mode accordingly.
+        # Obtain manager via init_transcription_backend() which returns the manager (and initializes it if needed)
+        # This avoids NameError if get_transcription_manager is not in scope.
         tm = init_transcription_backend()
-        st = tm.get_status()
 
-        print(
-            f"[LOWEND] reinitialized: "
-            f"backend={st.get('selected_backend')} "
-            f"device={st.get('selected_device')} "
-            f"lowend={st.get('lowend_mode')}"
-        )
-
-        # DEBUG: log env again after re-init to detect any overwrite by other code paths.
-        env_after = os.getenv("APP_LOWEND_MODE", "")
-        print(f"[LOWEND] env_after_reinit: APP_LOWEND_MODE='{env_after}' manager_lowend={st.get('lowend_mode')}")
-    except Exception as e:
+        if tm is None:
+            # If still None, perform legacy env flip + init fallback.
+            if new_enabled:
+                os.environ["APP_LOWEND_MODE"] = "1"
+            else:
+                with contextlib.suppress(Exception):
+                    del os.environ["APP_LOWEND_MODE"]
+            try:
+                tm = init_transcription_backend()
+                st = tm.get_status() if tm is not None else {}
+                print("[LOWEND] fallback init_transcription_backend path used")
+            except Exception as e:
+                tb = traceback.format_exc()
+                print(f"[LOWEND] fallback reinit failed: {e}\n{tb}")
+                st = {}
+        else:
+            # Prefer manager-provided atomic setter if available
+            if hasattr(tm, "set_lowend_mode") and callable(getattr(tm, "set_lowend_mode")):
+                try:
+                    st_res = await asyncio.to_thread(tm.set_lowend_mode, bool(new_enabled))
+                    if isinstance(st_res, dict):
+                        st = st_res
+                    else:
+                        # Coerce to dict for downstream logging
+                        st = {"lowend_mode": bool(new_enabled)}
+                    print(f"[LOWEND] tm.set_lowend_mode completed; manager reported lowend_mode={st.get('lowend_mode')}")
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    print(f"[LOWEND] tm.set_lowend_mode failed: {e}\n{tb}")
+                    # Best-effort fallback: ensure env matches request, then try reinit
+                    if new_enabled:
+                        os.environ["APP_LOWEND_MODE"] = "1"
+                    else:
+                        with contextlib.suppress(Exception):
+                            del os.environ["APP_LOWEND_MODE"]
+                    try:
+                        tm = init_transcription_backend()
+                        st = tm.get_status() if tm is not None else {}
+                        print("[LOWEND] fallback init_transcription_backend executed after set_lowend_mode failure")
+                    except Exception as e2:
+                        tb2 = traceback.format_exc()
+                        print(f"[LOWEND] fallback reinit also failed: {e2}\n{tb2}")
+                        st = {}
+            else:
+                # Manager lacks setter: follow legacy behavior but using the initialized manager
+                if new_enabled:
+                    os.environ["APP_LOWEND_MODE"] = "1"
+                else:
+                    with contextlib.suppress(Exception):
+                        del os.environ["APP_LOWEND_MODE"]
+                try:
+                    # Reinitialize manager to apply env changes
+                    tm.initialize()
+                    st = tm.get_status() or {}
+                    print("[LOWEND] tm.initialize() used as fallback (no set_lowend_mode available)")
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    print(f"[LOWEND] tm.initialize() fallback failed: {e}\n{tb}")
+                    st = {}
+    except Exception as outer_e:
         tb = traceback.format_exc()
-        print(f"[LOWEND] reinit failed: {e}\n{tb}")
-        # Even if reinit fails, we return the new flag so UI reflects the chosen state.
-        # The backend status will still show initialization_error if present.
+        print(f"[LOWEND] unexpected error in set_lowend_mode flow: {outer_e}\n{tb}")
+        # Ensure env matches request for UI consistency even on unexpected errors
+        if new_enabled:
+            os.environ["APP_LOWEND_MODE"] = "1"
+        else:
+            with contextlib.suppress(Exception):
+                del os.environ["APP_LOWEND_MODE"]
+        st = {}
+
+    # At this point 'st' is the best-effort authoritative manager status dict (may be empty).
+    # For logging clarity, compute reported_after for manager_lowend display.
+    reported_after = None
+    if isinstance(st, dict):
+        reported_after = st.get("lowend_mode")
+    if reported_after is None:
+        # If manager didn't provide a status, fall back to the requested value (for logs only)
+        reported_after = bool(new_enabled)
+    env_after = os.getenv("APP_LOWEND_MODE", "")
+    print(f"[LOWEND] final state: APP_LOWEND_MODE='{env_after}' manager_lowend={reported_after}")
 
     # If pipeline is running, auto-start a new realtime transcriber so the session continues.
     if STATE.running and RT.transcriber is None:
@@ -3039,22 +3118,9 @@ if __name__ == "__main__":
 
 
 
+
 # transcription_backend.py
 #
-# Drop-in replacement with:
-# - Preserves existing public API, env keys, status structure, capability logic
-# - Primary backend: faster-whisper (CTranslate2), fallback: pywhispercpp.model.Model
-# - Keeps your established audio preparation and cleaning utilities
-# - Adds a low-latency RealtimeTranscriber:
-#     * RMS-based VAD + debounce to detect end-of-utterance
-#     * Determistic decode ticker for partials (low jitter)
-#     * Tail-window decodes for stability (avoid reinterpreting old text)
-#     * Partial dedupe + growth + meaningful-light + punct-only skip
-#     * Adaptive finalize delay (sentence-end vs no-sentence-end)
-#     * Optional file recording and file-transcription fallback if realtime-final is empty
-# - Low-end profile switch via APP_LOWEND_MODE=1 to improve latency on weak CPUs
-# - Low-end switch is LIMITED to Whisper/Faster-Whisper keys (no changes to VAD/segmentation/LLM/etc.)
-# - All operational messages remain in English
 
 from __future__ import annotations
 
@@ -3742,6 +3808,49 @@ class TranscriptionManager:
             language=self.config.language,
             lowend_mode=_env_bool("APP_LOWEND_MODE", False),
         )
+
+    def set_lowend_mode(self, enable: bool) -> Dict[str, Any]:
+        """
+        Atomically set/clear APP_LOWEND_MODE, reinitialize manager under a lock,
+        and return the authoritative status dict.
+
+        This method is synchronous and may perform blocking work (model loads).
+        Callers running in async handlers should execute it inside a worker thread:
+            st = await asyncio.to_thread(get_transcription_manager().set_lowend_mode, True)
+
+        Returns:
+            status dict (same shape as get_status()) after attempted reinit.
+        """
+        # Use a reentrant threading lock to serialize initialize / setter.
+        import threading
+        if not hasattr(self, "_init_lock"):
+            # Lazily create to avoid adding threading import at module top-level changes.
+            self._init_lock = threading.RLock()
+
+        with self._init_lock:
+            # Update environment deterministically
+            if enable:
+                os.environ["APP_LOWEND_MODE"] = "1"
+            else:
+                with contextlib.suppress(Exception):
+                    if "APP_LOWEND_MODE" in os.environ:
+                        del os.environ["APP_LOWEND_MODE"]
+
+            print(f"[LOWEND][TM] set_lowend_mode called -> {'ENABLED' if enable else 'DISABLED'}")
+
+            try:
+                # Reinitialize synchronously while holding the lock to provide
+                # a consistent state to callers.
+                self.initialize()
+            except Exception as exc:
+                tb = traceback.format_exc()
+                print(f"[LOWEND][TM] set_lowend_mode: initialize() failed: {exc}\n{tb}")
+                # On failure return the best-effort current status for diagnostics.
+                return self.get_status()
+
+            # Ensure returned status reflects env flag
+            self.status.lowend_mode = _env_bool("APP_LOWEND_MODE", False)
+            return self.get_status()
 
     def initialize(self) -> None:
         """Initialize the best permitted backend according to configuration."""
@@ -4746,8 +4855,6 @@ def _load_audio_as_f32_mono(path: Union[str, Path], target_sr: int = 16000) -> T
         data = np.interp(x_idx, np.arange(data.size), data).astype(np.float32)
         sr = target_sr
     return data, sr
-
-
 
 
 
@@ -8995,7 +9102,6 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
 
 
 #web/index.html
-
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -11006,6 +11112,7 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
 
 
 # .env :
+
 # =========================
 # Base settings (local & cloud)
 # =========================
@@ -11020,7 +11127,7 @@ APP_STREAM_LATENCY_SEC=0.08
 APP_SSE_TICK_SEC=30.0
 
 # =========================
-# VAD (robuster, weniger Früh-Abbrüche)
+# VAD (robust, fewer early cut-offs)
 # =========================
 APP_DISABLE_VAD=0
 APP_USE_WEBRTC_VAD=1
@@ -11028,7 +11135,7 @@ APP_VAD_AGGRESSIVENESS=2
 APP_RMS_VAD_THRESHOLD=0.013
 
 # =========================
-# Snapshot / Segmentation (satzorientiert)
+# Snapshot / Segmentation (sentence-oriented)
 # =========================
 APP_SNAPSHOT_SEC=2.4
 APP_MIN_BUF_SEC=2.6
@@ -11037,18 +11144,18 @@ APP_MAX_SEGMENT_SEC=20.0
 APP_FIRST_SNAPSHOT_DEADLINE_SEC=3.4
 
 # =========================
-# Frontend Textfilter (vermeide Mini-Fetzen)
+# Frontend text filter (avoid tiny fragments)
 # =========================
 APP_TEXT_MIN_CHARS=18
 APP_TEXT_MIN_WORDS=4
 APP_FORCE_MEANINGFUL_CHECK=1
 
 # ==========================================
-# Whisper (gemeinsam)
+# Whisper (shared)
 # ==========================================
 APP_WHISPER_BACKEND=faster_whisper
 APP_WHISPER_LANGUAGE=
-APP_WHISPER_THREADS=4
+APP_WHISPER_THREADS=6               # 4
 APP_WHISPER_TEMPERATURE=0.0
 APP_WHISPER_MIN_SEC=1.9
 APP_WHISPER_MIN_PEAK=0.0015
@@ -11058,16 +11165,33 @@ APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT=1
 APP_WHISPER_COMPRESSION_RATIO_THRESHOLD=2.4
 
 # ==========================================
-# Faster-Whisper spezifisch
+# Faster-Whisper specific
 # ==========================================
-APP_FASTER_WHISPER_MODEL=small
+
+# Quality-focused non-low-end for ThinkPad E14 (multilingual)
+APP_FASTER_WHISPER_MODEL=base   # small
 APP_FASTER_WHISPER_DEVICE=cpu
 APP_FASTER_WHISPER_COMPUTE_TYPE=int8
-APP_FASTER_WHISPER_CPU_THREADS=4
+APP_FASTER_WHISPER_CPU_THREADS=6    # 4
 APP_FASTER_WHISPER_NUM_WORKERS=2
 APP_FASTER_WHISPER_BEAM_SIZE=1
 APP_FASTER_WHISPER_VAD_FILTER=1
 APP_FASTER_WHISPER_DOWNLOAD_ROOT=./models/faster-whisper-cache
+
+
+APP_MAX_SILENCE_MS=1800
+APP_FIRST_SNAPSHOT_DEADLINE_SEC=3.0
+
+APP_WHISPER_NO_SPEECH_THRESHOLD=0.8
+APP_WHISPER_LOGPROB_THRESHOLD=-0.8
+APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT=1
+APP_WHISPER_COMPRESSION_RATIO_THRESHOLD=2.4
+
+APP_CONTEXT_MAX_SEGMENTS=6
+APP_CONTEXT_MAX_CHARS=600
+
+
+
 
 # =========================
 # LLM prompt optimization via Ollama (local REST)
@@ -11154,7 +11278,7 @@ PULL_URL=https://dev.betakontext.de/slAIdshow/bridge/tunnel_url.json
 # Pollinations (cloud image backend; always reachable)
 # =========================
 POLLINATIONS_API_BASE=https://gen.pollinations.ai
-POLLINATIONS_SECRET=
+POLLINATIONS_SECRET=sk_iFIDaZ4xsL0v4cUwV2JMDBxnEk5dfm9l
 POLLINATIONS_MODEL=flux
 POLLINATIONS_NOLOGO=1
 POLLINATIONS_SEED=1234
@@ -11186,6 +11310,34 @@ APP_BIND_PORT=8080
 # =========================
 APP_COMFY_OUTPUT_DIR=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/output/
 APP_OUTPUT_DIR=./outputs/images
+
+# =========================
+# LOW-END hard overrides (added)
+# Overwrite APP_* when APP_LOWEND_MODE=1 to reduce latency on ThinkPad X260
+# =========================
+# Whisper shared (LOWEND_)
+LOWEND_WHISPER_BACKEND=faster_whisper
+LOWEND_WHISPER_LANGUAGE=
+LOWEND_WHISPER_THREADS=2
+LOWEND_WHISPER_TEMPERATURE=0.0
+LOWEND_WHISPER_MIN_SEC=1.2
+LOWEND_WHISPER_MIN_PEAK=0.0015
+LOWEND_WHISPER_NO_SPEECH_THRESHOLD=0.8
+LOWEND_WHISPER_LOGPROB_THRESHOLD=-0.8
+LOWEND_WHISPER_CONDITION_ON_PREVIOUS_TEXT=1
+LOWEND_WHISPER_COMPRESSION_RATIO_THRESHOLD=2.4
+
+# Faster-Whisper (LOWEND_)
+# If English-only, consider tiny.en for better quality at similar speed
+LOWEND_FASTER_WHISPER_MODEL=tiny
+# LOWEND_FASTER_WHISPER_MODEL=tiny.en
+LOWEND_FASTER_WHISPER_DEVICE=cpu
+LOWEND_FASTER_WHISPER_COMPUTE_TYPE=int8
+LOWEND_FASTER_WHISPER_CPU_THREADS=2
+LOWEND_FASTER_WHISPER_NUM_WORKERS=1
+LOWEND_FASTER_WHISPER_BEAM_SIZE=1
+LOWEND_FASTER_WHISPER_VAD_FILTER=1
+LOWEND_FASTER_WHISPER_DOWNLOAD_ROOT=./models/faster-whisper-cache
 
 
 
