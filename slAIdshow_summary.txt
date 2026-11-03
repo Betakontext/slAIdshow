@@ -1,13 +1,43 @@
 Zielbeschreibung:
 
-Eine Speech-to-Image Whispe, Faster-Whisper r-Ollama (Text LLM) - ComfyUI (lokal) Pollinations (cloud) Pipeline “slAIdshow”:
+Ziel: Vermarktungsreife (Docker-Quick-Start, Recording, Multi-Speaker, Enterprise).
 
-Drei Bild-Backends, in allen drei Modi
+## Stack update das zu erreichen ist
+- STT: Parakeet TDT 0.6B v3 (faster-whisper)
+- LLM: Ollama (Tier-abhängig: qwen3:1.7b / qwen3:4b / gemma4:26b-a4b / qwen3.8:27b)
+- Bild: ComfyUI (Tier-abhängig: SD1.5+LCM / FLUX.2 klein 4B)
+- Backend: Python 3.12, FastAPI, WebSocket
+- Frontend: HTMX + Tailwind
+- Orchestrierung: Docker Compose
 
-        ComfyUI lokal (127.0.0.1:8188 or 0.0.0.0:8188 falls ComfyUi auf einem anderen PC im gleichen Netzwerk LAN läuft)
-        ComfyUI remote (z. B. via WireGuard oder anderem System um von einem anderen NEtzwerk auf das im Heimnetzwerk laufende ComfyUI zugreifen zu können)
-        Pollinations Cloud (mit robustem Fallback, Multipart/URL-Referenzen, Retries)
+## Architektur
+Mikrofon → STT → LLM (Prompt + Modell-Entscheidung) → ComfyUI → Fullscreen-Output
 
+## VRAM-Auto-Detection (KERN-FEATURE)
+- Bei Install: hardware_detect.py misst VRAM via pynvml
+- config_generator.py wählt Tier: 6gb / 8gb / 16gb / 24gb
+- model_downloader.py lädt NUR benötigte Modelle
+- vram_scheduler.py: < 12 GB → sequenziell (LLM unload → ComfyUI → unload)
+- ≥ 12 GB → parallel (Scheduler = No-Op)
+- Config: /app/config/generated.yaml (persistiert)
+- Override: SLAIDSHOW_TIER=6gb in .env
+
+## VRAM-Tiers
+| Tier | VRAM | STT | LLM | Bild | Latenz |
+|------|------|-----|-----|------|--------|
+| 6gb  | 6–8  | CPU | qwen3:1.7b-q4 (2.5 GB) | SD1.5+LCM 4s (3.5 GB) | ~2.5 s |
+| 8gb  | 8–12 | GPU | qwen3:4b-q4 (3 GB) | SD1.5+LCM 4s 768px (4 GB) | ~1.8 s |
+| 16gb | 12–16| GPU | gemma4:26b-a4b-q4 (14 GB) | FLUX.2 klein 4B FP8 (8 GB) | ~1.2 s |
+| 24gb | 16+  | GPU | qwen3.8:27b-q4 (18 GB) | FLUX.2 klein 4B + Qwen-Image 2.1 | ~0.8 s |
+
+## Konventionen
+- Python 3.12+, type hints, ruff
+- Docker-Compose für alle Services
+- Keine Cloud-Abhängigkeiten im Runtime-Pfad
+- Tests: pytest (Mocks für GPU, Ollama, ComfyUI)
+- Hardware: 6 GB (min) / 8 GB / 16 GB / 24 GB
+- pynvml (nicht nvidia-ml-py) für GPU-Erkennung
+- yaml für Config, json für hardware.json
 
 # Tree:
 
@@ -75,6 +105,637 @@ Drei Bild-Backends, in allen drei Modi
 
 
 Hier die Dateien auf dem derzeitigen Stand:
+
+# Makefile
+
+.PHONY: install up down test
+
+install:
+	@echo "═══ slAIdshow Install ═══"
+	@echo ""
+	@echo "Step 1/4: Detecting hardware..."
+	docker compose run --rm init python -m slaidshow.hardware_detect
+	@echo ""
+	@echo "Step 2/4: Generating config..."
+	docker compose run --rm init python -m slaidshow.config_generator
+	@echo ""
+	@echo "Step 3/4: Downloading models (duration depends on tier)..."
+	docker compose run --rm init python -m slaidshow.model_downloader
+	@echo ""
+	@echo "Step 4/4: Starting services..."
+	docker compose up -d
+	@echo ""
+	@echo "✅ slAIdshow is running at http://localhost:8080"
+	@cat /app/config/generated.yaml
+
+up:
+	docker compose up -d
+
+down:
+	docker compose down
+
+test:
+	docker compose run --rm init pytest tests/ -v
+
+# vram_scheduler.py
+
+
+import time
+import torch
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional
+
+from slaidshow.config_generator import TIERS
+
+
+class GpuState(Enum):
+    IDLE = "idle"
+    LLM_ACTIVE = "llm_active"
+    IMAGE_ACTIVE = "image_active"
+    TRANSITIONING = "transitioning"
+
+
+@dataclass
+class SchedulerConfig:
+    vram_budget_mb: int
+    parallel: bool
+    transition_timeout_s: float = 5.0
+
+
+class VramScheduler:
+    """
+    Steuert die GPU-Zuweisung zwischen LLM und ComfyUI.
+    Bei parallel=True (≥12GB) ist dies ein No-Op.
+    """
+
+    def __init__(self, config: SchedulerConfig):
+        self.config = config
+        self.state = GpuState.IDLE
+        self._llm_loaded = False
+        self._image_loaded = False
+
+    @property
+    def is_parallel(self) -> bool:
+        return self.config.parallel
+
+    async def acquire_llm(self) -> None:
+        """GPU für LLM-Inferenz reservieren."""
+        if self.is_parallel:
+            return
+        self._ensure_image_unloaded()
+        self.state = GpuState.LLM_ACTIVE
+        self._llm_loaded = True
+
+    async def release_llm(self) -> None:
+        """LLM-VRAM freigeben."""
+        if self.is_parallel:
+            return
+        self._llm_loaded = False
+        torch.cuda.empty_cache()
+        self.state = GpuState.IDLE
+
+    async def acquire_image(self) -> None:
+        """GPU für Bildgenerierung reservieren."""
+        if self.is_parallel:
+            return
+        self._ensure_llm_unloaded()
+        self.state = GpuState.IMAGE_ACTIVE
+        self._image_loaded = True
+
+    async def release_image(self) -> None:
+        """ComfyUI-VRAM freigeben."""
+        if self.is_parallel:
+            return
+        self._image_loaded = False
+        torch.cuda.empty_cache()
+        self.state = GpuState.IDLE
+
+    def _ensure_llm_unloaded(self) -> None:
+        if self._llm_loaded:
+            self.release_llm_sync()
+
+    def _ensure_image_unloaded(self) -> None:
+        if self._image_loaded:
+            self.release_image_sync()
+
+    def release_llm_sync(self) -> None:
+        self._llm_loaded = False
+        torch.cuda.empty_cache()
+
+    def release_image_sync(self) -> None:
+        self._image_loaded = False
+        torch.cuda.empty_cache()
+
+    def get_status(self) -> dict:
+        return {
+            "state": self.state.value,
+            "parallel": self.config.parallel,
+            "llm_loaded": self._llm_loaded,
+            "image_loaded": self._image_loaded,
+        }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# model_downloader.py
+import yaml
+import subprocess
+from pathlib import Path
+
+CONFIG_PATH = Path("/app/config/generated.yaml")
+MODELS_DIR = Path("/app/models")
+
+
+def download_models(config: dict) -> None:
+    """Lädt basierend auf Config die benötigten Modelle."""
+
+    # 1. Ollama-Modell
+    llm_model = config["llm"]["model"]
+    print(f"📥 Lade Ollama-Modell: {llm_model}")
+    subprocess.run(
+        ["ollama", "pull", llm_model],
+        check=True, capture_output=True
+    )
+
+    # 2. STT-Modell (faster-whisper / parakeet)
+    stt_model = config["stt"]["model"]
+    stt_dir = MODELS_DIR / "stt" / stt_model
+    if not stt_dir.exists():
+        print(f"📥 Lade STT-Modell: {stt_model}")
+        subprocess.run(
+            ["huggingface-cli", "download", stt_model, "--local-dir", str(stt_dir)],
+            check=True, capture_output=True
+        )
+
+    # 3. ComfyUI-Modelle
+    image_cfg = config["image"]
+    comfy_models = MODELS_DIR / "comfyui"
+
+    # Base model
+    base = image_cfg["base_model"]
+    base_path = comfy_models / "checkpoints" / base
+    if not base_path.exists():
+        print(f"📥 Lade ComfyUI Base: {base}")
+        _download_comfyui_model(base, "checkpoints")
+
+    # LoRA (falls vorhanden)
+    lora = image_cfg.get("lora")
+    if lora:
+        lora_path = comfy_models / "loras" / lora
+        if not lora_path.exists():
+            print(f"📥 Lade ComfyUI LoRA: {lora}")
+            _download_comfyui_model(lora, "loras")
+
+    # 4. Optional: 2. Bildmodell für in_image_text (nur bei 24GB+)
+    if config["features"].get("in_image_text"):
+        text_model = "qwen_image_2_1_fp8.safetensors"
+        text_path = comfy_models / "checkpoints" / text_model
+        if not text_path.exists():
+            print(f"📥 Lade Text-Modell: {text_model}")
+            _download_comfyui_model(text_model, "checkpoints")
+
+    print("✅ Alle Modelle geladen.")
+
+
+def _download_comfyui_model(filename: str, subfolder: str) -> None:
+    """Download via huggingface-cli (URL je nach Modell)."""
+    url_map = {
+        "sd_15.safetensors": "stabilityai/sd-base-v1-5",
+        "lcm-lora-sdv1-5.safetensors": "latent-consistency/lcm-lora-sdv1-5",
+        "flux2_klein_4b_fp8.safetensors": "black-forest-labs/flux2-klein-4b",
+        "qwen_image_2_1_fp8.safetensors": "Qwen/Qwen-Image-2.1",
+    }
+    repo = url_map.get(filename, filename)
+    target = MODELS_DIR / "comfyui" / subfolder
+    target.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["huggingface-cli", "download", repo, filename,
+         "--local-dir", str(target)],
+        check=True, capture_output=True
+    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    # hardware_detect.py
+
+
+import json
+import subprocess
+import platform
+from pathlib import Path
+from dataclasses import dataclass, asdict
+
+OUTPUT_PATH = Path("/app/config/hardware.json")
+
+
+@dataclass
+class HardwareProfile:
+    vram_gb: float
+    gpu_name: str
+    gpu_count: int
+    cpu_ram_gb: float
+    os: str
+    is_apple_silicon: bool
+
+
+def detect_nvidia() -> list[HardwareProfile]:
+    """Via nvidia-ml-py (import: pynvml) – die aktuell gepflegte Library."""
+    import pynvml
+    pynvml.nvmlInit()
+    profiles = []
+    try:
+        count = pynvml.nvmlDeviceGetCount()
+        for i in range(count):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            name = pynvml.nvmlDeviceGetName(handle).decode()
+            profiles.append(HardwareProfile(
+                vram_gb=mem.total / (1024**3),
+                gpu_name=name,
+                gpu_count=count,
+                cpu_ram_gb=0,  # separat ermitteln
+                os=platform.system(),
+                is_apple_silicon=False,
+            ))
+    finally:
+        pynvml.nvmlShutdown()
+    return profiles
+
+
+def detect_cpu_ram() -> float:
+    """System-RAM in GB (via /proc/meminfo oder psutil)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / (1024**2)
+    except FileNotFoundError:
+        pass
+    # Fallback: psutil
+    import psutil
+    return psutil.virtual_memory().total / (1024**3)
+
+
+def detect_apple_silicon() -> bool:
+    """Macs erkennen (keine NVIDIA-GPU, aber unified memory)."""
+    if platform.system() != "Darwin":
+        return False
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True, text=True, timeout=5
+        )
+        return "Apple" in result.stdout
+    except Exception:
+        return False
+
+
+def detect() -> dict:
+    """Hauptfunktion – gibt das finale hardware.json zurück."""
+    is_macs = detect_apple_silicon()
+
+    if is_macs:
+        # Apple Silicon: unified memory = "VRAM"
+        ram = detect_cpu_ram()
+        # Bei Macs ist ~75% des RAMs für GPU verfügbar
+        vram = ram * 0.75
+        profile = {
+            "vram_gb": round(vram, 1),
+            "gpu_name": "Apple Silicon (unified)",
+            "gpu_count": 1,
+            "cpu_ram_gb": round(ram, 1),
+            "os": "Darwin",
+            "is_apple_silicon": True,
+        }
+    else:
+        profiles = detect_nvidia()
+        if not profiles:
+            # Kein GPU – CPU-only Fallback
+            profile = {
+                "vram_gb": 0,
+                "gpu_name": "None (CPU-only)",
+                "gpu_count": 0,
+                "cpu_ram_gb": round(detect_cpu_ram(), 1),
+                "os": platform.system(),
+                "is_apple_silicon": False,
+            }
+        else:
+            # Beste GPU auswählen (meist nur eine)
+            best = max(profiles, key=lambda p: p.vram_gb)
+            profile = asdict(best)
+            profile["cpu_ram_gb"] = round(detect_cpu_ram(), 1)
+
+    # Persistieren
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT_PATH.write_text(json.dumps(profile, indent=2))
+    print(f"✅ Hardware-Profil geschrieben: {OUTPUT_PATH}")
+    print(f"   VRAM: {profile['vram_gb']} GB | GPU: {profile['gpu_name']}")
+    return profile
+
+
+if __name__ == "__main__":
+    detect()
+Tests: tests/test_hardware_detect.py
+"""Tests mit Mocks – keine GPU im CI nötig."""
+from unittest.mock import patch, MagicMock
+import json
+from pathlib import Path
+
+
+def test_detect_no_gpu():
+    with patch("slaidshow.hardware_detect.detect_nvidia", return_value=[]), \
+         patch("slaidshow.hardware_detect.detect_cpu_ram", return_value=16.0), \
+         patch("slaidshow.hardware_detect.detect_apple_silicon", return_value=False):
+        result = detect()
+    assert result["vram_gb"] == 0
+    assert result["gpu_count"] == 0
+
+
+def test_detect_6gb_gpu():
+    mock_profile = HardwareProfile(
+        vram_gb=6.0, gpu_name="NVIDIA GeForce RTX 3050",
+        gpu_count=1, cpu_ram_gb=16.0, os="Linux", is_apple_silicon=False
+    )
+    with patch("slaidshow.hardware_detect.detect_nvidia", return_value=[mock_profile]), \
+         patch("slaidshow.hardware_detect.detect_cpu_ram", return_value=16.0), \
+         patch("slaidshow.hardware_detect.detect_apple_silicon", return_value=False):
+        result = detect()
+    assert result["vram_gb"] == 6.0
+    assert "RTX 3050" in result["gpu_name"]
+
+
+def test_detect_apple_silicon():
+    with patch("slaidshow.hardware_detect.detect_apple_silicon", return_value=True), \
+         patch("slaidshow.hardware_detect.detect_cpu_ram", return_value=32.0):
+        result = detect()
+    assert result["is_apple_silicon"] is True
+    assert result["vram_gb"] == 22.4  # 32 * 0.75
+
+Phase 0: config_generator.py (Tag 2)
+Datei: slaidshow/config_generator.py
+"""
+Generiert die optimale Konfiguration basierend auf VRAM.
+Input:  /app/config/hardware.json
+Output: /app/config/generated.yaml
+"""
+
+import json
+import yaml
+from pathlib import Path
+
+HARDWARE_PATH = Path("/app/config/hardware.json")
+OUTPUT_PATH = Path("/app/config/generated.yaml")
+
+# ─── VRAM-Tiers ────────────────────────────────────────────────────────
+
+TIERS = {
+    "6gb": {
+        "min_vram": 6.0,
+        "max_vram": 7.9,
+        "stt": {
+            "model": "parakeet-tdt-0.6b-v3",
+            "device": "cpu",
+            "backend": "faster-whisper",
+        },
+        "llm": {
+            "model": "qwen3:1.7b-q4_K_M",
+            "device": "cuda",
+            "context": 4096,
+            "vram_budget_mb": 2560,
+        },
+        "image": {
+            "base_model": "sd_15.safetensors",
+            "lora": "lcm-lora-sdv1-5.safetensors",
+            "steps": 4,
+            "cfg": 1.0,
+            "resolution": [512, 512],
+            "device": "cuda",
+            "vram_budget_mb": 3584,
+            "unload_after_generate": True,
+        },
+        "features": {
+            "in_image_text": False,      # HTML-Overlay statt
+            "multi_model": False,        # nur 1 Bildmodell
+            "parallel_inference": False, # sequenziell
+            "styles": ["standard", "sketch"],
+        },
+        "expected_latency_s": 2.5,
+    },
+    "8gb": {
+        "min_vram": 8.0,
+        "max_vram": 11.9,
+        "stt": {
+            "model": "parakeet-tdt-0.6b-v3",
+            "device": "cuda",
+            "backend": "faster-whisper",
+        },
+        "llm": {
+            "model": "qwen3:4b-q4_K_M",
+            "device": "cuda",
+            "context": 8192,
+            "vram_budget_mb": 3072,
+        },
+        "image": {
+            "base_model": "sd_15.safetensors",
+            "lora": "lcm-lora-sdv1-5.safetensors",
+            "steps": 4,
+            "cfg": 1.0,
+            "resolution": [768, 768],
+            "device": "cuda",
+            "vram_budget_mb": 4096,
+            "unload_after_generate": False,
+        },
+        "features": {
+            "in_image_text": False,
+            "multi_model": False,
+            "parallel_inference": False,
+            "styles": ["standard", "sketch", "watercolor"],
+        },
+        "expected_latency_s": 1.8,
+    },
+    "16gb": {
+        "min_vram": 12.0,
+        "max_vram": 15.9,
+        "stt": {
+            "model": "parakeet-tdt-0.6b-v3",
+            "device": "cuda",
+            "backend": "faster-whisper",
+        },
+        "llm": {
+            "model": "gemma4:26b-a4b-q4_K_M",
+            "device": "cuda",
+            "context": 16384,
+            "vram_budget_mb": 14336,
+        },
+        "image": {
+            "base_model": "flux2_klein_4b_fp8.safetensors",
+            "lora": None,
+            "steps": 4,
+            "cfg": 1.0,
+            "resolution": [1024, 1024],
+            "device": "cuda",
+            "vram_budget_mb": 8192,
+            "unload_after_generate": True,
+        },
+        "features": {
+            "in_image_text": False,
+            "multi_model": True,
+            "parallel_inference": True,
+            "styles": ["standard", "photoreal", "sketch", "watercolor", "3d"],
+        },
+        "expected_latency_s": 1.2,
+    },
+    "24gb": {
+        "min_vram": 16.0,
+        "max_vram": 999.0,
+        "stt": {
+            "model": "parakeet-tdt-0.6b-v3",
+            "device": "cuda",
+            "backend": "faster-whisper",
+        },
+        "llm": {
+            "model": "qwen3.8:27b-q4_K_M",
+            "device": "cuda",
+            "context": 32768,
+            "vram_budget_mb": 18432,
+        },
+        "image": {
+            "base_model": "flux2_klein_4b_fp8.safetensors",
+            "lora": None,
+            "steps": 4,
+            "cfg": 1.0,
+            "resolution": [1024, 1024],
+            "device": "cuda",
+            "vram_budget_mb": 12288,
+            "unload_after_generate": False,
+        },
+        "features": {
+            "in_image_text": True,       # Qwen-Image 2.1 als 2. Modell
+            "multi_model": True,
+            "parallel_inference": True,
+            "styles": ["standard", "photoreal", "sketch", "watercolor", "3d", "text"],
+        },
+        "expected_latency_s": 0.8,
+    },
+}
+
+
+def select_tier(vram_gb: float) -> str:
+    """Wähle das passende Tier basierend auf verfügbarem VRAM."""
+    if vram_gb < 6.0:
+        raise ValueError(
+            f"VRAM {vram_gb} GB ist zu wenig (Minimum: 6 GB). "
+            f"Bitte GPU mit mind. 6 GB VRAM verwenden."
+        )
+    for tier_name, tier in TIERS.items():
+        if tier["min_vram"] <= vram_gb <= tier["max_vram"]:
+            return tier_name
+    # Fallback: höchstes erreichbares Tier
+    return "24gb"
+
+
+def generate(hardware: dict) -> dict:
+    """Generiere die finale Konfiguration."""
+    vram = hardware["vram_gb"]
+    tier_name = select_tier(vram)
+    tier = TIERS[tier_name]
+
+    config = {
+        "profile": tier_name,
+        "hardware": hardware,
+        "stt": tier["stt"],
+        "llm": tier["llm"],
+        "image": tier["image"],
+        "features": tier["features"],
+        "orchestration": {
+            "parallel": tier["features"]["parallel_inference"],
+            "vram_scheduler": not tier["features"]["parallel_inference"],
+            "max_concurrent_generations": 1 if vram < 12 else 2,
+        },
+        "expected_latency_s": tier["expected_latency_s"],
+    }
+
+    # Persistieren
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT_PATH.write_text(yaml.dump(config, default_flow_style=False, allow_unicode=True))
+    print(f"✅ Config generiert: {OUTPUT_PATH} (Tier: {tier_name})")
+    print(f"   STT: {tier['stt']['model']} on {tier['stt']['device']}")
+    print(f"   LLM: {tier['llm']['model']} on {tier['llm']['device']}")
+    print(f"   Bild: {tier['image']['base_model']} ({tier['image']['steps']} steps)")
+    return config
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -3120,7 +3781,6 @@ if __name__ == "__main__":
 
 
 # transcription_backend.py
-#
 
 from __future__ import annotations
 
@@ -4926,7 +5586,11 @@ def _load_audio_as_f32_mono(path: Union[str, Path], target_sr: int = 16000) -> T
 
 
 # image_backend.py
-
+# Production-ready image backend layer for slAIdshow.
+# - ComfyUI local (same host or LAN with discovery)
+# - ComfyUI remote (cloudflared or any reachable host)
+# - Pollinations cloud (v1 or GET)
+# Adds SSE "gallery:updated" broadcasting after each saved image.
 
 from __future__ import annotations
 
@@ -4940,12 +5604,84 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Set, Tuple, List, Dict
+from typing import Optional, Set, Tuple, List, Dict, Callable, Awaitable
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from comfyui_bridge import generate_from_prompt_dict
+
+
+# ===========================
+# Event Broadcasting (SSE hook)
+# ===========================
+
+# Simple in-process async broadcaster. The FastAPI app should register exactly one
+# callback that knows how to deliver SSE events to connected clients.
+# This module does NOT import FastAPI objects directly to avoid cycles.
+
+_EventCallback = Callable[[str, dict], Awaitable[None]]
+_EVENT_LISTENERS: List[_EventCallback] = []
+
+
+def register_event_listener(cb: _EventCallback) -> None:
+    """
+    Register an async callback to deliver events.
+    Expected signature: async def cb(event_name: str, payload: dict) -> None
+    """
+    if cb not in _EVENT_LISTENERS:
+        _EVENT_LISTENERS.append(cb)
+
+
+def unregister_event_listener(cb: _EventCallback) -> None:
+    try:
+        _EVENT_LISTENERS.remove(cb)
+    except ValueError:
+        pass
+
+
+async def _send_event(name: str, payload: dict) -> None:
+    if not _EVENT_LISTENERS:
+        # No listeners registered (server not ready or running in offline tools)
+        return
+    # Deliver in parallel, but isolate failures.
+    tasks = []
+    for cb in list(_EVENT_LISTENERS):
+        try:
+            tasks.append(asyncio.create_task(cb(name, payload)))
+        except Exception as e:
+            print(f"[EVENT] scheduling error for {cb}: {e}")
+    if not tasks:
+        return
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
+    for d in done:
+        try:
+            _ = d.result()
+        except Exception as e:
+            print(f"[EVENT] listener failed: {type(e).__name__}: {e}")
+
+
+async def broadcast_gallery_updated(path: Path) -> None:
+    """
+    Broadcast 'gallery:updated' event after a new image is saved into outputs/images.
+    The frontend listens and reloads the gallery list via /api/images.
+    """
+    try:
+        stat = path.stat()
+        payload = {
+            "filename": path.name,
+            "rel": f"/static/{path.name}",
+            "size": stat.st_size,
+            "ts": int(stat.st_mtime),
+        }
+    except Exception:
+        # If stat fails (odd FS timing), send minimal payload
+        payload = {
+            "filename": path.name,
+            "rel": f"/static/{path.name}",
+            "ts": int(time.time()),
+        }
+    await _send_event("gallery:updated", payload)
 
 
 # ---------------------------
@@ -5035,7 +5771,6 @@ def _assert_image_backend_host_policy(host: str) -> None:
     """
     if _is_loopback(host):
         return
-    # Accept both static env flag and runtime flag set by build_image_backend_rt()
     allow_remote = (
         _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
         or _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0)
@@ -5403,6 +6138,8 @@ class PollinationsBackend(ImageBackend):
                     target.write_bytes(raw)
                     if target.stat().st_size < 1024:
                         raise RuntimeError("pollinations_v1_too_small")
+                    # Broadcast update
+                    await broadcast_gallery_updated(target)
                     return target
                 except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError, ValidationError) as e:
                     last_exc = e
@@ -5444,6 +6181,8 @@ class PollinationsBackend(ImageBackend):
                         raise RuntimeError("pollinations_get_too_small")
                     target = self.out_dir / f"img_{uuid.uuid4().hex}.jpg"
                     target.write_bytes(content)
+                    # Broadcast update
+                    await broadcast_gallery_updated(target)
                     return target
                 except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
                     last_exc = e
@@ -5512,7 +6251,6 @@ class ComfyConfig(BaseModel):
     @property
     def fallback_hosts(self) -> List[str]:
         items = [x.strip() for x in self.fallback_hosts_raw.replace(";", ",").split(",") if x.strip()]
-        # Deduplicate while preserving order
         out: List[str] = []
         seen: Set[str] = set()
         for h in items:
@@ -5579,7 +6317,6 @@ class LocalComfyBackend(ImageBackend):
         # 2) Optionally try fallback/discovery (only if remote backends are allowed)
         allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
         if not allow_remote or not self.cfg.auto_discovery_enable:
-            # Keep configured host; errors will be raised later if unavailable
             self._active_host = host
             self._discovery_done = True
             print("[DISCOVERY] auto-discovery disabled or remote not allowed; keeping configured host")
@@ -5976,10 +6713,20 @@ class LocalComfyBackend(ImageBackend):
         )
 
         if images:
+            # At least one image saved in out_dir by bridge; broadcast first
+            try:
+                first = images[0]
+                await broadcast_gallery_updated(first)
+            except Exception as e:
+                print(f"[EVENT] broadcast error (local comfy direct): {e}")
             return images[0]
 
         copied = self._copy_latest_from_comfy(since_ts=started_at)
         if copied:
+            try:
+                await broadcast_gallery_updated(copied)
+            except Exception as e:
+                print(f"[EVENT] broadcast error (local comfy copy): {e}")
             return copied
 
         raise RuntimeError("comfy_no_images")
@@ -6146,9 +6893,6 @@ class RemoteComfyBackend(ImageBackend):
                     ins["sampler_name"] = sampler_name
 
     async def _probe_history_remote(self) -> bool:
-        """
-        Quick health probe against remote /history using https (or configured scheme).
-        """
         url = f"{self.cfg.scheme}://{self.cfg.host}:{self.cfg.port}/history"
         try:
             async with httpx.AsyncClient(timeout=_timeout_probe(), limits=_httpx_limits()) as c:
@@ -6170,9 +6914,6 @@ class RemoteComfyBackend(ImageBackend):
     ) -> Path:
         """
         Generate via ComfyUI (Remote over Cloudflared).
-        - No discovery, host/port/scheme enforced from RemoteComfyConfig.
-        - Forces comfyui_bridge to https + query view mode via temporary env.
-        - Performs a quick health probe before the job to surface 'comfy_unavailable'.
         """
         if self.cfg.disabled:
             raise RuntimeError("ComfyUI disabled (APP_DISABLE_COMFYUI=1)")
@@ -6256,6 +6997,10 @@ class RemoteComfyBackend(ImageBackend):
             )
 
         if images:
+            try:
+                await broadcast_gallery_updated(images[0])
+            except Exception as e:
+                print(f"[EVENT] broadcast error (remote comfy): {e}")
             return images[0]
         raise RuntimeError("comfy_no_images")
 
@@ -6312,7 +7057,7 @@ def build_image_backend() -> ImageBackend:
 
 
 # ---------------------------
-# Optional helper for controllers (post-LLM guard)
+# Optional helpers for controllers
 # ---------------------------
 
 def merge_style_prompt(content_prompt: str, style_positive: Optional[str]) -> str:
@@ -8033,8 +8778,8 @@ if __name__ == "__main__":
 
 
 
-
 # comfyui_bridge.py
+
 from __future__ import annotations
 
 import asyncio
@@ -9101,7 +9846,7 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
 
 
 
-#web/index.html
+
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -11109,9 +11854,8 @@ async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyF
 
 
 
+#.env.example
 
-
-# .env :
 
 # =========================
 # Base settings (local & cloud)
@@ -11136,15 +11880,17 @@ APP_RMS_VAD_THRESHOLD=0.013
 
 # =========================
 # Snapshot / Segmentation (sentence-oriented)
+# Slightly tightened for cleaner single-sentence finalization on short utterances
 # =========================
-APP_SNAPSHOT_SEC=2.4
-APP_MIN_BUF_SEC=2.6
-APP_MAX_SILENCE_MS=2000
+APP_SNAPSHOT_SEC=2.2            # was 2.4
+APP_MIN_BUF_SEC=2.4             # was 2.6
+APP_MAX_SILENCE_MS=1800         # was 2000
 APP_MAX_SEGMENT_SEC=20.0
-APP_FIRST_SNAPSHOT_DEADLINE_SEC=3.4
+APP_FIRST_SNAPSHOT_DEADLINE_SEC=3.0  # was 3.4
 
 # =========================
 # Frontend text filter (avoid tiny fragments)
+# Keep final outputs meaningful; combine with server-side "final-only" display policy
 # =========================
 APP_TEXT_MIN_CHARS=18
 APP_TEXT_MIN_WORDS=4
@@ -11152,12 +11898,13 @@ APP_FORCE_MEANINGFUL_CHECK=1
 
 # ==========================================
 # Whisper (shared)
+# Non-low-end defaults here are optimized for ThinkPad E14
 # ==========================================
 APP_WHISPER_BACKEND=faster_whisper
-APP_WHISPER_LANGUAGE=
-APP_WHISPER_THREADS=6               # 4
+APP_WHISPER_LANGUAGE=             # leave empty globally; LOWEND_ forces "de"
+APP_WHISPER_THREADS=6             # E14: balanced CPU parallelism
 APP_WHISPER_TEMPERATURE=0.0
-APP_WHISPER_MIN_SEC=1.9
+APP_WHISPER_MIN_SEC=1.6           # faster finalization than 1.9, still stable on E14
 APP_WHISPER_MIN_PEAK=0.0015
 APP_WHISPER_NO_SPEECH_THRESHOLD=0.8
 APP_WHISPER_LOGPROB_THRESHOLD=-0.8
@@ -11165,39 +11912,26 @@ APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT=1
 APP_WHISPER_COMPRESSION_RATIO_THRESHOLD=2.4
 
 # ==========================================
-# Faster-Whisper specific
+# Faster-Whisper specific (Non-low-end = ThinkPad E14)
+# Choose model per language mix:
+# - base (multilingual) for mixed DE/EN
+# - small.en if English-only and you want lower CPU use
 # ==========================================
-
-# Quality-focused non-low-end for ThinkPad E14 (multilingual)
-APP_FASTER_WHISPER_MODEL=base   # small
+APP_FASTER_WHISPER_MODEL=base     # E14 main profile: quality-focused, still real-time
+# APP_FASTER_WHISPER_MODEL=small.en
 APP_FASTER_WHISPER_DEVICE=cpu
 APP_FASTER_WHISPER_COMPUTE_TYPE=int8
-APP_FASTER_WHISPER_CPU_THREADS=6    # 4
+APP_FASTER_WHISPER_CPU_THREADS=6
 APP_FASTER_WHISPER_NUM_WORKERS=2
 APP_FASTER_WHISPER_BEAM_SIZE=1
 APP_FASTER_WHISPER_VAD_FILTER=1
 APP_FASTER_WHISPER_DOWNLOAD_ROOT=./models/faster-whisper-cache
 
-
-APP_MAX_SILENCE_MS=1800
-APP_FIRST_SNAPSHOT_DEADLINE_SEC=3.0
-
-APP_WHISPER_NO_SPEECH_THRESHOLD=0.8
-APP_WHISPER_LOGPROB_THRESHOLD=-0.8
-APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT=1
-APP_WHISPER_COMPRESSION_RATIO_THRESHOLD=2.4
-
-APP_CONTEXT_MAX_SEGMENTS=6
-APP_CONTEXT_MAX_CHARS=600
-
-
-
-
 # =========================
 # LLM prompt optimization via Ollama (local REST)
 # =========================
-APP_CONTEXT_MAX_SEGMENTS=5
-APP_CONTEXT_MAX_CHARS=480
+APP_CONTEXT_MAX_SEGMENTS=6        # E14 can handle a bit more context
+APP_CONTEXT_MAX_CHARS=600
 
 APP_OLLAMA_HOST=127.0.0.1
 APP_OLLAMA_PORT=11434
@@ -11230,7 +11964,7 @@ APP_OLLAMA_MODEL=gemma3:1b
 # =========================
 # Style analysis via Ollama vision
 # =========================
-APP_OLLAMA_VISION_MODEL=gemma3:27b-cloud
+APP_OLLAMA_VISION_MODEL=gemma4:31b-cloud
 APP_ALLOW_REMOTE_VISION=1
 FEATURE_OLLAMA_VISION_DEFAULT=1
 # FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON=1
@@ -11266,6 +12000,8 @@ APP_COMFY_FALLBACK_HOSTS=192.168.188.24
 AUTO_DISCOVERY_ENABLE=1
 AUTO_DISCOVERY_SUBNETS=192.168.188.0/24
 
+# http://192.168.188.24:8188/ -> URL to reach ComfyUi on other device in local Network
+
 # --- Remote/Cloud Comfy preset (Cloudflared / other network) ---
 APP_COMFY_REMOTE_HOST=
 APP_COMFY_REMOTE_PORT=443
@@ -11278,7 +12014,7 @@ PULL_URL=https://dev.betakontext.de/slAIdshow/bridge/tunnel_url.json
 # Pollinations (cloud image backend; always reachable)
 # =========================
 POLLINATIONS_API_BASE=https://gen.pollinations.ai
-POLLINATIONS_SECRET=sk_iFIDaZ4xsL0v4cUwV2JMDBxnEk5dfm9l
+POLLINATIONS_SECRET=
 POLLINATIONS_MODEL=flux
 POLLINATIONS_NOLOGO=1
 POLLINATIONS_SEED=1234
@@ -11312,28 +12048,33 @@ APP_COMFY_OUTPUT_DIR=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/output/
 APP_OUTPUT_DIR=./outputs/images
 
 # =========================
-# LOW-END hard overrides (added)
-# Overwrite APP_* when APP_LOWEND_MODE=1 to reduce latency on ThinkPad X260
+# Low-end toggle (empty = off). When "1", LOWEND_* override APP_*.
+# =========================
+APP_LOWEND_MODE=
+
+# =========================
+# LOW-END hard overrides (ThinkPad X260)
+# Goals: very low latency, stable; fewer fragments; force German to avoid mixed-language artifacts
 # =========================
 # Whisper shared (LOWEND_)
 LOWEND_WHISPER_BACKEND=faster_whisper
-LOWEND_WHISPER_LANGUAGE=
-LOWEND_WHISPER_THREADS=2
+LOWEND_WHISPER_LANGUAGE=de          # force German for your scenario
+LOWEND_WHISPER_THREADS=4            # E14 can also use low-end; 4 keeps it responsive but stable
 LOWEND_WHISPER_TEMPERATURE=0.0
-LOWEND_WHISPER_MIN_SEC=1.2
+LOWEND_WHISPER_MIN_SEC=1.6          # less flicker than 1.2; still fast closures
 LOWEND_WHISPER_MIN_PEAK=0.0015
-LOWEND_WHISPER_NO_SPEECH_THRESHOLD=0.8
-LOWEND_WHISPER_LOGPROB_THRESHOLD=-0.8
+LOWEND_WHISPER_NO_SPEECH_THRESHOLD=0.92  # stricter: suppress filler during short pauses
+LOWEND_WHISPER_LOGPROB_THRESHOLD=-0.6    # stricter: drop low-confidence tokens
 LOWEND_WHISPER_CONDITION_ON_PREVIOUS_TEXT=1
 LOWEND_WHISPER_COMPRESSION_RATIO_THRESHOLD=2.4
 
 # Faster-Whisper (LOWEND_)
-# If English-only, consider tiny.en for better quality at similar speed
-LOWEND_FASTER_WHISPER_MODEL=tiny
-# LOWEND_FASTER_WHISPER_MODEL=tiny.en
+# Prefer small for clarity on X260 if tiny produces fragments; switch back to tiny for max speed
+LOWEND_FASTER_WHISPER_MODEL=small
+# LOWEND_FASTER_WHISPER_MODEL=tiny
 LOWEND_FASTER_WHISPER_DEVICE=cpu
 LOWEND_FASTER_WHISPER_COMPUTE_TYPE=int8
-LOWEND_FASTER_WHISPER_CPU_THREADS=2
+LOWEND_FASTER_WHISPER_CPU_THREADS=4
 LOWEND_FASTER_WHISPER_NUM_WORKERS=1
 LOWEND_FASTER_WHISPER_BEAM_SIZE=1
 LOWEND_FASTER_WHISPER_VAD_FILTER=1
@@ -11360,55 +12101,520 @@ LOWEND_FASTER_WHISPER_DOWNLOAD_ROOT=./models/faster-whisper-cache
 
 
 
-Aktuelle requirements.txt für diesen Ausgangsstand:
-
-# Core web framework + server
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-
-# HTTP client (async) + concurrency foundation
-httpx==0.27.2
-anyio>=3.7.1
-
-# Data models / validation
-pydantic>=2,<3
-typing-extensions>=4.9.0
-
-# Audio + DSP helpers
-numpy==2.0.1
-sounddevice==0.4.7
-# Optional: Voice activity detection (falls genutzt)
-# webrtcvad==2.0.10
-
-# Whisper.cpp Python bindings (lokale Echtzeit-Transkription)
-pywhispercpp>=1.1.0
-
-# Fast Whisper transcription backend (CTranslate2-based; CPU fallback and optional CUDA support)
-faster-whisper==1.2.1
-
-# Environment handling
-python-dotenv==1.0.1
-
-# File uploads (FastAPI FormData)
-python-multipart>=0.0.9
-
-# Image handling (Format-Erkennung für Upload-Fallback)
-pillow>=10.3.0
-
-# Optional async file I/O (für StaticFiles/Downloads nützlich)
-aiofiles>=23.2.1
-
-# Schneller JSON-Parser (optional, kann von FastAPI genutzt werden)
-orjson>=3.10.0
-
-# Performance: schneller Event-Loop (Linux/macOS), nicht für Windows
-uvloop>=0.19.0; platform_system!="Windows"
-
-# Build tooling (manche Umgebungen benötigen explizit aktuelle Versionen)
-setuptools>=68
-wheel>=0.41
-
-# Optional: Requests, falls externe Skripte/Libs es voraussetzen
-# requests>=2.32.0
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# run.sh
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =========================
+# slAIdshow bootstrap script (project-folder agnostic)
+# =========================
+
+# ---- Settings (overridable via env) ----
+HOST="${HOST:-127.0.0.1}"          # Bind strictly to localhost
+PORT="${PORT:-8080}"
+VENV_DIR="${VENV_DIR:-.venv}"
+REQ_FILE="${REQ_FILE:-requirements.txt}"
+DEV_RELOAD="${DEV_RELOAD:-1}"      # 1 = uvicorn --reload
+QUIET_PIP="${QUIET_PIP:-0}"        # 1 = quieter pip output
+AUTO_APT="${AUTO_APT:-1}"          # 1 = try to install OS prereqs on Debian/Ubuntu
+
+# ---- Normalize working directory to the script location ----
+SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+cd "${SCRIPT_DIR}"
+
+log()  { echo -e "[INFO] $*"; }
+warn() { echo -e "[WARN] $*" >&2; }
+err()  { echo -e "[ERROR] $*" >&2; }
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+is_debian_like() {
+  if [[ -f /etc/os-release ]]; then
+    . /etc/os-release
+    case "${ID:-}${ID_LIKE:-}" in
+      *debian*|*ubuntu*|*linuxmint*|*elementary*|*pop*|*neon*) return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+maybe_install_apt_prereqs() {
+  if [[ "${AUTO_APT}" != "1" ]]; then
+    log "Skipping OS prereqs (AUTO_APT=0)."
+    return 0
+  fi
+  if ! is_debian_like; then
+    log "Non-Debian/Ubuntu system – skipping apt prereqs."
+    return 0
+  fi
+  if ! have_cmd sudo || ! have_cmd apt; then
+    warn "sudo/apt not available – skipping apt prereqs."
+    return 0
+  fi
+  log "Installing Debian/Ubuntu prereqs (requires sudo)..."
+  set +e
+  sudo apt update
+  sudo apt install -y build-essential cmake pkg-config python3-dev libportaudio2 libasound2-dev
+  local rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    warn "apt prereqs installation failed (code $rc). Continuing anyway."
+  else
+    log "apt prereqs OK."
+  fi
+}
+
+# Unset any pre-existing venv to avoid PATH pollution from other projects
+unset VIRTUAL_ENV || true
+
+# --- Validate or create venv ---
+create_venv() {
+  local sys_py=""
+  if have_cmd python3; then
+    sys_py="$(command -v python3)"
+  elif have_cmd python; then
+    sys_py="$(command -v python)"
+  else
+    err "Kein Python 3 gefunden. Installiere python3 (z.B. 'sudo apt install -y python3')."
+    exit 1
+  fi
+  log "Creating virtual environment at ${VENV_DIR} using ${sys_py}"
+  "${sys_py}" -m venv "${VENV_DIR}"
+}
+
+validate_or_recreate_venv() {
+  # Fall 1: venv fehlt → erstellen
+  if [[ ! -d "${VENV_DIR}" ]]; then
+    create_venv
+    return
+  fi
+
+  # Fall 2: venv existiert, prüfe .venv/bin/python
+  if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
+    warn "Existing venv is missing bin/python → recreating."
+    rm -rf "${VENV_DIR}"
+    create_venv
+    return
+  fi
+
+  # Fall 3: Prüfe, ob Pip/Shebang auf einen falschen Pfad zeigt
+  if [[ -f "${VENV_DIR}/bin/pip" ]]; then
+    if head -n1 "${VENV_DIR}/bin/pip" | grep -q "speechtoimage_ai/.venv/bin/python"; then
+      warn "Detected stale shebang in pip (points to old project path). Recreating venv."
+      rm -rf "${VENV_DIR}"
+      create_venv
+      return
+    fi
+  fi
+
+  # Fall 4: Zusätzlicher Integritätscheck: Python aus venv starten
+  if ! "${VENV_DIR}/bin/python" -c 'import sys; print(sys.executable)' >/dev/null 2>&1; then
+    warn "Venv python is not runnable → recreating."
+    rm -rf "${VENV_DIR}"
+    create_venv
+    return
+  fi
+}
+
+activate_venv() {
+  # shellcheck disable=SC1091
+  source "${VENV_DIR}/bin/activate"
+  echo "[DEBUG] which python after activate: $(command -v python || echo 'not found')"
+  echo "[DEBUG] PATH: $PATH"
+}
+
+ensure_requirements() {
+  local PY_BIN="${VENV_DIR}/bin/python"
+  local PIP_BIN="${VENV_DIR}/bin/pip"
+
+  local quiet_flag=()
+  if [[ "${QUIET_PIP}" == "1" ]]; then
+    quiet_flag+=(-q)
+  fi
+
+  "${PY_BIN}" -m pip install --upgrade pip setuptools wheel "${quiet_flag[@]}"
+
+  if [[ -f "${REQ_FILE}" ]]; then
+    log "Installing Python requirements from ${REQ_FILE}"
+    "${PIP_BIN}" install -r "${REQ_FILE}" "${quiet_flag[@]}"
+  else
+    warn "No requirements.txt found – installing minimal core deps"
+    "${PIP_BIN}" install httpx pydantic fastapi 'uvicorn[standard]' "${quiet_flag[@]}"
+  fi
+}
+
+ensure_webrtcvad() {
+  local PY_BIN="${VENV_DIR}/bin/python"
+  local PIP_BIN="${VENV_DIR}/bin/pip"
+  if "${PY_BIN}" - <<'PY' >/dev/null 2>&1
+import importlib; importlib.import_module("webrtcvad")
+PY
+  then
+    log "webrtcvad already present"
+  else
+    log "Attempting optional install: webrtcvad-wheels"
+    if ! "${PIP_BIN}" install --no-cache-dir webrtcvad-wheels >/dev/null 2>&1; then
+      warn "webrtcvad-wheels install failed – continuing without WebRTC VAD."
+    fi
+  fi
+}
+
+ensure_pywhispercpp() {
+  local PY_BIN="${VENV_DIR}/bin/python"
+  local PIP_BIN="${VENV_DIR}/bin/pip"
+  if "${PY_BIN}" - <<'PY' >/dev/null 2>&1
+import importlib; importlib.import_module("pywhispercpp")
+PY
+  then
+    log "pywhispercpp already present"
+  else
+    log "Installing pywhispercpp (prefer wheels)"
+    if ! "${PIP_BIN}" install --no-cache-dir pywhispercpp; then
+      err "pywhispercpp could not be installed. Please verify platform/wheels."
+      err "See: https://github.com/absadiki/pywhispercpp"
+      exit 2
+    fi
+  fi
+}
+
+check_local() {
+  local name="$1" host="$2" port="$3"
+  local PY_BIN="${VENV_DIR}/bin/python"
+  if "${PY_BIN}" - <<PY >/dev/null 2>&1
+import socket
+h="${host}"; p=int("${port}")
+s=socket.socket(); s.settimeout(1.0)
+ok=False
+try:
+    s.connect((h,p)); ok=True
+except Exception:
+    ok=False
+finally:
+    s.close()
+print("ok" if ok else "no")
+PY
+  then
+    echo "[OK] ${name} reachable at ${host}:${port}"
+  else
+    echo "[WARN] ${name} NOT reachable at ${host}:${port} – continuing anyway."
+  fi
+}
+
+main() {
+  maybe_install_apt_prereqs
+
+  validate_or_recreate_venv
+  activate_venv
+
+  # Explizit Python-Version aus venv prüfen
+  local PY_BIN="${VENV_DIR}/bin/python"
+  local VER MAJ MIN
+  VER="$("${PY_BIN}" -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  MAJ="$("${PY_BIN}" -c 'import sys;print(sys.version_info.major)')"
+  MIN="$("${PY_BIN}" -c 'import sys;print(sys.version_info.minor)')"
+  echo "[INFO] Python ${VER} (venv) detected"
+  if [ "$MAJ" -lt 3 ] || { [ "$MAJ" -eq 3 ] && [ "$MIN" -lt 9 ]; }; then
+    err "Python >= 3.9 required."
+    exit 1
+  fi
+
+  ensure_requirements
+  ensure_webrtcvad
+  ensure_pywhispercpp
+
+  mkdir -p outputs/images
+
+  local OLLAMA_HOST="${APP_OLLAMA_HOST:-127.0.0.1}"
+  local OLLAMA_PORT="${APP_OLLAMA_PORT:-11434}"
+  local COMFY_HOST="${APP_COMFY_HOST:-127.0.0.1}"
+  local COMFY_PORT="${APP_COMFY_PORT:-8188}"
+  check_local "Ollama" "${OLLAMA_HOST}" "${OLLAMA_PORT}"
+  check_local "ComfyUI" "${COMFY_HOST}" "${COMFY_PORT}"
+
+  local EXTRA_FLAGS=()
+  if [[ "${DEV_RELOAD}" == "1" ]]; then
+    EXTRA_FLAGS+=(--reload)
+  fi
+
+  log "Starting server at http://${HOST}:${PORT}"
+  exec "${VENV_DIR}/bin/uvicorn" app:app --host "${HOST}" --port "${PORT}" "${EXTRA_FLAGS[@]}"
+}
+
+main "$@"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# run.ps1
+
+#!/usr/bin/env pwsh
+
+
+param(
+  # Server bind (localhost only for privacy)
+  [string]$HostIP    = $(if ($env:HOST) { $env:HOST } else { "127.0.0.1" }),
+  [int]$Port         = $(if ($env:PORT) { [int]$env:PORT } else { 8080 }),
+
+  # Python and venv configuration
+  [string]$PythonBin = $(if ($env:PYTHON_BIN) { $env:PYTHON_BIN } else { "python" }),
+  [string]$VenvDir   = $(if ($env:VENV_DIR) { $env:VENV_DIR } else { ".venv" }),
+  [string]$ReqFile   = $(if ($env:REQ_FILE) { $env:REQ_FILE } else { "requirements.txt" }),
+
+  # Uvicorn reload for development and pip quiet mode
+  [int]$DevReload    = $(if ($env:DEV_RELOAD) { [int]$env:DEV_RELOAD } else { 1 }),
+  [int]$QuietPip     = $(if ($env:QUIET_PIP) { [int]$env:QUIET_PIP } else { 0 })
+)
+
+$ErrorActionPreference = "Stop"
+
+# Simple log helpers for consistent colored output
+function Write-Info([string]$msg) { Write-Host "[INFO] $msg" -ForegroundColor Cyan }
+function Write-Ok([string]$msg)   { Write-Host "[OK]   $msg" -ForegroundColor Green }
+function Write-Err([string]$msg)  { Write-Error $msg }
+function Write-Wrn([string]$msg)  { Write-Warning $msg }
+
+# Helper: run small Python snippets by piping code on stdin (avoids shell quoting issues)
+function PyRunStdin([string]$code) {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $PythonBin
+  $psi.Arguments = "-"
+  $psi.RedirectStandardInput = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.UseShellExecute = $false
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  [void]$proc.Start()
+  $proc.StandardInput.WriteLine($code)
+  $proc.StandardInput.Close()
+  $out = $proc.StandardOutput.ReadToEnd()
+  $err = $proc.StandardError.ReadToEnd()
+  $proc.WaitForExit()
+  if ($proc.ExitCode -ne 0) {
+    throw "python - (stdin) failed: $err"
+  }
+  return $out.Trim()
+}
+
+# Enforce localhost binding for privacy and GDPR compliance
+if ($HostIP -ne "127.0.0.1" -and $HostIP -ne "localhost") {
+  Write-Err ("For privacy, HostIP must be 127.0.0.1 or localhost. Given: {0}" -f $HostIP)
+  exit 1
+}
+
+# Check Python availability and version (>= 3.9)
+try {
+  $ver = PyRunStdin @'
+import sys
+print('{}.{}'.format(sys.version_info.major, sys.version_info.minor))
+'@
+  if (-not $ver) { throw "Python version detection returned empty output." }
+  Write-Info ("Python {0} detected via '{1}'" -f $ver, $PythonBin)
+  $maj = [int]$ver.Split('.')[0]; $min = [int]$ver.Split('.')[1]
+  if ($maj -lt 3 -or ($maj -eq 3 -and $min -lt 9)) { throw "Python >= 3.9 required" }
+} catch {
+  Write-Err ("Python not found or unsuitable: {0}" -f $_)
+  exit 1
+}
+
+# Detect if the current Python is already inside the desired venv
+$alreadyInVenv = $false
+try {
+  $pyinfo = PyRunStdin @'
+import sys
+print(sys.executable)
+print(sys.prefix)
+print(sys.base_prefix)
+'@
+  $lines = $pyinfo -split "`r?`n"
+  $exePath = $lines[0]; $sysPrefix = $lines[1]; $basePrefix = $lines[2]
+  if ($sysPrefix -ne $basePrefix -and ($exePath -like "*$VenvDir*")) {
+    $alreadyInVenv = $true
+    Write-Info ("Existing venv detected: {0}" -f $exePath)
+  }
+} catch {
+  # Non-fatal; continue with venv creation/activation below
+}
+
+# Create and activate virtual environment if not already active
+if (-not $alreadyInVenv) {
+  if (-not (Test-Path $VenvDir)) {
+    Write-Info ("Creating venv at '{0}'..." -f $VenvDir)
+    & $PythonBin -m venv $VenvDir
+  } else {
+    Write-Info ("Using existing venv at '{0}'" -f $VenvDir)
+  }
+  $activate = Join-Path $VenvDir "Scripts\Activate.ps1"
+  if (-not (Test-Path $activate)) {
+    Write-Err ("Could not activate venv (missing {0})." -f $activate)
+    exit 1
+  }
+  # Dot-source the venv activation for the current PowerShell session
+  . $activate
+  $venvPy = PyRunStdin @'
+import sys
+print(sys.executable)
+'@
+  Write-Ok ("Activated venv: {0}" -f $venvPy)
+} else {
+  Write-Ok "Keeping current active venv."
+}
+
+# Upgrade pip inside the venv, optionally in quiet mode
+if ($QuietPip -eq 1) {
+  python -m pip install --upgrade pip -q
+} else {
+  python -m pip install --upgrade pip
+}
+
+# Install base requirements if a requirements.txt is present
+if (Test-Path $ReqFile) {
+  Write-Info ("Installing requirements from {0}..." -f $ReqFile)
+  if ($QuietPip -eq 1) {
+    pip install -r $ReqFile -q
+  } else {
+    pip install -r $ReqFile
+  }
+} else {
+  Write-Wrn ("No {0} found; skipping base dependency install." -f $ReqFile)
+}
+
+# Optional: attempt to install webrtcvad wheels (not critical; used for VAD speed)
+try {
+  $hasVad = PyRunStdin @'
+import importlib.util
+print('yes' if importlib.util.find_spec('webrtcvad') else 'no')
+'@
+} catch { $hasVad = "no" }
+if ($hasVad -ne "yes") {
+  Write-Info "Attempting install: webrtcvad-wheels (optional)"
+  try {
+    pip install --no-cache-dir webrtcvad-wheels | Out-Null
+  } catch {
+    Write-Wrn "webrtcvad-wheels failed - continuing without WebRTC VAD."
+  }
+} else {
+  Write-Info "webrtcvad already installed"
+}
+
+# Ensure pywhispercpp is available (required for realtime transcription)
+try {
+  $hasWhisper = PyRunStdin @'
+import importlib.util
+print('yes' if importlib.util.find_spec('pywhispercpp') else 'no')
+'@
+} catch { $hasWhisper = "no" }
+if ($hasWhisper -ne "yes") {
+  Write-Info "Installing pywhispercpp..."
+  try {
+    pip install --no-cache-dir pywhispercpp
+  } catch {
+    Write-Err "pywhispercpp could not be installed. See https://github.com/absadiki/pywhispercpp"
+    exit 2
+  }
+} else {
+  Write-Info "pywhispercpp already installed"
+}
+
+# Ensure outputs directory exists for generated images
+try {
+  $null = New-Item -ItemType Directory -Force -Path "outputs\images" | Out-Null
+} catch {
+  # Non-fatal, continue
+}
+
+# Port reachability test without colliding with PowerShell's $Host variable
+function Test-Port {
+  param(
+    [string]$Name,
+    [string]$TargetHost,
+    [int]$TargetPort
+  )
+  try {
+    $client = New-Object System.Net.Sockets.TcpClient
+    $iar = $client.BeginConnect($TargetHost, $TargetPort, $null, $null)
+    $ok = $iar.AsyncWaitHandle.WaitOne(1000, $false)
+    if ($ok -and $client.Connected) {
+      $client.EndConnect($iar); $client.Close()
+      Write-Ok ("{0} reachable at {1}:{2}" -f $Name, $TargetHost, $TargetPort)
+      return $true
+    } else {
+      $client.Close()
+      Write-Wrn ("{0} NOT reachable at {1}:{2} - continuing anyway." -f $Name, $TargetHost, $TargetPort)
+      return $false
+    }
+  } catch {
+    Write-Wrn ("{0} NOT reachable at {1}:{2} - continuing anyway." -f $Name, $TargetHost, $TargetPort)
+    return $false
+  }
+}
+
+# Resolve local service endpoints (kept to 127.0.0.1 by default)
+$OllamaHost = if ($env:APP_OLLAMA_HOST) { $env:APP_OLLAMA_HOST } else { "127.0.0.1" }
+$OllamaPort = if ($env:APP_OLLAMA_PORT) { [int]$env:APP_OLLAMA_PORT } else { 11434 }
+$ComfyHost  = if ($env:APP_COMFY_HOST)  { $env:APP_COMFY_HOST } else { "127.0.0.1" }
+$ComfyPort  = if ($env:APP_COMFY_PORT)  { [int]$env:APP_COMFY_PORT } else { 8188 }
+
+# Non-fatal preflight checks: helpful hints if services are not yet up
+$ollamaUp = Test-Port -Name "Ollama" -TargetHost $OllamaHost -TargetPort $OllamaPort
+$comfyUp  = Test-Port -Name "ComfyUI" -TargetHost $ComfyHost  -TargetPort $ComfyPort
+
+if (-not $ollamaUp) {
+  Write-Wrn "Tip: Start Ollama first (ollama serve) and pull a small model, e.g., 'ollama pull llama3.2:3b'."
+}
+if (-not $comfyUp) {
+  Write-Wrn "Tip: Start ComfyUI: python main.py --listen 127.0.0.1 --port 8188 --lowvram"
+}
+
+# Start FastAPI via uvicorn on localhost
+$extra = @()
+if ($DevReload -eq 1) { $extra += "--reload" }
+
+Write-Host ("Starting server at http://{0}:{1}" -f $HostIP, $Port)
+python -m uvicorn app:app --host $HostIP --port $Port @extra

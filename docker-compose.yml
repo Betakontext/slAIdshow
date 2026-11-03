@@ -1,0 +1,68 @@
+services:
+  # ─── Init-Container: läuft einmalig bei Install ───
+  init:
+    build: .
+    command: ["sleep", "infinity"]  # wird manuell aufgerufen
+    volumes:
+      - ./config:/app/config
+      - ./models:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ─── Backend: FastAPI + Orchestrierung ───
+  backend:
+    build: .
+    command: uvicorn slaidshow.main:app --host 0.0.0.0 --port 8080
+    depends_on:
+      - ollama
+      - comfyui
+    environment:
+      - CONFIG_PATH=/app/config/generated.yaml
+    volumes:
+      - ./config:/app/config
+      - ./models:/app/models
+      - ./recordings:/app/recordings
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ─── Ollama: LLM-Service ───
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ─── ComfyUI: Bildgenerierung ───
+  comfyui:
+    image: ghcr.io/comfyanonymous/comfyui:latest
+    command: >
+      --listen 0.0.0.0 --port 8188
+      --lowvram  # wird bei 6GB automatisch gesetzt (via healthcheck)
+    volumes:
+      - ./models/comfyui:/root/ComfyUI/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  ollama_data:

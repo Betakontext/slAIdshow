@@ -1,19 +1,4 @@
 # transcription_backend.py
-#
-# Drop-in replacement with:
-# - Preserves existing public API, env keys, status structure, capability logic
-# - Primary backend: faster-whisper (CTranslate2), fallback: pywhispercpp.model.Model
-# - Keeps your established audio preparation and cleaning utilities
-# - Adds a low-latency RealtimeTranscriber:
-#     * RMS-based VAD + debounce to detect end-of-utterance
-#     * Determistic decode ticker for partials (low jitter)
-#     * Tail-window decodes for stability (avoid reinterpreting old text)
-#     * Partial dedupe + growth + meaningful-light + punct-only skip
-#     * Adaptive finalize delay (sentence-end vs no-sentence-end)
-#     * Optional file recording and file-transcription fallback if realtime-final is empty
-# - Low-end profile switch via APP_LOWEND_MODE=1 to improve latency on weak CPUs
-# - Low-end switch is LIMITED to Whisper/Faster-Whisper keys (no changes to VAD/segmentation/LLM/etc.)
-# - All operational messages remain in English
 
 from __future__ import annotations
 
