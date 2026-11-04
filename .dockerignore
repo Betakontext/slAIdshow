@@ -1,0 +1,76 @@
+# Keep local credentials out of the build context.
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+*.pem
+**/*.pem
+*.key
+**/*.key
+*.p12
+**/*.p12
+*.pfx
+**/*.pfx
+secrets/
+**/secrets/
+
+# Git metadata is not required at runtime.
+.git/
+**/.git/
+
+# Exclude local Python environments and caches.
+.venv/
+venv/
+env/
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.tox/
+**/.nox/
+
+# Exclude generated test and packaging artifacts.
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+build/
+dist/
+**/*.egg-info/
+
+# Models and runtime data must be provisioned separately.
+models/
+outputs/
+recordings/
+logs/
+**/*.log
+
+# Hardware reports and generated configuration are host-specific.
+config/hardware.json
+config/generated.yaml
+hardware.json
+
+# Local audio routing and tunnel state must not enter image layers.
+.asoundrc
+.pulse/
+.config/pulse/
+tunnel_url.json
+**/tunnel_url.json
+
+# Exclude editor metadata and temporary files.
+.idea/
+.vscode/
+.DS_Store
+**/.DS_Store
+**/*~
+**/*.swp
+**/*.swo
+
+# Source, tests, workflows, frontend assets, dependency manifests,
+# lockfiles and configuration templates remain in the build context.

@@ -1,68 +1,122 @@
+# Docker Compose v2 file for slAIdshow (complete)
+# - Supports conditional GPU usage via environment variable USE_GPU (true/false)
+# - Provides persistent volumes for config, models, outputs and recordings
+# - Healthchecks for the HTTP service (app) and optional ComfyUI / Ollama services
+# - Keeps GPU/CUDA services separate; when USE_GPU != "true" no GPU devices are requested
+# - Use `docker compose --env-file .env up --build` to run (or `sudo docker compose ...` on systems without docker group)
+version: "3.9"
+
 services:
-  # ─── Init-Container: läuft einmalig bei Install ───
-  init:
-    build: .
-    command: ["sleep", "infinity"]  # wird manuell aufgerufen
-    volumes:
-      - ./config:/app/config
-      - ./models:/app/models
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-  # ─── Backend: FastAPI + Orchestrierung ───
-  backend:
-    build: .
-    command: uvicorn slaidshow.main:app --host 0.0.0.0 --port 8080
-    depends_on:
-      - ollama
-      - comfyui
+  app:
+    image: slaidshow:m0
+    container_name: slaidshow_app
+    restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      - CONFIG_PATH=/app/config/generated.yaml
+      # Application binding & runtime config (overrides inside container)
+      APP_BIND_HOST: "0.0.0.0"
+      APP_BIND_PORT: "8080"
+      CONFIG_PATH: "/app/config/generated.yaml"
+      # Offline by default to avoid unexpected HF downloads
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      APP_FASTER_WHISPER_DEVICE: "${APP_FASTER_WHISPER_DEVICE:-cpu}"
+      APP_ALLOW_REMOTE_VISION: "${APP_ALLOW_REMOTE_VISION:-no}"
+      # Opt-in to allow cloud backends (Pollinations) - default no
+      APP_ALLOW_CLOUD: "${APP_ALLOW_CLOUD:-no}"
+      # Control image backend: comfyui | pollinations
+      APP_IMAGE_BACKEND: "${APP_IMAGE_BACKEND:-comfyui}"
+      # Toggle GPU use at runtime (true/false). Compose will mount devices only if "true".
+      USE_GPU: "${USE_GPU:-false}"
+    # Only expose port to host for local development; use a reverse proxy in production.
+    ports:
+      - "8080:8080"
     volumes:
-      - ./config:/app/config
-      - ./models:/app/models
-      - ./recordings:/app/recordings
+      - ./config:/app/config:rw
+      - ./models:/app/models:rw
+      - ./outputs:/app/outputs:rw
+      - ./recordings:/app/recordings:rw
+      - ./static:/app/static:ro
+      - ./workflows:/app/workflows:ro
+    # Conditional device/privileges: handled by an entrypoint wrapper (see note)
+    # For GPU usage with Nvidia Container Toolkit and Compose, set USE_GPU=true and pass runtime args:
     deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      resources: {}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,os; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('APP_BIND_PORT','8080') + '/health', timeout=6).close()\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-  # ─── Ollama: LLM-Service ───
-  ollama:
-    image: ollama/ollama:latest
-    volumes:
-      - ollama_data:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-  # ─── ComfyUI: Bildgenerierung ───
   comfyui:
     image: ghcr.io/comfyanonymous/comfyui:latest
-    command: >
-      --listen 0.0.0.0 --port 8188
-      --lowvram  # wird bei 6GB automatisch gesetzt (via healthcheck)
+    container_name: slaidshow_comfyui
+    restart: unless-stopped
+    environment:
+      SERVICE_HOST: "0.0.0.0"
+      SERVICE_PORT: "11434"
+    ports:
+      - "11434:11434"
     volumes:
-      - ./models/comfyui:/root/ComfyUI/models
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      - ./models/comfyui:/home/user/.comfyui/models:rw
+      - ./workflows/comfyui:/home/user/.comfyui/workflows:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:11434/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    # Do NOT request GPU devices here by default; use the optional nvidia service below
+    # If the host supports nvidia and you want GPU acceleration, run Compose with
+    #   USE_GPU=true and add `--profile gpu` (see "Usage" below)
+    profiles: ["default", "gpu-optional"]
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: slaidshow_ollama
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: "0.0.0.0"
+      OLLAMA_PORT: "11434"
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./models/ollama:/var/lib/ollama/models:rw
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:11434/v1 || exit 1"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 60s
+    profiles: ["default", "gpu-optional"]
+
+  # Optional service which requests GPU devices via nvidia runtime.
+  # Start with: docker compose --profile gpu up --build
+  nvidia_proxy:
+    image: nvidia/cuda:12.2.0-runtime-ubuntu22.04
+    container_name: slaidshow_nvidia_proxy
+    runtime: nvidia
+    # The nvidia service exists only to bind GPU devices into the docker host network namespace
+    # and to ensure the nvidia runtime is available. It is intentionally minimal and NOT required
+    # for CPU/offline operation. Start with profile `gpu`.
+    command: ["sleep", "infinity"]
+    deploy: {}
+    devices:
+      - "/dev/nvidiactl:/dev/nvidiactl"
+      - "/dev/nvidia-uvm:/dev/nvidia-uvm"
+      - "/dev/nvidia0:/dev/nvidia0"
+    profiles: ["gpu-optional"]
+
+# Top-level volumes (optionally declared, but Compose will create them automatically for host mounts)
 volumes:
-  ollama_data:
+  models:
+  outputs:
+  recordings:
+  config:
