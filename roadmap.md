@@ -1,144 +1,147 @@
 ### slAIdshow — Roadmap zur produktionsreifen Show-Engine
 
-Planungsgrundlage: bisherige Roadmap, dokumentierter Projektstand, Commit `4caa19f` sowie die berichteten erfolgreichen nativen CPU-/Lowend-Einsätze auf ThinkPad X260 und ThinkPad E14.
+Planungsgrundlage: dokumentierter Projektstand, Commit `4caa19f`, bisherige Roadmap und berichtete native CPU-/Lowend-Einsätze auf ThinkPad X260 und ThinkPad E14.
 
-Produktziel: Sprache wird live in passende Bilder übersetzt — wahlweise vollständig lokal, mit entferntem ComfyUI-Rechner oder mit ausdrücklich gewähltem Pollinations-Cloudbackend.
+Produktziel: Sprache wird live in passende Bilder übersetzt — vollständig lokal, mit entferntem ComfyUI oder mit ausdrücklich gewähltem Pollinations-Cloudbackend.
 
-Priorität: Bestehende Betriebsarten erhalten, gemeinsame Konfiguration integrieren und Installation sowie Laufzeit stabilisieren, bevor große Modelle, Recording oder Enterprise-Funktionen hinzukommen.
+Aktuelle Priorität:
+
+1. Docker- und GPU-Select-Integration abschließen und durch Tests abnehmen.
+2. Unmittelbar danach Pollinations einschließlich „Bring your own Pollen“ integrieren.
+3. Anschließend Parakeet als zusätzliches lokales STT-Backend einbinden.
+4. Danach Pipeline-Stabilität, Recording, Team-Betrieb und Enterprise ausbauen.
 
 ### 1. Arbeitsregeln und Status
 
-- **Vorhanden:** Implementierung oder Datei nachgewiesen; vollständige Integration nicht automatisch bestätigt.
-- **Im Einsatz berichtet:** Funktioniert laut praktischer Nutzung; reproduzierbare Testbedingungen und Abnahme werden ergänzt.
-- **Teilweise:** Bausteine vorhanden, Integration oder Funktionsnachweis unvollständig.
-- **Offen:** Keine vollständige Implementierung nachgewiesen.
-- **Abgenommen:** Akzeptanzkriterien erfüllt und Testergebnis dokumentiert.
+- **Vorhanden:** Datei oder Implementierung nachgewiesen.
+- **Im Einsatz berichtet:** Funktioniert laut praktischer Nutzung.
+- **Teilweise:** Integration oder Funktionsumfang noch unvollständig.
+- **Offen:** Umsetzung noch nicht nachgewiesen.
+- **Umgesetzt:** Vereinbarter Funktionsumfang integriert; keine automatische Aussage über Testabnahme.
+- **Abgenommen:** Docker/GPU-Schritt anhand dokumentierter Test- und Laufnachweise bestätigt.
 
-Eine Datei im Repository oder ein erfolgreicher Commit ist kein abgeschlossener Meilenstein.
+Eine Datei im Repository und ein erfolgreicher Commit belegen keine vollständige Laufzeitintegration.
 
-Technische Leitplanken:
+#### 1.1 Vorläufige Testregel
+
+Eine verpflichtende testbasierte Abnahme gilt aktuell ausschließlich für M0: Docker- und GPU-Select-Integration.
+
+Für nachfolgende Arbeiten:
+
+- Tests und manuelle Prüfungen können bei Bedarf ergänzt werden.
+- Sie sind vorerst keine verpflichtenden Meilenstein- oder Release-Gates.
+- Fehlende Testnachweise werden transparent benannt.
+- Ungeprüfte Funktionen werden nicht als getestet oder abgenommen bezeichnet.
+- Verifizierung externer Schnittstellen, sichere Zugangsdatenverwaltung und ausdrückliche Cloud-Freigabe bleiben erforderlich.
+
+#### 1.2 Technische Leitplanken
 
 - Python 3.12+, Type Hints und ruff.
 - FastAPI, Ollama, ComfyUI und Docker Compose.
 - Native Installation bleibt ein gleichwertiger Startpfad.
 - Bestehende Whisper-/Faster-Whisper- und Lowend-Funktionen erhalten.
-- Keine Cloud-Abhängigkeiten im vollständig lokalen Runtime-Pfad.
-- Cloud-Nutzung bleibt als explizite Option erhalten.
-- pynvml zur NVIDIA-Erkennung, JSON für Hardwaredaten, YAML für Konfiguration.
-- pytest mit Mocks für GPU, Ollama, ComfyUI und Pollinations.
-- Eine gemeinsame Konfigurationsquelle statt widersprüchlicher Defaults.
+- SSE für bestehende Status-, Transkriptions- und Bildereignisse erhalten.
+- Keine Cloud-Abhängigkeit im vollständig lokalen Runtime-Pfad.
+- Pollinations nur nach ausdrücklicher Auswahl.
+- pynvml zur NVIDIA-Erkennung.
+- JSON für Hardwaredaten, YAML für Konfiguration.
+- Eine gemeinsame Konfigurationsquelle.
 - Neue Abhängigkeiten erst nach ausdrücklicher technischer Entscheidung.
 
 ### 2. Dokumentierter Ausgangspunkt
 
 #### 2.1 Bestehende Anwendung
 
-- FastAPI-Anwendung in `app.py`: vorhanden.
-- Mikrofon, VAD und Transkription: vorhanden.
-- Whisper-/Faster-Whisper-Backends: vorhanden; erhalten und absichern.
-- Ollama-Prompt-Erzeugung: vorhanden.
-- ComfyUI-Bildgenerierung: vorhanden.
-- Pollinations als alternatives Bildbackend: bestehende Option; erhalten und systematisch testen.
-- Galerie, Vollbild und Stilsteuerung: vorhanden.
-- Live-Ereignisse über SSE: vorhanden; erhalten.
-- Modell-Downloader und VRAM-Scheduler: teilweise; Integration und Fehlerfälle prüfen.
+Vorhanden beziehungsweise im Einsatz berichtet:
 
-#### 2.2 Nativer CPU-/Lowend-Betrieb
+- Anwendungseinstieg `app.py`.
+- Mikrofon, VAD und Transkription.
+- Whisper/Faster-Whisper.
+- Ollama-Prompt-Erzeugung.
+- Lokale und entfernte ComfyUI-Bildgenerierung.
+- Pollinations als alternatives Bildbackend.
+- Galerie, Vollbild, Stilsteuerung und SSE.
+- Nativer CPU-/Lowend-Betrieb auf ThinkPad X260 und ThinkPad E14.
 
-Laut bisheriger Nutzung funktioniert slAIdshow außerhalb von Docker auf ThinkPad X260 und ThinkPad E14 mit:
+Teilweise integriert:
 
-- CPU-Modus und Lowend-Option.
-- Whisper oder Faster-Whisper für lokale Transkription.
-- Ollama auf dem ThinkPad.
-- Bildgenerierung durch ComfyUI auf einem anderen Rechner über eine Remote-Verbindung.
+- Hardware-Erkennung und GPU-Auswahl.
+- Gemeinsame Konfiguration.
+- Modell-Downloader.
+- VRAM-Scheduler.
+- Docker-Startpfad.
 
-Dieser Betriebsweg ist ausdrücklich Bestandteil des Produkts und kein zu entfernender Übergangszustand.
+#### 2.2 Commit `4caa19f`
 
-Noch zu dokumentieren:
-
-- Konkrete CPU-/RAM-Ausstattung und Betriebssysteme.
-- Verwendete STT- und Ollama-Modelle.
-- Lowend-Einstellungen, Verbindungsart und ComfyUI-Workflows.
-- Gemessene Latenzen und bekannte Grenzen.
-- Reproduzierbare Start- und Prüfschritte.
-
-#### 2.3 Commit `4caa19f`
-
-Commit: `Added Docker files and GPU selection` auf Branch `1.0_vram-selection`.
+Commit: `Added Docker files and GPU selection`, Branch `1.0_vram-selection`.
 
 Durch Commit-Ausgabe nachgewiesen:
 
-- `Dockerfile` neu aufgenommen.
-- `config_generator.py` neu aufgenommen.
-- `runtime_config.py` neu aufgenommen.
-- `tests/test_config_generator.py` neu aufgenommen.
-- `tests/test_hardware_detect.py` neu aufgenommen.
-- Zusätzliche ComfyUI-Workflow-Dateien aufgenommen.
-- Weitere Änderungen an der bestehenden Anwendung versioniert.
+- `Dockerfile` aufgenommen.
+- `config_generator.py` aufgenommen.
+- `runtime_config.py` aufgenommen.
+- Tests für Hardware-Erkennung und Konfigurationsgenerator aufgenommen.
+- Zusätzliche ComfyUI-Workflows aufgenommen.
+- Weitere Änderungen an der Anwendung versioniert.
 
-GPU-Auswahl und Docker-Unterstützung sind damit als aktueller Implementierungsstand festgehalten. Vollständigkeit, Container-Gerätezuordnung und tatsächliche Nutzung der gewählten GPU müssen noch getestet werden.
+Docker und GPU-Auswahl sind implementierter Projektstand, aber noch kein vollständig abgenommener Betriebsweg.
 
-Die aktualisierte `.gitignore` ist für den Repository-Stand zu prüfen. Modelle, Outputs und Secrets dürfen nicht versehentlich versioniert sein. Bereits getrackte Dateien werden durch Ignore-Regeln nicht automatisch entfernt.
+#### 2.3 Bekannter Laufzeitbefund
 
-#### 2.4 Bekannter Laufzeitbefund
-
-Der zuletzt gezeigte Health-Aufruf unter `127.0.0.1:8080` liefert HTTP 200 mit:
+Der zuletzt gezeigte Health-Aufruf lieferte HTTP 200 mit:
 
 - `ollama_ok:false`
 - `image_backend:"comfyui"`
 - `allow_cloud:true`
 - vorhandenem Ausgabeordner
 
-Bewertung:
+Daraus folgt:
 
-- Die HTTP-Anwendung ist erreichbar.
-- Ollama-Erreichbarkeit ist in diesem Lauf nicht bestätigt.
-- Eine vollständige Bildpipeline ist damit nicht nachgewiesen.
-- `allow_cloud:true` ist nicht grundsätzlich ein Fehler: Die Einstellung muss zum ausdrücklich gewählten Betriebsmodus passen.
-- Im vollständig lokalen Modus müssen Cloud-Aufrufe ausgeschlossen sein.
-- Bei ausdrücklich gewähltem Pollinations-Backend muss Cloud-Nutzung erlaubt und sichtbar sein.
+- HTTP-Anwendung erreichbar.
+- Ollama-Bereitschaft in diesem Lauf nicht bestätigt.
+- Vollständige Bildpipeline nicht nachgewiesen.
+- Cloud-Freigabe muss zur ausdrücklich gewählten Betriebsart passen.
+- `allow_cloud:true` allein beweist keinen tatsächlich ausgeführten Cloud-Aufruf.
 
 ### 3. Unterstützte Betriebsarten
 
-#### 3.1 Vollständig lokal mit NVIDIA-GPU
+#### 3.1 Vollständig lokal
 
-- STT, Ollama und ComfyUI auf demselben Rechner.
-- Hardwareprofile ab 6 GiB VRAM für lokale GPU-Bildgenerierung.
-- Nach Installation und Modellbereitstellung ohne Internet betreibbar.
-- Native Installation und Docker als getrennt zu prüfende Startpfade.
+- Anwendung, STT, Ollama und ComfyUI auf demselben Rechner.
+- Nach Modellbereitstellung ohne Internet nutzbar.
+- Gemeinsame GPU-Ressourcen koordiniert verwenden.
+- Keine stillen Cloud-Fallbacks.
 
-#### 3.2 CPU-/Lowend-Client mit entferntem ComfyUI
+#### 3.2 CPU-/Lowend mit Remote-ComfyUI
 
-- Mikrofon, STT, Anwendung und Ollama auf dem Client.
+- Anwendung, Whisper/Faster-Whisper und Ollama auf dem ThinkPad.
+- Bilderzeugung durch ComfyUI auf einem anderen Rechner.
 - Keine lokale NVIDIA-GPU erforderlich.
-- ComfyUI übernimmt die Bildgenerierung auf einem anderen Rechner.
-- Bestehende Remote-Verbindung erhalten und dokumentieren.
-- LAN-Verbindung und internetabhängige Tunnel unterscheiden.
-- Offline-fähig nur, wenn auch die Verbindung zum Bildrechner ohne Internet funktioniert.
-- Remote-Modellverwaltung darf andere Nutzer des Bildservers nicht unbeabsichtigt beeinflussen.
+- Bestehende Lowend-Option erhalten.
+- LAN und internetabhängige Tunnel unterscheiden.
+- Offline-fähig nur bei einer ohne Internet nutzbaren Verbindung.
+- Remote-Unloads nur bei ausdrücklich vereinbarter Verwaltungshoheit.
 
-#### 3.3 Pollinations als optionales Cloudbackend
+#### 3.3 Pollinations
 
-- Auswahl über `image_backend`.
-- Ausdrückliches Opt-in statt automatischem Cloud-Fallback.
-- Nutzer verwenden eigene Pollinations-Zugangsdaten und eigenes Pollen-Guthaben im Sinne der gewünschten „Bring your own Pollen“-Strategie.
-- Konkretes Authentifizierungsverfahren, API-Vertrag und Nutzungsbedingungen vor Implementierung anhand offizieller Dokumentation prüfen.
-- Internet erforderlich; keine Offline-Zusage für diese Betriebsart.
-- Lokale STT-/LLM-Verarbeitung kann erhalten bleiben; der konkrete ausgehende Bildrequest muss transparent sein.
+- Optionales Bildbackend mit ausdrücklicher Cloud-Freigabe.
+- Eigene Zugangsdaten und eigene Abrechnung nach dem verifizierten Pollinations-Verfahren.
+- Kein automatischer kostenpflichtiger Backendwechsel.
+- Kein Offline-Versprechen.
+- Lokale STT-/LLM-Verarbeitung bleibt möglich.
 
-### 4. Verbindliche Architekturentscheidungen
+### 4. Architektur und Ressourcen
 
-#### 4.1 Bestehende Anwendung zuerst integrieren
+#### 4.1 Bestehende Anwendung integrieren
 
-`app.py` bleibt zunächst der Anwendungseinstieg.
+- `app.py` bleibt Einstiegspunkt.
+- Docker, Makefile und native Startskripte darauf ausrichten.
+- Paketmigration und Frontend-Neuentwicklung sind keine Voraussetzung.
+- SSE erhalten; WebSocket nur bei konkretem Bedarf ergänzen.
 
-Docker Compose, Makefile und native Startskripte werden daran ausgerichtet.
+#### 4.2 Gemeinsame Konfiguration
 
-Eine spätere Paketmigration erfolgt separat mit Regressionstests. Docker-Einführung und Paketmigration werden nicht gleichzeitig umgebaut.
-
-#### 4.2 Eine gemeinsame Konfigurationsquelle
-
-Standardpfade im Container:
+Containerpfade:
 
 - `/app/config/hardware.json`
 - `/app/config/generated.yaml`
@@ -146,361 +149,287 @@ Standardpfade im Container:
 - `/app/outputs`
 - `/app/recordings`
 
-`CONFIG_PATH` ermöglicht abweichende Pfade außerhalb von Docker; bestehende Implementierung und Dokumentation sind abzugleichen.
+Native Pfade separat berücksichtigen. Bestehende Verwendung von `CONFIG_PATH` mit dem Code abgleichen.
 
-Konfigurationsreihenfolge:
-
-1. Verfügbare lokale Hardware erfassen.
-2. Bestehende Nutzerauswahl und Betriebsart berücksichtigen.
-3. Passendes lokales Ressourcenprofil bestimmen.
-4. Explizite Overrides prüfen.
-5. Konfiguration validieren und atomar speichern.
-6. Dieselbe effektive Konfiguration für Downloader und Laufzeit verwenden.
-
-Getrennt abbilden:
+Getrennt konfigurieren:
 
 - Native Installation oder Docker.
-- CPU-/Lowend- oder lokaler GPU-Betrieb.
-- STT-Backend und STT-Gerät.
+- CPU-/Lowend oder lokaler GPU-Betrieb.
+- STT-Backend, Modell und Gerät.
 - Ollama-Endpunkt und Modell.
 - Bildbackend und lokaler oder entfernter Endpunkt.
 - Cloud-Freigabe.
-- Lokale GPU-Auswahl und VRAM-Profil.
+- GPU-Auswahl und Ressourcenprofil.
 
-Secrets gehören weder in Hardwareberichte noch in öffentlich sichtbare Konfiguration oder Statusantworten.
+Anwendung, Downloader und Scheduler verwenden dieselbe effektive Konfiguration.
 
-Fehlende NVML oder eine fehlende NVIDIA-GPU dürfen einen gültigen CPU-/Remote- oder Pollinations-Betrieb nicht verhindern.
+Secrets gehören nicht in Hardwareberichte, öffentlich sichtbare Konfiguration oder Statusantworten.
 
-#### 4.3 Sichere und gerätebezogene VRAM-Nutzung
+#### 4.3 Hardwareprofile
 
-Parallelbetrieb nur freigeben, wenn Modelle, Kontextspeicher, STT, Bildauflösung und Sicherheitsreserve gemeinsam in das Budget der jeweiligen GPU passen.
-
-Bis zur Abnahme gilt bei gemeinsam genutzter lokaler GPU sequenzieller Modellbetrieb.
-
-Keine pauschale globale Sequenzialisierung unabhängiger Rechner:
-
-- Lokale CPU-Arbeit und entferntes ComfyUI teilen kein lokales VRAM-Budget.
-- Für Remote-ComfyUI keine lokalen NVML-Werte als Remote-Messung ausgeben.
-- Remote-Unloads nur bei ausdrücklich vereinbarter Verwaltungshoheit.
-- Pollinations benötigt keine lokale Bildmodell-Entladung.
-
-#### 4.4 Bestehendes SSE bleibt erhalten
-
-SSE bleibt der Kanal für Status, Transkription und Bildereignisse.
-
-WebSocket nur ergänzen, wenn bidirektionales Audio oder eine konkrete neue Funktion es benötigt.
-
-#### 4.5 Modelle werden verifiziert
-
-Modellnamen, Quantisierungen, Quellen, Lizenzen und Backend-Kompatibilität vor Integration prüfen.
-
-Parakeet bleibt ein eigener Integrationspunkt. Bestehendes Whisper/Faster-Whisper bleibt bis zur erfolgreichen Abnahme einer Alternative verfügbar.
-
-#### 4.6 Cloud nur nach bewusster Auswahl
-
-- Vollständig lokaler Modus: keine Cloud-Aufrufe.
-- Remote-ComfyUI: nur der konfigurierte Bildserver; kein stiller Wechsel zu Pollinations.
-- Pollinations: ausdrückliche Cloud-Freigabe und gültige eigene Zugangsdaten erforderlich.
-- Fehler eines Backends lösen keinen kostenpflichtigen Backendwechsel aus.
-- Cloud-Modus und ausgehende Datenarten in Oberfläche und Dokumentation sichtbar machen.
-- Pollinations-Zugangsdaten ausschließlich serverseitig verwenden.
-- Keine fremden Tokens in URLs, Frontend-Code, Logs oder Git aufnehmen.
-
-### 5. Ressourcenprofile und Hardwaregrenzen
-
-#### 5.1 CPU-/Lowend-Profil
-
-Eigenständiger unterstützter Betriebsweg ohne Mindestanforderung von 6 GiB lokalem VRAM.
-
-- Whisper/Faster-Whisper auf CPU.
-- Kleines, auf der jeweiligen Hardware geprüftes Ollama-Modell.
-- Bestehende Lowend-Option erhalten und dokumentieren.
-- Bildgenerierung durch Remote-ComfyUI oder ausdrücklich gewähltes Pollinations.
-- Lokale CPU-Bildgenerierung ist kein zugesichertes Echtzeitprofil.
-- Keine pauschale Latenzzusage.
-
-#### 5.2 Lokale NVIDIA-Profile
-
+- **CPU-/Lowend:** kein lokaler Mindest-VRAM; bestehendes Whisper/Faster-Whisper und kleines Ollama-Modell; Remote-ComfyUI oder Pollinations.
 - **6gb:** 6 bis unter 8 GiB; CPU-STT, kleines quantisiertes LLM, SD1.5+LCM bei 512 px, sequenziell.
-- **8gb:** 8 bis unter 16 GiB; zunächst sichere Basis, größere Modelle und Auflösungen erst nach Messung.
-- **16gb:** 16 bis unter 24 GiB; geprüfte größere Modelle, standardmäßig sequenziell.
-- **24gb:** ab 24 GiB; Qualitätsoptionen und kontrollierter Parallelbetrieb nach Budgetprüfung.
+- **8gb:** 8 bis unter 16 GiB; sichere Basis, Erweiterungen nach Ressourcenprüfung.
+- **16gb:** 16 bis unter 24 GiB; größere kompatible Modelle.
+- **24gb:** ab 24 GiB; Qualitätsoptionen und kontrollierter Parallelbetrieb.
 
-Zusätzliche Regeln:
+Regeln:
 
-- Unter 6 GiB keine automatische Freigabe des lokalen GPU-Bildprofils.
-- CPU-/Remote- und Cloud-Profile bleiben trotzdem nutzbar.
-- Bei mehreren GPUs eine GPU ausdrücklich auswählen; VRAM nicht addieren.
-- Gesamt-VRAM bestimmt Profilfähigkeit, freier VRAM die aktuelle Ausführbarkeit.
-- Desktopbelegung und Spitzen durch gemessene Reserve berücksichtigen.
-- `SLAIDSHOW_TIER=6gb` ermöglicht ein kleineres lokales GPU-Profil.
+- Unter 6 GiB kein automatisches lokales GPU-Bildprofil freigeben.
+- CPU-/Remote und Pollinations bleiben nutzbar.
+- VRAM mehrerer GPUs nicht addieren.
+- Gesamt-VRAM bestimmt Profilfähigkeit, freier VRAM aktuelle Ausführbarkeit.
+- `SLAIDSHOW_TIER=6gb` erlaubt ein kleineres Profil.
 - Zu große Overrides verständlich ablehnen.
-- GPU-Zuordnung zwischen Host, Container und Modellservern dokumentieren.
-- Apple Silicon bleibt außerhalb der ersten NVIDIA-/Docker-Abnahme.
+- Parallelbetrieb auf gemeinsamer GPU nur mit passendem Gesamtbudget.
+- Keine pauschale No-Op-Regel ab einer festen VRAM-Grenze.
+- Lokale CPU-Arbeit und Remote-ComfyUI nicht aufgrund lokaler VRAM-Werte global serialisieren.
+- Keine ungeprüften Latenzversprechen.
 
-Vollbild, Galerie, Stilsteuerung und geplante Overlays bleiben auch für CPU-/Lowend- und 6-GB-Betrieb vorgesehen.
+### 5. M0 — Docker und GPU-Select abschließen
 
-### 6. M0 — Bestand und Startfähigkeit konsolidieren
+**Aktueller Arbeitsschritt und einziger vorläufig verpflichtend testbasiert abzunehmender Meilenstein.**
 
-Ziel: Eindeutiger Ausgangsstand ohne Regression bestehender Betriebsarten.
+Ziel: Docker und gemeinsame Hardware-Konfiguration funktionieren, ohne native Betriebsarten zu beschädigen.
 
-Todos:
+#### 5.1 Repository und Startpfade
 
-- [ ] Repository mit dokumentiertem Dateibaum und Commit `4caa19f` abgleichen.
-- [ ] Bereits getrackte Modelle, Outputs, Caches und Secrets ausschließen beziehungsweise bereinigen.
-- [ ] `app.py`, Imports und Modulpfade konsolidieren.
-- [ ] Vorhandenen Dockerfile-Build prüfen.
-- [ ] Compose, Makefile, `run.sh` und `run.ps1` konsistent ausrichten.
-- [ ] Native CPU-/Lowend-Startpfade unverändert funktionsfähig halten.
+- [ ] Repository-Stand mit Commit `4caa19f` abgleichen.
+- [ ] Bereits getrackte Modelle, Outputs, Caches und Secrets prüfen.
+- [ ] `.gitignore` und `.dockerignore` getrennt prüfen.
+- [ ] `app.py`, Imports und Einstiegspunkte konsolidieren.
+- [ ] Dockerfile und Compose auf tatsächliche Anwendung abstimmen.
+- [ ] Makefile, `run.sh` und `run.ps1` konsistent halten.
+- [ ] Native CPU-/Lowend-Startpfade erhalten.
 - [ ] Tatsächlich verwendete Abhängigkeiten festhalten.
-- [ ] API-Routen, Health-Semantik und SSE-Ereignisse dokumentieren.
-- [ ] Smoke-Tests für App-Start, Health und Status ergänzen.
-- [ ] Ursache für `ollama_ok:false` im zuletzt gezeigten Lauf untersuchen.
 
-Abnahme:
-
-- Native Anwendung und Container starten über dokumentierte Einstiegspunkte.
-- HTTP-Erreichbarkeit und Backend-Bereitschaft sind unterscheidbar.
-- Galerie, Vollbild, Styles und CPU-/Lowend-Option bleiben erreichbar.
-- Testergebnisse von pytest und ruff sind dokumentiert.
-
-### 7. M1 — Hardware, GPU-Auswahl und Konfiguration integrieren
-
-Abhängigkeit: M0.
-
-Vorhandene Grundlage: Hardware-Erkennung, neue Konfigurationsmodule und Tests aus dem aktuellen Commit.
-
-Todos:
+#### 5.2 Hardware und Konfiguration
 
 - [ ] `hardware_detect.py`, `config_generator.py` und `runtime_config.py` abgleichen.
-- [ ] Fehlende NVML, Treiberfehler und fehlende GPU kontrolliert behandeln.
-- [ ] CPU-/Lowend-Modus ohne NVIDIA-Abhängigkeit initialisieren.
-- [ ] GPU-Auswahl auf Host und im Container eindeutig testen.
-- [ ] Tier-Grenzen und `SLAIDSHOW_TIER` validieren.
-- [ ] Betriebsart, Ressourcenprofil und Bildbackend getrennt konfigurieren.
-- [ ] Bestehende Lowend-Einstellungen kontrolliert in die gemeinsame Konfiguration übernehmen.
-- [ ] Konfigurationsschema versionieren und ungültige Kombinationen früh ablehnen.
-- [ ] Persistierte Konfiguration tatsächlich in `app.py` und Downloader verwenden.
-- [ ] Effektive Konfiguration ohne Secrets im Status anzeigen.
-- [ ] Bestehende Tests ausführen und um CPU-/Remote-Fälle erweitern.
+- [ ] Fehlende NVML, Treiberfehler und fehlende NVIDIA-GPU kontrolliert behandeln.
+- [ ] GPU-Auswahl auf Host und im Container eindeutig zuordnen.
+- [ ] Tier-Grenzen und Overrides validieren.
+- [ ] Persistierte Nutzerauswahl respektieren.
+- [ ] Gemeinsame Konfiguration in Anwendung und Downloader verwenden.
+- [ ] CPU-/Remote-Modus ohne lokale GPU initialisieren.
+- [ ] Effektive Konfiguration ohne Secrets anzeigen.
 
-Abnahme:
+#### 5.3 Docker-Laufzeit
 
-- Gemockte Hardwarefälle und Grenzwerte liefern reproduzierbare Ergebnisse.
-- Ein gültiger CPU-/Remote-Modus startet ohne NVIDIA-GPU.
-- 6gb aktiviert die sichere CPU-STT-/Sequenzstrategie.
-- Neustarts respektieren persistierte Nutzerauswahl.
-- Gewählte GPU wird tatsächlich verwendet.
-- Unzulässige Overrides erzeugen klare Fehler.
+- [ ] Ursache für `ollama_ok:false` untersuchen.
+- [ ] Container-, Host- und Remote-Endpunkte korrekt zuordnen.
+- [ ] HTTP-Liveness und Backend-Readiness unterscheiden.
+- [ ] Mikrofonzugriff und Geräteberechtigungen prüfen.
+- [ ] Konfiguration, Modelle und Ausgaben persistent speichern.
+- [ ] Gewählte GPU tatsächlich den vorgesehenen Diensten zuweisen.
+- [ ] Für dieselbe lokale GPU eine sichere sequenzielle Ausführung sicherstellen.
+- [ ] Frontend-Abhängigkeiten für lokalen Offline-Betrieb berücksichtigen.
 
-### 8. M2 — Lokale und entfernte Modellorchestrierung absichern
+#### 5.4 Verpflichtende Abnahme
 
-Abhängigkeit: M1.
+- [ ] Relevante pytest-Tests und ruff erfolgreich ausführen.
+- [ ] Fehlende GPU/NVML und gültigen CPU-/Remote-Betrieb mit Mocks prüfen.
+- [ ] Profilgrenzen, GPU-Auswahl und ungültige Overrides prüfen.
+- [ ] Docker-Build und dokumentierten Containerstart ausführen.
+- [ ] Native Startpfade auf Regressionen prüfen.
+- [ ] Persistenz und Konfigurationsnutzung nach Neustart bestätigen.
+- [ ] Sichere 6-GB-Konfiguration auf passender Referenzhardware bestätigen.
+- [ ] Ergebnisse, Umgebung und verbleibende Grenzen dokumentieren.
+
+Nach Abschluss folgt unmittelbar M1. Recording, große Modelle und weiterführende Scheduler-Optimierungen werden nicht vorgezogen.
+
+### 6. M1 — Pollinations und „Bring your own Pollen“
+
+**Nächster priorisierter Implementierungspunkt nach M0.**
+
+Ziel: Bestehendes Pollinations-Backend erhalten und um eine sichere Nutzung eigener Zugangsdaten und eigener Abrechnung ergänzen.
 
 Todos:
 
-- [ ] Scheduler in die LLM-/Bildpipeline integrieren.
-- [ ] Gemeinsame lokale GPU-Zugriffe über eine gemeinsame Sperre koordinieren.
-- [ ] Ollama serverseitig entladen.
-- [ ] Lokales ComfyUI über unterstützte Schnittstellen freigeben.
-- [ ] Entladung mit Timeout und gemessener Speicherfreigabe bestätigen.
-- [ ] Abbrüche und Ausfälle mit garantiertem Cleanup behandeln.
-- [ ] GPU-STT budgetieren oder auf CPU zurückfallen.
-- [ ] Remote-ComfyUI ohne Zugriff auf dessen NVML nutzbar halten.
-- [ ] Unload-Rechte bei gemeinsam genutztem Remote-Server ausdrücklich regeln.
-- [ ] Pollinations vom lokalen Bild-VRAM-Scheduling ausnehmen.
-- [ ] Zustände, Wartezeiten und Fehler sichtbar machen.
-
-Lokale sequenzielle Pipeline:
-
-Sprache → CPU-STT → LLM → bestätigtes LLM-Unload → ComfyUI → bestätigtes Bildmodell-Unload → Ausgabe.
-
-Abnahme:
-
-- Konkurrenz, Timeout, Abbruch und Serverausfall sind getestet.
-- Fehlgeschlagenes lokales Unload blockiert unsichere Folgearbeit.
-- Remote-Betrieb wird nicht durch fehlende lokale GPU-Messwerte blockiert.
-- Das letzte gültige Bild bleibt bei Fehlern sichtbar.
-
-### 9. M3 — Reproduzierbare Installation und Backend-Auswahl
-
-Abhängigkeit: M1; M2 für lokale gemeinsame GPU-Nutzung.
-
-#### 9.1 Native Installation und Docker
-
-- [ ] Docker-Build und Startreihenfolge abnehmen.
-- [ ] Native Installation auf X260 und E14 dokumentieren.
-- [ ] Container-zu-Host- und Container-zu-Remote-Verbindungen dokumentieren.
-- [ ] Mikrofonzugriff und Geräteberechtigungen für unterstützte Startpfade prüfen.
-- [ ] Ollama und gewähltes Bildbackend zuverlässig erreichbar machen.
-- [ ] Service-Readiness von reiner HTTP-Liveness unterscheiden.
-- [ ] Konfiguration, Modelle, Ausgaben und Recordings persistent speichern.
-- [ ] Geprüfte Container-Versionen verwenden.
-- [ ] Frontend-Abhängigkeiten für lokalen Betrieb lokal ausliefern.
-
-#### 9.2 Modellbereitstellung
-
-- [ ] Modellartefakte, Quellen und Lizenzen verifizieren.
-- [ ] Nur lokal benötigte Modelle herunterladen.
-- [ ] Bei Remote-ComfyUI oder Pollinations keine lokalen Bildgewichte erzwingen.
-- [ ] Unvollständige Downloads erkennen.
-- [ ] Prüfsummen oder gepinnte Revisionen nutzen.
-- [ ] Wiederholte Installation ohne unnötigen erneuten Download ermöglichen.
-
-#### 9.3 Pollinations und „Bring your own Pollen“
-
 - [ ] Offizielle Dokumentation zu API, Authentifizierung, Pollen und Nutzungsbedingungen prüfen.
-- [ ] Bestehenden Pollinations-Backendpfad mit dem verifizierten API-Vertrag abgleichen.
-- [ ] Eigene Zugangsdaten bei Auswahl von Pollinations sicher konfigurierbar machen.
-- [ ] Eigene Nutzung beziehungsweise Abrechnung transparent erläutern.
+- [ ] Bestehenden Backendpfad mit dem tatsächlichen API-Vertrag abgleichen.
+- [ ] Pollinations als `image_backend` ausdrücklich auswählbar halten.
+- [ ] Eigene Zugangsdaten nach dem verifizierten Verfahren serverseitig konfigurierbar machen.
+- [ ] „Bring your own Pollen“ in Oberfläche und Dokumentation erklären.
+- [ ] Cloud-Freigabe und Backend-Auswahl getrennt validieren.
 - [ ] Fehlende oder ungültige Zugangsdaten verständlich melden.
-- [ ] Guthaben-/Abrechnungsfehler, Rate Limits, Timeouts und Provider-Ausfälle behandeln.
-- [ ] Budget-/Nutzungsanzeigen nur auf Grundlage tatsächlich unterstützter API-Daten anbieten.
-- [ ] Keine erfundenen Preise oder garantierten Kosten pro Bild anzeigen.
-- [ ] Retry-Regeln auf mögliche zusätzliche Kosten oder Doppelaufträge prüfen.
-- [ ] Keine stillen Wiederholungen oder Backendwechsel mit unklaren Kostenfolgen.
-- [ ] Zugangsdaten weder an Browser noch an Status- oder Logausgaben weitergeben.
-- [ ] Übertragene Prompts, Parameter und gegebenenfalls Referenzbilder transparent ausweisen.
-- [ ] Mocktests ohne echte Zugangsdaten und ohne kostenpflichtige Requests ergänzen.
+- [ ] Guthaben-/Abrechnungsfehler, Rate Limits und Timeouts behandeln.
+- [ ] Keine Zugangsdaten in Browserantworten, URLs, Logs oder Git ausgeben.
+- [ ] Übertragene Prompts, Parameter und mögliche Referenzbilder transparent ausweisen.
+- [ ] Keine lokalen Bildgewichte für Pollinations herunterladen.
+- [ ] Pollinations vom lokalen Bild-VRAM-Scheduling ausnehmen.
+- [ ] Retry-Verhalten auf mögliche Doppelaufträge und Mehrkosten abstimmen.
+- [ ] Keine automatischen kostenpflichtigen Backendwechsel ausführen.
+- [ ] Nutzungs- und Budgetanzeigen nur bei tatsächlich unterstützter API anbieten.
 
-Abnahme:
+Vorläufiger Abschluss:
 
-- Lokaler Modus funktioniert nach initialer Installation ohne Internet.
-- CPU-/Remote-Modus benötigt keine lokale NVIDIA-GPU.
-- Pollinations funktioniert nach ausdrücklicher Auswahl mit eigenen gültigen Zugangsdaten.
-- Ohne Cloud-Freigabe werden keine Pollinations-Requests ausgelöst.
-- Backendfehler führen nicht zu einem stillen Cloud-Fallback.
-- Gemockter Installations-E2E-Test benötigt weder GPU noch Internet.
+- Backend-Auswahl, serverseitige Zugangsdatenverwaltung und Fehlerpfade sind integriert.
+- Dokumentation entspricht der implementierten Schnittstelle.
+- Tatsächliche Prüfungen und noch ungeprüfte Pfade sind benannt.
+- Keine verpflichtende Testabnahme als Voraussetzung für M2.
+- Reale kostenpflichtige Requests nur nach ausdrücklicher Freigabe.
 
-### 10. M4 — Demo-Release und Show-Stabilität
+### 7. M2 — Parakeet als zusätzliches STT-Backend
 
-Abhängigkeit: M3 für die jeweils geprüfte Betriebsart.
+**Unmittelbar nach der Pollinations-Integration priorisiert; nicht mehr zurückgestellt.**
+
+Ziel: Parakeet TDT 0.6B v3 als zusätzliches lokales STT-Backend einbinden, ohne Whisper/Faster-Whisper zu entfernen.
+
+Todos:
+
+- [ ] Modellquelle, Lizenz, unterstützte Sprachen und Laufzeitvoraussetzungen verifizieren.
+- [ ] Tatsächlich kompatiblen Inferenzpfad ermitteln.
+- [ ] Parakeet nicht ungeprüft als Faster-Whisper-kompatibel behandeln.
+- [ ] Notwendige neue Abhängigkeiten vor Umsetzung ausdrücklich entscheiden.
+- [ ] Bestehende STT-Schnittstelle in `transcription_backend.py` erhalten.
+- [ ] Backend-Auswahl in gemeinsamer Konfiguration abbilden.
+- [ ] Modellbereitstellung in den Downloader integrieren.
+- [ ] Parakeet nur bei entsprechender Auswahl herunterladen.
+- [ ] Modelle, Cache und Ladeverhalten für native Installation und Docker berücksichtigen.
+- [ ] Audioformat, Samplingrate, VAD-Anbindung und Transkriptionsausgabe abstimmen.
+- [ ] Ressourcenbedarf für CPU und GPU ermitteln und transparent dokumentieren.
+- [ ] GPU-STT in das lokale VRAM-Budget aufnehmen.
+- [ ] Auf 6 GB GPU-STT nicht ungeprüft zusätzlich zu LLM und Bildmodell aktivieren.
+- [ ] Falls Parakeet im CPU-/Lowend-Profil ungeeignet ist, Whisper/Faster-Whisper als ressourcenschonende Variante erhalten.
+- [ ] Fehlende Modelle, inkompatible Laufzeit und Initialisierungsfehler verständlich melden.
+- [ ] Keine Cloud-STT als stillen Fallback ergänzen.
+
+Vorläufiger Abschluss:
+
+- Parakeet ist über die gemeinsame STT-Schnittstelle auswählbar.
+- Bestehende Whisper-/Faster-Whisper-Betriebsarten bleiben erhalten.
+- Unterstützte Geräte und Ressourcenbeschränkungen sind dokumentiert.
+- Ungeprüfte Hardwarepfade sind ausdrücklich benannt.
+- Keine verpflichtende Testabnahme als Voraussetzung für Folgearbeiten.
+
+### 8. M3 — Pipeline und Installation weiter stabilisieren
+
+Folgt auf M1 und M2.
+
+Todos:
+
+- [ ] Scheduler und gemeinsame GPU-Sperren vervollständigen.
+- [ ] Ollama und lokales ComfyUI über unterstützte Schnittstellen entladen.
+- [ ] Speicherfreigabe mit Timeout bestätigen.
+- [ ] Abbruch, Shutdown und Ausfälle mit Cleanup behandeln.
+- [ ] Remote-Unload nur bei entsprechender Verwaltungshoheit zulassen.
+- [ ] Fehlgeschlagene lokale Entladung vor unsicherer Folgearbeit behandeln.
+- [ ] Native Installation auf X260 und E14 dokumentieren.
+- [ ] Modellquellen und Lizenzen dokumentieren.
+- [ ] Unvollständige Downloads erkennen.
+- [ ] Prüfsummen oder gepinnte Revisionen verwenden, soweit verfügbar.
+- [ ] Nur für die gewählte Betriebsart benötigte Modelle bereitstellen.
+- [ ] Installations- und Update-Anleitung vervollständigen.
+
+Prüfungen können bedarfsbezogen ergänzt werden; vorerst keine verpflichtende Testabnahme.
+
+### 9. M4 — Demo-Release und Show-Stabilität
 
 Todos:
 
 - [ ] Begrenzte Queue und Überlaststrategie implementieren.
-- [ ] Veraltete Generierungen kontrolliert verwerfen.
-- [ ] Ungültige Bilder nicht anzeigen.
+- [ ] Veraltete Aufträge kontrolliert verwerfen.
+- [ ] Fehlerhafte Bilder nicht anzeigen.
+- [ ] Letztes gültiges Bild bei Backendfehlern erhalten.
 - [ ] Echten Crossfade ergänzen.
-- [ ] SSE-Wiederverbindung und Zustandsabgleich absichern.
-- [ ] Workflow-Presets und Backend-spezifische Style-Grenzen dokumentieren.
-- [ ] Titel und Beschriftungen als lokale Overlays anbieten.
-- [ ] STT-, LLM-, Netzwerk-, Lade-, Render- und Gesamtzeiten getrennt messen.
-- [ ] Median, hohe Perzentile, Fehlerrate und Ressourcenverbrauch dokumentieren.
-- [ ] Reproduzierbare Demo-Show erstellen.
+- [ ] SSE-Wiederverbindung und Zustandsabgleich verbessern.
+- [ ] Workflow-Presets und Style-Grenzen dokumentieren.
+- [ ] Lokale Titel und Text-Overlays ergänzen.
+- [ ] STT-, LLM-, Netzwerk-, Lade-, Render- und Gesamtzeit erfassen.
+- [ ] Demo für lokale GPU, CPU-/Remote und Pollinations vorbereiten.
 
-Abnahme je Betriebsart:
+Optionale spätere Qualitätsnachweise:
 
-- Mindestens 30 Minuten auf einer 6-GB-Referenzkarte.
-- Mindestens 30 Minuten CPU-/Lowend-Betrieb auf X260 oder E14 mit Remote-ComfyUI.
-- Regressionstest auf dem jeweils anderen ThinkPad.
-- Pollinations-Funktionstest mit ausdrücklich freigegebenem Testbudget.
-- Keine unkontrollierte Queue oder fehlerbedingter Blackout.
-- Netzwerk- und Backendausfälle sind sichtbar und kontrolliert behandelbar.
+- Längere Live-Läufe auf 6-GB-Hardware und ThinkPads.
+- Messung von Latenzen, Fehlerrate und Ressourcenverbrauch.
+- Kontrollierte Ausfallversuche.
 
-Latenzangaben immer mit Hardware, Modellen, Backend und Einstellungen veröffentlichen. Die bisherigen 0,8 bis 2,5 Sekunden sind keine bestätigte Produkteigenschaft.
+Die bisherigen 0,8 bis 2,5 Sekunden sind keine bestätigte Produkteigenschaft.
 
-### 11. M5 — Recording und Export
+### 10. M5 — Recording und Export
 
-Abhängigkeit: M4.
-
-- [ ] Recording-Verfahren und benötigte Abhängigkeiten gesondert entscheiden.
+- [ ] Recording-Verfahren und Abhängigkeiten gesondert entscheiden.
 - [ ] Start, Stopp und Aufzeichnungsstatus integrieren.
 - [ ] Bildwechsel, Overlays und optionales Audio synchron erfassen.
 - [ ] MP4-/WebM-Ausgabe gemäß gewähltem Verfahren unterstützen.
-- [ ] Speicherplatzmangel und Abbrüche behandeln.
+- [ ] Speicherplatzmangel und Abbruch behandeln.
 - [ ] Lokale Ablage und Löschfunktion anbieten.
-- [ ] Zusatzlast auf CPU-/Lowend- und 6-GB-Systemen messen.
+- [ ] Ressourcenschonende Variante für CPU-/Lowend und 6 GB vorsehen.
+- [ ] Keine zusätzlichen Cloud-Aufrufe ohne Freigabe erzeugen.
 
-Abnahme:
-
-- Export in üblichen Playern abspielbar.
-- Recording blockiert die Live-Ausgabe nicht.
-- Ressourcenschonende Variante für schwache Clients dokumentiert.
-- Recording erzeugt keine zusätzlichen Cloud-Aufrufe ohne ausdrückliche Freigabe.
-
-### 12. M6 — Moderation und Team-Betrieb
-
-Abhängigkeit: M4; Recording optional.
+### 11. M6 — Moderation und Team-Betrieb
 
 Reihenfolge:
 
 1. Separate Moderator- und Display-Ansicht.
-2. Skript-Modus mit manuellen und automatischen Bildtriggern.
-3. Multi-Speaker mit eindeutiger Quellen- und Rollenzuordnung.
+2. Skript-Modus mit manuellen und automatischen Triggern.
+3. Multi-Speaker mit eindeutiger Quellenzuordnung.
 4. Versionierte externe API und Ereignisverträge.
 5. Optionale Publikumsinteraktion.
 
-Abnahme:
+Todos:
 
-- Konsistente Sitzungszustände.
-- Nachvollziehbare Sprecherwechsel.
-- Mehrere Clients umgehen weder Queue noch Scheduler.
-- Pollinations-Zugangsdaten und Nutzung sind eindeutig einer Konfiguration beziehungsweise Sitzung zugeordnet.
-- Netzwerkunterbrechungen zerstören nicht die gesamte Sitzung.
+- [ ] Sitzungszustände zwischen Clients abstimmen.
+- [ ] Sprecherwechsel nachvollziehbar machen.
+- [ ] Queue und Scheduler zentral durchsetzen.
+- [ ] Zugangsdaten und Nutzung eindeutig zuordnen.
+- [ ] Wiederverbindung nach Netzwerkunterbrechungen ermöglichen.
 
-### 13. M7 — Enterprise und Pilotbetrieb
-
-Abhängigkeit: stabiler Team-Betrieb und konkrete Pilotanforderungen.
+### 12. M7 — Enterprise und Pilotbetrieb
 
 - [ ] Sitzungs- und Benutzerisolierung.
 - [ ] Rollen, Berechtigungen und Authentifizierung.
-- [ ] SSO nach gesonderter Architekturentscheidung.
-- [ ] Audit-Log mit konfigurierbarer Aufbewahrung.
+- [ ] SSO nach Architekturentscheidung.
+- [ ] Audit-Log und Aufbewahrung.
 - [ ] Verwaltete Modell-, Workflow- und Backend-Freigaben.
-- [ ] Administrativ erzwungener lokaler Modus ohne Cloudzugriff.
-- [ ] Sichere Verwaltung und Rotation eigener Provider-Zugangsdaten.
-- [ ] On-Premise-Deployment, Updates, Backup und Wiederherstellung.
-- [ ] Air-Gapped-Anleitung für vollständig lokale Installation.
-- [ ] Pilotabnahme für Bildungs- und kreative Live-Anwendungsfälle.
+- [ ] Administrativ erzwungener lokaler Modus.
+- [ ] Sichere Verwaltung und Rotation von Provider-Zugangsdaten.
+- [ ] On-Premise-Deployment und Updates.
+- [ ] Backup und Wiederherstellung.
+- [ ] Air-Gapped-Anleitung.
+- [ ] Pilotbetrieb für Bildungs- und kreative Live-Anwendungen.
 
-Lokaler Betrieb allein ist keine Datenschutz-Zertifizierung. Remote-, Cloud- und Air-Gapped-Aussagen benötigen jeweils passende technische und organisatorische Nachweise.
+Lokaler Betrieb allein ist keine Datenschutz-Zertifizierung. Compliance- und Air-Gapped-Aussagen benötigen eigene Nachweise.
 
-### 14. Zurückgestellte Erweiterungen
+### 13. Zurückgestellte Erweiterungen
 
-Diese Themen blockieren den ersten stabilen Release nicht:
-
-- Parakeet als zusätzlicher STT-Backendpfad.
 - Große LLMs und FLUX-basierte Qualitätsprofile.
 - Automatische Wahl mehrerer Bildmodelle.
 - Generierter Text direkt im Bild.
-- Pauschaler Wechsel von SSE zu WebSocket.
+- Pauschaler Wechsel zu WebSocket.
 - Vollständige Frontend-Neuentwicklung.
 - Native Desktop-App.
 - Apple-Silicon-Unterstützung.
 - Workflow-Marktplatz und Lizenzierung.
 
-Nicht zurückgestellt werden der bestehende CPU-/Lowend-Betrieb, Remote-ComfyUI sowie die Absicherung des optionalen Pollinations-Backends einschließlich eigener Zugangsdaten.
+Pollinations und Parakeet sind ausdrücklich nicht zurückgestellt.
 
-### 15. Definition of Done
+### 14. Vorläufige Abschlussregeln
 
-Ein Meilenstein ist abgeschlossen, wenn:
+Für M0 gilt die verpflichtende Testabnahme aus Abschnitt 5.4.
 
-- Implementierung und Laufzeitintegration vollständig sind.
-- Relevante Fehlerfälle getestet sind.
-- pytest und ruff erfolgreich laufen.
-- Betroffene Betriebsarten auf Referenzsystemen geprüft wurden.
-- Native Startpfade nicht durch Docker-Änderungen beschädigt werden.
-- Dokumentation und Konfiguration dem Code entsprechen.
-- Secrets nicht in Git, Browserantworten oder Logs gelangen.
-- Keine unbemerkte Cloud-Abhängigkeit entsteht.
-- CPU-/Lowend- und 6-GB-Grenzen klar dokumentiert sind.
-- Kostenpflichtige Requests nur nach ausdrücklicher Auswahl erfolgen.
-- Reproduzierbare Abnahmeschritte und Ergebnisse vorliegen.
+Für M1 und folgende gilt vorerst:
 
-### 16. Unmittelbar nächste Aufgaben nach `4caa19f`
+- Vereinbarter Umfang integriert.
+- Bestehende Betriebsarten bewusst berücksichtigt.
+- Konfiguration und Dokumentation angepasst.
+- Bekannte Grenzen und offene Punkte benannt.
+- Keine erfundenen Test- oder Hardwareergebnisse.
+- Keine unbeabsichtigten Cloud-Aufrufe oder Kosten.
+- Keine verpflichtende Testabnahme vor dem nächsten Arbeitsschritt.
 
-1. Repository-Hygiene, vorhandene Tests und ruff prüfen.
-2. `Dockerfile`, `docker-compose.yml` und `runtime_config.py` gegen native Startpfade abgleichen.
-3. Ursache für `ollama_ok:false` untersuchen.
-4. Betriebsarten ausdrücklich unterscheiden: vollständig lokal, CPU-/Remote-ComfyUI, Pollinations.
-5. Bestehende Lowend-Einstellungen und Backend-Auswahl in die gemeinsame Konfiguration integrieren.
-6. GPU-Auswahl, Tier-Grenzen und Overrides auf Host und im Container testen.
-7. Lokalen Scheduler mit bestätigten serverseitigen Unloads absichern.
-8. Pollinations-API und „Bring your own Pollen“-Umsetzung verifizieren und integrieren.
-9. Native CPU-/Remote-Installation und 6-GB-Docker-Installation getrennt abnehmen.
-10. Erst danach Recording, Team-Funktionen und große Qualitätsmodelle ausbauen.
+Eine spätere Verschärfung der Qualitäts- und Release-Gates wird separat entschieden.
+
+### 15. Unmittelbar nächste Aufgaben
+
+1. Dockerfile, Compose und Laufzeitkonfiguration gegen native Startpfade abgleichen.
+2. Ollama-Erreichbarkeit, GPU-Zuordnung und Konfigurationsnutzung schließen.
+3. Docker/GPU-Schritt durch die vorgesehenen Tests und Laufnachweise abnehmen.
+4. Pollinations einschließlich „Bring your own Pollen“ integrieren.
+5. Parakeet als zusätzliches lokales STT-Backend einbinden.
+6. Anschließend Pipeline-Stabilität und weitere Produktfunktionen ausbauen.
 
 Release-Reihenfolge:
 
-Bestehende Betriebsarten erhalten → gemeinsame Konfiguration und GPU-Auswahl absichern → lokale und entfernte Pipeline stabilisieren → native Installation und Docker reproduzierbar machen → optionales Pollinations mit eigenen Zugangsdaten absichern → Live-Demo abnehmen → Recording → Team → Enterprise.
+Docker/GPU integrieren und testbasiert abnehmen → Pollinations/BYOP → Parakeet → Pipeline und Installation stabilisieren → Live-Demo → Recording → Team → Enterprise.
