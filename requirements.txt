@@ -1,58 +1,67 @@
-# Core web framework + server
+# requirements.txt
+# Python 3.12; shared application dependencies for all VRAM tiers.
+# Ollama and ComfyUI run as separate services.
+# This is a direct-dependency manifest, not a transitive lockfile.
+
+# Core web framework and server
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 
-# HTTP client (async) + concurrency foundation
+# Async HTTP and concurrency
 httpx[http2]==0.27.2
-anyio>=3.7.1
+anyio>=3.7.1,<5
 
-# Data models / validation
+# Validation and typing
 pydantic>=2,<3
-typing-extensions>=4.9.0
+typing-extensions>=4.9.0,<5
 
-# Audio + DSP helpers
-# Align with working local environment: numpy 2.5.0 confirmed OK with cv2 4.13.0 and skimage 0.26.0
+# Hardware detection and YAML configuration
+# pynvml is the explicitly selected project dependency.
+# Recent pynvml releases install nvidia-ml-py transitively.
+pynvml==13.0.1
+PyYAML>=6.0.2,<7
+
+# Audio and numerical processing
+# Preserve the NumPy version reported as working locally.
 numpy==2.5.0
 sounddevice==0.4.7
-# Optional: Voice activity detection (falls genutzt)
-# webrtcvad==2.0.10
 
-# Whisper.cpp Python bindings (lokale Echtzeit-Transkription)
-pywhispercpp>=1.1.0
-
-# Fast Whisper transcription backend (CTranslate2-based; CPU fallback and optional CUDA support)
+# Existing local transcription backends
+# CPU execution is the baseline for the 6 GB profile.
+# GPU execution requires a separately validated CUDA runtime.
+# Parakeet is not implemented by installing faster-whisper.
+pywhispercpp>=1.1.0,<2
 faster-whisper==1.2.1
 
 # Environment handling
 python-dotenv==1.0.1
 
-# File uploads (FastAPI FormData)
-python-multipart>=0.0.9
+# Multipart uploads
+python-multipart>=0.0.18,<1
 
-# Image handling (Format-Erkennung für Upload-Fallback)
-pillow>=10.3.0
+# Image handling and asynchronous file access
+pillow>=10.3.0,<13
+aiofiles>=23.2.1,<26
 
-# Optional async file I/O (für StaticFiles/Downloads nützlich)
-aiofiles>=23.2.1
+# JSON serialization
+orjson>=3.10.0,<4
 
-# Schneller JSON-Parser (optional, kann von FastAPI genutzt werden)
-orjson>=3.10.0
+# Linux/macOS event loop; also selected by uvicorn[standard]
+uvloop>=0.19.0,<1; platform_system != "Windows"
 
-# Performance: schneller Event-Loop (Linux/macOS), nicht für Windows
-uvloop>=0.19.0; platform_system!="Windows"
-
-# Build tooling (manche Umgebungen benötigen explizit aktuelle Versionen)
-setuptools>=68
-wheel>=0.41
-
-# Optional: Requests, falls externe Skripte/Libs es voraussetzen
-# requests>=2.32.0
-
-# Local image style analysis stack
-# Headless OpenCV build for servers (no GUI deps). If you need GUI windows, switch to opencv-python==4.13.0.0
-opencv-python-headless==4.13.0.0
-# Image processing utilities (Canny, color conversions, etc.)
+# Local image style analysis
+# Install only one OpenCV distribution in this environment.
+opencv-python-headless==4.13.0.92
 scikit-image==0.26.0
-# Clustering quality metric (silhouette_score) used by local style analysis
 scikit-learn==1.5.2
-# Note: numpy pinned above to 2.5.0 to match tested combo with cv2/skimage
+
+# Native-extension build tooling
+# Kept for compatibility with the existing Docker build.
+setuptools>=68,<83
+wheel>=0.41,<1
+
+# Optional VAD remains disabled until explicitly integrated.
+# webrtcvad==2.0.10
+
+# Development tools such as pytest and ruff belong in a separate
+# development dependency manifest, not in the runtime image.

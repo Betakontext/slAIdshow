@@ -1,76 +1,117 @@
 # model_downloader.py
-import yaml
-import subprocess
+"""Validate download policy without fetching unapproved model artifacts.
+
+Schema version 1 permits only disabled downloads. Supporting real downloads
+requires an explicitly validated artifact contract and a schema extension.
+
+This module performs no filesystem, network, or subprocess operations at import.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
 from pathlib import Path
+from typing import Any
 
-CONFIG_PATH = Path("/app/config/generated.yaml")
-MODELS_DIR = Path("/app/models")
+from runtime_config import (
+    RuntimeConfigurationError,
+    load_config,
+    validate_config,
+)
+
+LOGGER = logging.getLogger(__name__)
 
 
-def download_models(config: dict) -> None:
-    """Lädt basierend auf Config die benötigten Modelle."""
+class ModelDownloadError(RuntimeError):
+    """Report invalid policy or unsupported artifact downloads."""
 
-    # 1. Ollama-Modell
-    llm_model = config["llm"]["model"]
-    print(f"📥 Lade Ollama-Modell: {llm_model}")
-    subprocess.run(
-        ["ollama", "pull", llm_model],
-        check=True, capture_output=True
-    )
 
-    # 2. STT-Modell (faster-whisper / parakeet)
-    stt_model = config["stt"]["model"]
-    stt_dir = MODELS_DIR / "stt" / stt_model
-    if not stt_dir.exists():
-        print(f"📥 Lade STT-Modell: {stt_model}")
-        subprocess.run(
-            ["huggingface-cli", "download", stt_model, "--local-dir", str(stt_dir)],
-            check=True, capture_output=True
+def download_models(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate the complete configuration before considering any download.
+
+    Return a policy result, not a claim that models exist or are usable.
+    Never invoke a model server, shell command, or download client.
+    """
+    try:
+        validated = validate_config(config)
+    except (RuntimeConfigurationError, RecursionError) as exc:
+        raise ModelDownloadError(
+            "Download-Konfiguration ist ungültig oder nicht freigegeben; "
+            "mit config_generator.py neu erzeugen."
+        ) from exc
+
+    downloads = validated["downloads"]
+
+    # Fail closed if a future schema enables downloads without implementing
+    # verified artifacts, pinned sources, licenses, and atomic persistence here.
+    if downloads["enabled"] is not False:
+        raise ModelDownloadError(
+            "Aktive Downloads werden von dieser Downloader-Version "
+            "nicht unterstützt. Es wurden keine Downloads gestartet."
         )
 
-    # 3. ComfyUI-Modelle
-    image_cfg = config["image"]
-    comfy_models = MODELS_DIR / "comfyui"
+    if downloads["artifacts"] != []:
+        raise ModelDownloadError(
+            "Deaktivierte Downloads dürfen keine Artefakte enthalten."
+        )
 
-    # Base model
-    base = image_cfg["base_model"]
-    base_path = comfy_models / "checkpoints" / base
-    if not base_path.exists():
-        print(f"📥 Lade ComfyUI Base: {base}")
-        _download_comfyui_model(base, "checkpoints")
-
-    # LoRA (falls vorhanden)
-    lora = image_cfg.get("lora")
-    if lora:
-        lora_path = comfy_models / "loras" / lora
-        if not lora_path.exists():
-            print(f"📥 Lade ComfyUI LoRA: {lora}")
-            _download_comfyui_model(lora, "loras")
-
-    # 4. Optional: 2. Bildmodell für in_image_text (nur bei 24GB+)
-    if config["features"].get("in_image_text"):
-        text_model = "qwen_image_2_1_fp8.safetensors"
-        text_path = comfy_models / "checkpoints" / text_model
-        if not text_path.exists():
-            print(f"📥 Lade Text-Modell: {text_model}")
-            _download_comfyui_model(text_model, "checkpoints")
-
-    print("✅ Alle Modelle geladen.")
-
-
-def _download_comfyui_model(filename: str, subfolder: str) -> None:
-    """Download via huggingface-cli (URL je nach Modell)."""
-    url_map = {
-        "sd_15.safetensors": "stabilityai/sd-base-v1-5",
-        "lcm-lora-sdv1-5.safetensors": "latent-consistency/lcm-lora-sdv1-5",
-        "flux2_klein_4b_fp8.safetensors": "black-forest-labs/flux2-klein-4b",
-        "qwen_image_2_1_fp8.safetensors": "Qwen/Qwen-Image-2.1",
-    }
-    repo = url_map.get(filename, filename)
-    target = MODELS_DIR / "comfyui" / subfolder
-    target.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["huggingface-cli", "download", repo, filename,
-         "--local-dir", str(target)],
-        check=True, capture_output=True
+    LOGGER.info(
+        "Downloads für Profil %s deaktiviert; keine Modelle geladen.",
+        validated["tier"],
     )
+
+    return {
+        "tier": validated["tier"],
+        "downloads_enabled": False,
+        "outcome": "skipped_by_policy",
+        "reason": downloads["reason"],
+        "downloaded_artifacts": [],
+        "model_presence_checked": False,
+        "models_ready": False,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Load persisted configuration and report the enforced download policy."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Prüft die slAIdshow-Downloadrichtlinie. "
+            "Schema-Version 1 erlaubt keine Modell-Downloads."
+        )
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help=(
+            "YAML-Pfad; alternativ CONFIG_PATH "
+            "oder /app/config/generated.yaml."
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        configuration = load_config(args.config)
+        result = download_models(configuration.as_dict())
+    except (RuntimeConfigurationError, ModelDownloadError) as exc:
+        print(f"Fehler: {exc}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(
+        "Downloads sind gemäß Konfiguration deaktiviert. "
+        "Es wurden keine Netzwerkzugriffe oder Download-Befehle ausgeführt. "
+        "Modellverfügbarkeit und Show-Startfähigkeit sind nicht bestätigt.",
+        file=sys.stderr,
+    )
+
+    # A disabled download policy was successfully enforced. This exit status
+    # must not be interpreted as backend or model readiness.
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+

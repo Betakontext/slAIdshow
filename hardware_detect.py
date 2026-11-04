@@ -1,347 +1,316 @@
 # hardware_detect.py
 
+"""Discover one NVIDIA GPU and atomically persist its hardware profile."""
 
+from __future__ import annotations
+
+import argparse
+import ctypes
+import importlib
 import json
-import subprocess
+import logging
+import os
 import platform
+import re
+import sys
+import tempfile
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from typing import Any
 
 OUTPUT_PATH = Path("/app/config/hardware.json")
+_GIB = 1024**3
+LOGGER = logging.getLogger(__name__)
 
 
-@dataclass
+class HardwareDetectionError(RuntimeError):
+    """Report unavailable hardware or unsuccessful persistence."""
+
+
+@dataclass(frozen=True)
 class HardwareProfile:
+    """Describe one GPU without aggregating memory across devices."""
+
     vram_gb: float
     gpu_name: str
     gpu_count: int
     cpu_ram_gb: float
     os: str
     is_apple_silicon: bool
-
-
-def detect_nvidia() -> list[HardwareProfile]:
-    """Via nvidia-ml-py (import: pynvml) – die aktuell gepflegte Library."""
-    import pynvml
-    pynvml.nvmlInit()
-    profiles = []
-    try:
-        count = pynvml.nvmlDeviceGetCount()
-        for i in range(count):
-            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            name = pynvml.nvmlDeviceGetName(handle).decode()
-            profiles.append(HardwareProfile(
-                vram_gb=mem.total / (1024**3),
-                gpu_name=name,
-                gpu_count=count,
-                cpu_ram_gb=0,  # separat ermitteln
-                os=platform.system(),
-                is_apple_silicon=False,
-            ))
-    finally:
-        pynvml.nvmlShutdown()
-    return profiles
+    gpu_index: int
+    gpu_uuid: str
+    vram_total_bytes: int
+    vram_free_bytes: int
+    vram_used_bytes: int
 
 
 def detect_cpu_ram() -> float:
-    """System-RAM in GB (via /proc/meminfo oder psutil)."""
+    """Return physical RAM in GiB, or zero when unavailable."""
     try:
-        with open("/proc/meminfo") as f:
-            for line in f:
+        with open("/proc/meminfo", encoding="ascii") as handle:
+            for line in handle:
                 if line.startswith("MemTotal:"):
-                    return int(line.split()[1]) / (1024**2)
-    except FileNotFoundError:
+                    return int(line.split()[1]) * 1024 / _GIB
+    except (OSError, ValueError, IndexError):
         pass
-    # Fallback: psutil
-    import psutil
-    return psutil.virtual_memory().total / (1024**3)
+
+    try:
+        return (
+            os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / _GIB
+        )
+    except (AttributeError, OSError, ValueError):
+        pass
+
+    if platform.system() == "Windows":
+
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("length", ctypes.c_uint32),
+                ("load", ctypes.c_uint32),
+                ("total_physical", ctypes.c_uint64),
+                ("available_physical", ctypes.c_uint64),
+                ("total_page_file", ctypes.c_uint64),
+                ("available_page_file", ctypes.c_uint64),
+                ("total_virtual", ctypes.c_uint64),
+                ("available_virtual", ctypes.c_uint64),
+                ("available_extended_virtual", ctypes.c_uint64),
+            ]
+
+        try:
+            state = MemoryStatus()
+            state.length = ctypes.sizeof(state)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(state)):
+                return state.total_physical / _GIB
+        except (AttributeError, OSError):
+            pass
+
+    return 0.0
 
 
 def detect_apple_silicon() -> bool:
-    """Macs erkennen (keine NVIDIA-GPU, aber unified memory)."""
-    if platform.system() != "Darwin":
-        return False
+    """Identify Apple Silicon without treating unified memory as VRAM."""
+    return platform.system() == "Darwin" and platform.machine().lower() in {
+        "arm64",
+        "aarch64",
+    }
+
+
+def _text(value: object) -> str:
+    """Normalize NVML versions returning either bytes or text."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def detect_nvidia() -> list[HardwareProfile]:
+    """Read GPU counters and close successfully initialized NVML."""
     try:
-        result = subprocess.run(
-            ["sysctl", "-n", "machdep.cpu.brand_string"],
-            capture_output=True, text=True, timeout=5
-        )
-        return "Apple" in result.stdout
-    except Exception:
-        return False
+        nvml = importlib.import_module("pynvml")
+    except ImportError as exc:
+        raise HardwareDetectionError(
+            "NVIDIA-Erkennung nicht möglich: Paket 'pynvml' installieren."
+        ) from exc
 
+    initialized = False
+    try:
+        try:
+            nvml.nvmlInit()
+            initialized = True
+        except Exception as exc:
+            raise HardwareDetectionError(
+                "NVML konnte nicht initialisiert werden. "
+                "NVIDIA-Treiber und Container-GPU-Zugriff prüfen."
+            ) from exc
 
-def detect() -> dict:
-    """Hauptfunktion – gibt das finale hardware.json zurück."""
-    is_macs = detect_apple_silicon()
-
-    if is_macs:
-        # Apple Silicon: unified memory = "VRAM"
+        count = nvml.nvmlDeviceGetCount()
         ram = detect_cpu_ram()
-        # Bei Macs ist ~75% des RAMs für GPU verfügbar
-        vram = ram * 0.75
-        profile = {
-            "vram_gb": round(vram, 1),
-            "gpu_name": "Apple Silicon (unified)",
-            "gpu_count": 1,
-            "cpu_ram_gb": round(ram, 1),
-            "os": "Darwin",
-            "is_apple_silicon": True,
-        }
-    else:
-        profiles = detect_nvidia()
-        if not profiles:
-            # Kein GPU – CPU-only Fallback
-            profile = {
-                "vram_gb": 0,
-                "gpu_name": "None (CPU-only)",
-                "gpu_count": 0,
-                "cpu_ram_gb": round(detect_cpu_ram(), 1),
-                "os": platform.system(),
-                "is_apple_silicon": False,
-            }
-        else:
-            # Beste GPU auswählen (meist nur eine)
-            best = max(profiles, key=lambda p: p.vram_gb)
-            profile = asdict(best)
-            profile["cpu_ram_gb"] = round(detect_cpu_ram(), 1)
+        profiles: list[HardwareProfile] = []
 
-    # Persistieren
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(json.dumps(profile, indent=2))
-    print(f"✅ Hardware-Profil geschrieben: {OUTPUT_PATH}")
-    print(f"   VRAM: {profile['vram_gb']} GB | GPU: {profile['gpu_name']}")
-    return profile
+        for index in range(count):
+            handle = nvml.nvmlDeviceGetHandleByIndex(index)
+            memory = nvml.nvmlDeviceGetMemoryInfo(handle)
+            total = int(memory.total)
+            free = int(memory.free)
+            used = int(memory.used)
+
+            if total <= 0 or min(free, used) < 0:
+                raise HardwareDetectionError(
+                    f"GPU {index} liefert ungültige VRAM-Werte."
+                )
+            if free > total or used > total or free + used > total:
+                raise HardwareDetectionError(
+                    f"GPU {index} liefert widersprüchliche VRAM-Werte."
+                )
+
+            profiles.append(
+                HardwareProfile(
+                    vram_gb=total / _GIB,
+                    gpu_name=_text(nvml.nvmlDeviceGetName(handle)),
+                    gpu_count=count,
+                    cpu_ram_gb=ram,
+                    os=platform.system(),
+                    is_apple_silicon=False,
+                    gpu_index=index,
+                    gpu_uuid=_text(nvml.nvmlDeviceGetUUID(handle)),
+                    vram_total_bytes=total,
+                    vram_free_bytes=free,
+                    vram_used_bytes=used,
+                )
+            )
+
+        return profiles
+    except HardwareDetectionError:
+        raise
+    except Exception as exc:
+        raise HardwareDetectionError(
+            "NVML-Daten konnten nicht gelesen werden."
+        ) from exc
+    finally:
+        if initialized:
+            try:
+                nvml.nvmlShutdown()
+            except Exception as exc:  # noqa: BLE001
+                # NVML cleanup must not discard a successful snapshot.
+                LOGGER.warning("NVML-Shutdown fehlgeschlagen: %s", exc)
+
+
+def _requested_index(gpu_index: int | None) -> int | None:
+    """Validate explicit selection before touching GPU hardware."""
+    if gpu_index is not None:
+        if type(gpu_index) is not int or gpu_index < 0:
+            raise HardwareDetectionError(
+                "GPU-Index muss eine nichtnegative ganze Zahl sein."
+            )
+        return gpu_index
+
+    raw = os.environ.get("GPU_INDEX")
+    if raw is None:
+        return None
+    if not re.fullmatch(r"(?:0|[1-9][0-9]*)", raw):
+        raise HardwareDetectionError(
+            "GPU_INDEX muss eine nichtnegative ganze Zahl sein."
+        )
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise HardwareDetectionError("GPU_INDEX ist zu groß.") from exc
+
+
+def _write_json_atomic(data: dict[str, Any], path: Path) -> None:
+    """Preserve an existing report if writing or replacement fails."""
+    temporary: str | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = handle.name
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temporary, path)
+        temporary = None
+    except (OSError, ValueError, TypeError) as exc:
+        raise HardwareDetectionError(
+            f"Hardware-Datei konnte nicht sicher geschrieben werden: {path}"
+        ) from exc
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def detect(
+    gpu_index: int | None = None,
+    output_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Select one GPU and persist exact byte counters."""
+    requested = _requested_index(gpu_index)
+
+    if platform.system() == "Darwin":
+        label = "Apple Silicon" if detect_apple_silicon() else "macOS"
+        raise HardwareDetectionError(
+            f"{label} wird nicht unterstützt; NVIDIA-NVML ist erforderlich."
+        )
+
+    profiles = detect_nvidia()
+    if not profiles:
+        raise HardwareDetectionError(
+            "Keine NVIDIA-GPU gefunden. Treiber und NVML-Zugriff prüfen."
+        )
+    if requested is None and len(profiles) > 1:
+        raise HardwareDetectionError(
+            "Mehrere NVIDIA-GPUs gefunden: GPU_INDEX oder --gpu-index angeben."
+        )
+
+    selected = (
+        profiles[0]
+        if requested is None
+        else next(
+            (profile for profile in profiles if profile.gpu_index == requested),
+            None,
+        )
+    )
+    if selected is None:
+        raise HardwareDetectionError(
+            f"GPU-Index {requested} ist nicht verfügbar."
+        )
+
+    if selected.vram_total_bytes < 6 * _GIB:
+        print(
+            f"Warnung: GPU {selected.gpu_index} hat weniger als 6 GiB VRAM.",
+            file=sys.stderr,
+        )
+
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "memory_unit": "GiB",
+        **asdict(selected),
+    }
+    target = Path(
+        output_path
+        if output_path is not None
+        else os.environ.get("HARDWARE_PATH", str(OUTPUT_PATH))
+    )
+    _write_json_atomic(result, target)
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run NVIDIA discovery without downloading or loading models."""
+    parser = argparse.ArgumentParser(
+        description="Ermittelt die NVIDIA-Hardware für slAIdshow."
+    )
+    parser.add_argument("--gpu-index", type=int)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args(argv)
+
+    try:
+        profile = detect(args.gpu_index, args.output)
+    except HardwareDetectionError as exc:
+        print(f"Fehler: {exc}", file=sys.stderr)
+        return 1
+
+    target = args.output or Path(
+        os.environ.get("HARDWARE_PATH", str(OUTPUT_PATH))
+    )
+    print(
+        f"Hardware-Datei geschrieben: {target} "
+        f"(GPU {profile['gpu_index']}: {profile['gpu_name']})",
+        file=sys.stderr,
+    )
+    return 0
 
 
 if __name__ == "__main__":
-    detect()
-Tests: tests/test_hardware_detect.py
-"""Tests mit Mocks – keine GPU im CI nötig."""
-from unittest.mock import patch, MagicMock
-import json
-from pathlib import Path
+    raise SystemExit(main())
 
-
-def test_detect_no_gpu():
-    with patch("slaidshow.hardware_detect.detect_nvidia", return_value=[]), \
-         patch("slaidshow.hardware_detect.detect_cpu_ram", return_value=16.0), \
-         patch("slaidshow.hardware_detect.detect_apple_silicon", return_value=False):
-        result = detect()
-    assert result["vram_gb"] == 0
-    assert result["gpu_count"] == 0
-
-
-def test_detect_6gb_gpu():
-    mock_profile = HardwareProfile(
-        vram_gb=6.0, gpu_name="NVIDIA GeForce RTX 3050",
-        gpu_count=1, cpu_ram_gb=16.0, os="Linux", is_apple_silicon=False
-    )
-    with patch("slaidshow.hardware_detect.detect_nvidia", return_value=[mock_profile]), \
-         patch("slaidshow.hardware_detect.detect_cpu_ram", return_value=16.0), \
-         patch("slaidshow.hardware_detect.detect_apple_silicon", return_value=False):
-        result = detect()
-    assert result["vram_gb"] == 6.0
-    assert "RTX 3050" in result["gpu_name"]
-
-
-def test_detect_apple_silicon():
-    with patch("slaidshow.hardware_detect.detect_apple_silicon", return_value=True), \
-         patch("slaidshow.hardware_detect.detect_cpu_ram", return_value=32.0):
-        result = detect()
-    assert result["is_apple_silicon"] is True
-    assert result["vram_gb"] == 22.4  # 32 * 0.75
-
-Phase 0: config_generator.py (Tag 2)
-Datei: slaidshow/config_generator.py
-"""
-Generiert die optimale Konfiguration basierend auf VRAM.
-Input:  /app/config/hardware.json
-Output: /app/config/generated.yaml
-"""
-
-import json
-import yaml
-from pathlib import Path
-
-HARDWARE_PATH = Path("/app/config/hardware.json")
-OUTPUT_PATH = Path("/app/config/generated.yaml")
-
-# ─── VRAM-Tiers ────────────────────────────────────────────────────────
-
-TIERS = {
-    "6gb": {
-        "min_vram": 6.0,
-        "max_vram": 7.9,
-        "stt": {
-            "model": "parakeet-tdt-0.6b-v3",
-            "device": "cpu",
-            "backend": "faster-whisper",
-        },
-        "llm": {
-            "model": "qwen3:1.7b-q4_K_M",
-            "device": "cuda",
-            "context": 4096,
-            "vram_budget_mb": 2560,
-        },
-        "image": {
-            "base_model": "sd_15.safetensors",
-            "lora": "lcm-lora-sdv1-5.safetensors",
-            "steps": 4,
-            "cfg": 1.0,
-            "resolution": [512, 512],
-            "device": "cuda",
-            "vram_budget_mb": 3584,
-            "unload_after_generate": True,
-        },
-        "features": {
-            "in_image_text": False,      # HTML-Overlay statt
-            "multi_model": False,        # nur 1 Bildmodell
-            "parallel_inference": False, # sequenziell
-            "styles": ["standard", "sketch"],
-        },
-        "expected_latency_s": 2.5,
-    },
-    "8gb": {
-        "min_vram": 8.0,
-        "max_vram": 11.9,
-        "stt": {
-            "model": "parakeet-tdt-0.6b-v3",
-            "device": "cuda",
-            "backend": "faster-whisper",
-        },
-        "llm": {
-            "model": "qwen3:4b-q4_K_M",
-            "device": "cuda",
-            "context": 8192,
-            "vram_budget_mb": 3072,
-        },
-        "image": {
-            "base_model": "sd_15.safetensors",
-            "lora": "lcm-lora-sdv1-5.safetensors",
-            "steps": 4,
-            "cfg": 1.0,
-            "resolution": [768, 768],
-            "device": "cuda",
-            "vram_budget_mb": 4096,
-            "unload_after_generate": False,
-        },
-        "features": {
-            "in_image_text": False,
-            "multi_model": False,
-            "parallel_inference": False,
-            "styles": ["standard", "sketch", "watercolor"],
-        },
-        "expected_latency_s": 1.8,
-    },
-    "16gb": {
-        "min_vram": 12.0,
-        "max_vram": 15.9,
-        "stt": {
-            "model": "parakeet-tdt-0.6b-v3",
-            "device": "cuda",
-            "backend": "faster-whisper",
-        },
-        "llm": {
-            "model": "gemma4:26b-a4b-q4_K_M",
-            "device": "cuda",
-            "context": 16384,
-            "vram_budget_mb": 14336,
-        },
-        "image": {
-            "base_model": "flux2_klein_4b_fp8.safetensors",
-            "lora": None,
-            "steps": 4,
-            "cfg": 1.0,
-            "resolution": [1024, 1024],
-            "device": "cuda",
-            "vram_budget_mb": 8192,
-            "unload_after_generate": True,
-        },
-        "features": {
-            "in_image_text": False,
-            "multi_model": True,
-            "parallel_inference": True,
-            "styles": ["standard", "photoreal", "sketch", "watercolor", "3d"],
-        },
-        "expected_latency_s": 1.2,
-    },
-    "24gb": {
-        "min_vram": 16.0,
-        "max_vram": 999.0,
-        "stt": {
-            "model": "parakeet-tdt-0.6b-v3",
-            "device": "cuda",
-            "backend": "faster-whisper",
-        },
-        "llm": {
-            "model": "qwen3.8:27b-q4_K_M",
-            "device": "cuda",
-            "context": 32768,
-            "vram_budget_mb": 18432,
-        },
-        "image": {
-            "base_model": "flux2_klein_4b_fp8.safetensors",
-            "lora": None,
-            "steps": 4,
-            "cfg": 1.0,
-            "resolution": [1024, 1024],
-            "device": "cuda",
-            "vram_budget_mb": 12288,
-            "unload_after_generate": False,
-        },
-        "features": {
-            "in_image_text": True,       # Qwen-Image 2.1 als 2. Modell
-            "multi_model": True,
-            "parallel_inference": True,
-            "styles": ["standard", "photoreal", "sketch", "watercolor", "3d", "text"],
-        },
-        "expected_latency_s": 0.8,
-    },
-}
-
-
-def select_tier(vram_gb: float) -> str:
-    """Wähle das passende Tier basierend auf verfügbarem VRAM."""
-    if vram_gb < 6.0:
-        raise ValueError(
-            f"VRAM {vram_gb} GB ist zu wenig (Minimum: 6 GB). "
-            f"Bitte GPU mit mind. 6 GB VRAM verwenden."
-        )
-    for tier_name, tier in TIERS.items():
-        if tier["min_vram"] <= vram_gb <= tier["max_vram"]:
-            return tier_name
-    # Fallback: höchstes erreichbares Tier
-    return "24gb"
-
-
-def generate(hardware: dict) -> dict:
-    """Generiere die finale Konfiguration."""
-    vram = hardware["vram_gb"]
-    tier_name = select_tier(vram)
-    tier = TIERS[tier_name]
-
-    config = {
-        "profile": tier_name,
-        "hardware": hardware,
-        "stt": tier["stt"],
-        "llm": tier["llm"],
-        "image": tier["image"],
-        "features": tier["features"],
-        "orchestration": {
-            "parallel": tier["features"]["parallel_inference"],
-            "vram_scheduler": not tier["features"]["parallel_inference"],
-            "max_concurrent_generations": 1 if vram < 12 else 2,
-        },
-        "expected_latency_s": tier["expected_latency_s"],
-    }
-
-    # Persistieren
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(yaml.dump(config, default_flow_style=False, allow_unicode=True))
-    print(f"✅ Config generiert: {OUTPUT_PATH} (Tier: {tier_name})")
-    print(f"   STT: {tier['stt']['model']} on {tier['stt']['device']}")
-    print(f"   LLM: {tier['llm']['model']} on {tier['llm']['device']}")
-    print(f"   Bild: {tier['image']['base_model']} ({tier['image']['steps']} steps)")
-    return config

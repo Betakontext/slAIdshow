@@ -1,7 +1,6 @@
-# Python bytecode and caches
+# Python bytecode and native build artifacts
 __pycache__/
 *.py[cod]
-*.pyo
 *.pyd
 *.so
 *.dll
@@ -12,74 +11,107 @@ venv/
 env/
 ENV/
 
-# Editors/IDEs
+# Editors and IDEs
 .vscode/
 .idea/
 *.iml
-
-# OS junk
-.DS_Store
-Thumbs.db
-
-# Logs & temporary files
-*.log
-*.tmp
+*~
 *.swp
 *.swo
 
-# Local configuration / secrets
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+
+# Local environment files and secrets
+# Keep sanitized templates available for version control.
 .env
-.env.*.local
+.env.*
+!.env.example
+!.env.sample
+!.env.template
 *.local.json
+*.local.yaml
+*.local.yml
 
-# Model weights (Whisper, large files; don't version control)
-models/*.bin
+# Generated hardware detection and runtime configuration
+/config/hardware.json
+/config/generated.yaml
+/config/generated.yaml.*
+/hardware.json
+/generated.yaml
 
+# Local model weights and download caches
+# Models are installed by the downloader, not distributed through Git.
+/models/
+/.cache/
+/huggingface/
+/hf_cache/
 
-# Faster-Whisper runtime model cache
-models/faster-whisper-cache/
+# Generated images, audio, recordings and runtime state
+/outputs/
+/recordings/
 
-# ComfyUI workflows
-workflows/*.json
-!workflows/text2img_SD15-FP16.json
+# Local ComfyUI installation and model-server storage
+/ComfyUI/
+/comfyui/
+/ollama/
+/.ollama/
 
-# Generated outputs (images, artifacts)
-outputs/
-# If you want to keep sample outputs tracked, whitelist a README:
-# !outputs/README.md
-
-# Static build artifacts (only if you have toolchains that build into static/)
+# Frontend build artifacts
+# Keep frontend source files and local runtime assets tracked.
 static/**/dist/
 static/**/build/
 static/**/.cache/
+node_modules/
 
-# Test and coverage caches
+# Test, lint, type-checking and coverage caches
 .pytest_cache/
-.coverage
-htmlcov/
-.tox/
+.ruff_cache/
 .mypy_cache/
-.cache/
+.pyright/
+.tox/
+.nox/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit.xml
 
-# Jupyter checkpoints (if notebooks are ever used)
+# Notebook checkpoints
 .ipynb_checkpoints/
 
-# Dependency managers (optional)
-poetry.lock
-Pipfile.lock
-
-# Packaging/build artifacts
-build/
-dist/
+# Python packaging and build artifacts
+/build/
+/dist/
 *.egg-info/
+.eggs/
+pip-wheel-metadata/
 
-# Plans
-plan.odt
+# Local planning document
+/plan.odt
 
-# Backup files
-app00.py
-image_backend00.py
-style_engine00.py
-comfyui_bridge00.py
-transcription_backend00.py
-web/index00.html
+# Legacy backup copies
+/app00.py
+/image_backend00.py
+/style_engine00.py
+/comfyui_bridge00.py
+/transcription_backend00.py
+/web/index00.html
+
+# Intentionally tracked:
+# - workflows/*.json: reproducible ComfyUI workflow definitions
+# - dependency lockfiles: reproducible dependency versions
+# - README, roadmap, project documentation and tests
+# - Dockerfile, Compose files, scripts and service definitions
+# - sanitized configuration templates
