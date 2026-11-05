@@ -30,15 +30,6 @@ Mikrofon → STT → LLM (Prompt + Modell-Entscheidung) → ComfyUI → Fullscre
 | 16gb | 12–16| GPU | gemma4:26b-a4b-q4 (14 GB) | FLUX.2 klein 4B FP8 (8 GB) | ~1.2 s |
 | 24gb | 16+  | GPU | qwen3.8:27b-q4 (18 GB) | FLUX.2 klein 4B + Qwen-Image 2.1 | ~0.8 s |
 
-## Konventionen
-- Python 3.12+, type hints, ruff
-- Docker-Compose für alle Services
-- Keine Cloud-Abhängigkeiten im Runtime-Pfad
-- Tests: pytest (Mocks für GPU, Ollama, ComfyUI)
-- Hardware: 6 GB (min) / 8 GB / 16 GB / 24 GB
-- pynvml (nicht nvidia-ml-py) für GPU-Erkennung
-- yaml für Config, json für hardware.json
-
 # Tree:
 
 ### Repository Layout
@@ -102,6 +93,92 @@ Mikrofon → STT → LLM (Prompt + Modell-Entscheidung) → ComfyUI → Fullscre
 
 
 
+# dockerignore
+
+
+# Keep local credentials out of the build context.
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+*.pem
+**/*.pem
+*.key
+**/*.key
+*.p12
+**/*.p12
+*.pfx
+**/*.pfx
+secrets/
+**/secrets/
+
+# Git metadata is not required at runtime.
+.git/
+**/.git/
+
+# Exclude local Python environments and caches.
+.venv/
+venv/
+env/
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.tox/
+**/.nox/
+
+# Exclude generated test and packaging artifacts.
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+build/
+dist/
+**/*.egg-info/
+
+# Models and runtime data must be provisioned separately.
+models/
+outputs/
+recordings/
+logs/
+**/*.log
+
+# Hardware reports and generated configuration are host-specific.
+config/hardware.json
+config/generated.yaml
+hardware.json
+
+# Local audio routing and tunnel state must not enter image layers.
+.asoundrc
+.pulse/
+.config/pulse/
+tunnel_url.json
+**/tunnel_url.json
+
+# Exclude editor metadata and temporary files.
+.idea/
+.vscode/
+.DS_Store
+**/.DS_Store
+**/*~
+**/*.swp
+**/*.swo
+
+# Source, tests, workflows, frontend assets, dependency manifests,
+# lockfiles and configuration templates remain in the build context.
+
+
+
+
+
+
+
 
 
 
@@ -112,74 +189,253 @@ Mikrofon → STT → LLM (Prompt + Modell-Entscheidung) → ComfyUI → Fullscre
 Hier die Dateien auf dem derzeitigen Stand:
 # docker-compose.yaml
 
+# Docker Compose v2 file for slAIdshow (complete)
+# - Supports conditional GPU usage via environment variable USE_GPU (true/false)
+# - Provides persistent volumes for config, models, outputs and recordings
+# - Healthchecks for the HTTP service (app) and optional ComfyUI / Ollama services
+# - Keeps GPU/CUDA services separate; when USE_GPU != "true" no GPU devices are requested
+# - Use `docker compose --env-file .env up --build` to run (or `sudo docker compose ...` on systems without docker group)
+version: "3.9"
+
 services:
-  # ─── Init-Container: läuft einmalig bei Install ───
-  init:
-    build: .
-    command: ["sleep", "infinity"]  # wird manuell aufgerufen
-    volumes:
-      - ./config:/app/config
-      - ./models:/app/models
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-  # ─── Backend: FastAPI + Orchestrierung ───
-  backend:
-    build: .
-    command: uvicorn slaidshow.main:app --host 0.0.0.0 --port 8080
-    depends_on:
-      - ollama
-      - comfyui
+  app:
+    image: slaidshow:m0
+    container_name: slaidshow_app
+    restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      - CONFIG_PATH=/app/config/generated.yaml
+      # Application binding & runtime config (overrides inside container)
+      APP_BIND_HOST: "0.0.0.0"
+      APP_BIND_PORT: "8080"
+      CONFIG_PATH: "/app/config/generated.yaml"
+      # Offline by default to avoid unexpected HF downloads
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      APP_FASTER_WHISPER_DEVICE: "${APP_FASTER_WHISPER_DEVICE:-cpu}"
+      APP_ALLOW_REMOTE_VISION: "${APP_ALLOW_REMOTE_VISION:-no}"
+      # Opt-in to allow cloud backends (Pollinations) - default no
+      APP_ALLOW_CLOUD: "${APP_ALLOW_CLOUD:-no}"
+      # Control image backend: comfyui | pollinations
+      APP_IMAGE_BACKEND: "${APP_IMAGE_BACKEND:-comfyui}"
+      # Toggle GPU use at runtime (true/false). Compose will mount devices only if "true".
+      USE_GPU: "${USE_GPU:-false}"
+    # Only expose port to host for local development; use a reverse proxy in production.
+    ports:
+      - "8080:8080"
     volumes:
-      - ./config:/app/config
-      - ./models:/app/models
-      - ./recordings:/app/recordings
+      - ./config:/app/config:rw
+      - ./models:/app/models:rw
+      - ./outputs:/app/outputs:rw
+      - ./recordings:/app/recordings:rw
+      - ./static:/app/static:ro
+      - ./workflows:/app/workflows:ro
+    # Conditional device/privileges: handled by an entrypoint wrapper (see note)
+    # For GPU usage with Nvidia Container Toolkit and Compose, set USE_GPU=true and pass runtime args:
     deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      resources: {}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,os; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('APP_BIND_PORT','8080') + '/health', timeout=6).close()\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-  # ─── Ollama: LLM-Service ───
-  ollama:
-    image: ollama/ollama:latest
-    volumes:
-      - ollama_data:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-  # ─── ComfyUI: Bildgenerierung ───
   comfyui:
     image: ghcr.io/comfyanonymous/comfyui:latest
-    command: >
-      --listen 0.0.0.0 --port 8188
-      --lowvram  # wird bei 6GB automatisch gesetzt (via healthcheck)
+    container_name: slaidshow_comfyui
+    restart: unless-stopped
+    environment:
+      SERVICE_HOST: "0.0.0.0"
+      SERVICE_PORT: "11434"
+    ports:
+      - "11434:11434"
     volumes:
-      - ./models/comfyui:/root/ComfyUI/models
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      - ./models/comfyui:/home/user/.comfyui/models:rw
+      - ./workflows/comfyui:/home/user/.comfyui/workflows:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:11434/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    # Do NOT request GPU devices here by default; use the optional nvidia service below
+    # If the host supports nvidia and you want GPU acceleration, run Compose with
+    #   USE_GPU=true and add `--profile gpu` (see "Usage" below)
+    profiles: ["default", "gpu-optional"]
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: slaidshow_ollama
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: "0.0.0.0"
+      OLLAMA_PORT: "11434"
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./models/ollama:/var/lib/ollama/models:rw
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:11434/v1 || exit 1"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 60s
+    profiles: ["default", "gpu-optional"]
+
+  # Optional service which requests GPU devices via nvidia runtime.
+  # Start with: docker compose --profile gpu up --build
+  nvidia_proxy:
+    image: nvidia/cuda:12.2.0-runtime-ubuntu22.04
+    container_name: slaidshow_nvidia_proxy
+    runtime: nvidia
+    # The nvidia service exists only to bind GPU devices into the docker host network namespace
+    # and to ensure the nvidia runtime is available. It is intentionally minimal and NOT required
+    # for CPU/offline operation. Start with profile `gpu`.
+    command: ["sleep", "infinity"]
+    deploy: {}
+    devices:
+      - "/dev/nvidiactl:/dev/nvidiactl"
+      - "/dev/nvidia-uvm:/dev/nvidia-uvm"
+      - "/dev/nvidia0:/dev/nvidia0"
+    profiles: ["gpu-optional"]
+
+# Top-level volumes (optionally declared, but Compose will create them automatically for host mounts)
 volumes:
-  ollama_data:
+  models:
+  outputs:
+  recordings:
+  config:
+
+  
+  
+  
+  
+  
+# Dockerfile
+
+
+
+# syntax=docker/dockerfile:1.7
+
+ARG PYTHON_IMAGE=python:3.12-slim-bookworm
+
+# Build native dependencies without retaining compilers in the runtime image.
+FROM ${PYTHON_IMAGE} AS dependencies
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    CMAKE_BUILD_PARALLEL_LEVEL=2 \
+    GGML_CUDA=OFF
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        git \
+        libasound2-dev \
+        libportaudio2 \
+        portaudio19-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+COPY requirements.txt /tmp/requirements.txt
+
+RUN python -m pip install --requirement /tmp/requirements.txt \
+    && python -m pip check
+
+
+FROM ${PYTHON_IMAGE} AS runtime
+
+ENV PATH="/opt/venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HOME=/home/slaidshow \
+    XDG_CACHE_HOME=/app/models/cache \
+    HF_HOME=/app/models/huggingface \
+    HF_HUB_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    CONFIG_PATH=/app/config/generated.yaml \
+    APP_BIND_HOST=0.0.0.0 \
+    APP_BIND_PORT=8080 \
+    APP_FASTER_WHISPER_DEVICE=cpu \
+    APP_FASTER_WHISPER_COMPUTE_TYPE=int8 \
+    APP_FASTER_WHISPER_DOWNLOAD_ROOT=/app/models/faster-whisper \
+    OMP_NUM_THREADS=2 \
+    OPENBLAS_NUM_THREADS=2
+
+# CUDA belongs to the separate Ollama and ComfyUI services.
+# PortAudio and ALSA support host audio devices passed through by Compose.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        libasound2 \
+        libgomp1 \
+        libportaudio2 \
+        libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 slaidshow \
+    && useradd --uid 10001 --gid slaidshow \
+        --create-home --shell /usr/sbin/nologin slaidshow
+
+COPY --from=dependencies /opt/venv /opt/venv
+
+WORKDIR /app
+
+# Copy source without storing local secrets, environments or model assets
+# in image layers. A restrictive .dockerignore should additionally limit
+# the build context sent to the builder.
+RUN --mount=type=bind,source=.,target=/source,readonly \
+    tar --create --file=- --directory=/source \
+        --exclude='.git' \
+        --exclude='.env' \
+        --exclude='.env.*' \
+        --exclude='*.pem' \
+        --exclude='*.key' \
+        --exclude='.venv' \
+        --exclude='venv' \
+        --exclude='__pycache__' \
+        --exclude='*.pyc' \
+        --exclude='.pytest_cache' \
+        --exclude='.ruff_cache' \
+        --exclude='models' \
+        --exclude='recordings' \
+        --exclude='outputs' \
+        --exclude='config/hardware.json' \
+        --exclude='config/generated.yaml' \
+        . \
+    | tar --extract --file=- --directory=/app --no-same-owner
+
+RUN test -f /app/app.py \
+    && mkdir -p /app/config /app/models /app/recordings /app/outputs \
+    && chown -R slaidshow:slaidshow /app \
+    && python -c "import fastapi, uvicorn, sounddevice, faster_whisper"
+
+USER slaidshow:slaidshow
+
+EXPOSE 8080
+
+# This checks the HTTP endpoint, not model availability or GPU readiness.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('APP_BIND_PORT', '8080') + '/health', timeout=8).close()"
+
+STOPSIGNAL SIGTERM
+
+# One worker owns the microphone, show state and in-process scheduling.
+# Runtime overrides remain possible through the corresponding variables.
+CMD ["sh", "-c", "exec python -m uvicorn app:app --host \"${APP_BIND_HOST}\" --port \"${APP_BIND_PORT}\" --workers 1 --timeout-graceful-shutdown 30"]
+
 
 
 
@@ -227,6 +483,8 @@ test:
 
 
 
+
+# vram_scheduler.py
 
 # vram_scheduler.py
 
@@ -348,9 +606,6 @@ class VramScheduler:
 
 
 
-
-
-
 # model_downloader.py
 import yaml
 import subprocess
@@ -443,374 +698,797 @@ def _download_comfyui_model(filename: str, subfolder: str) -> None:
 
 
 
+# model-downloader
 
 
 
 
+"""Validate download policy without fetching unapproved model artifacts.
 
+Schema version 1 permits only disabled downloads. Supporting real downloads
+requires an explicitly validated artifact contract and a schema extension.
 
+This module performs no filesystem, network, or subprocess operations at import.
+"""
 
+from __future__ import annotations
 
-
-
-
-
-
-
-
-
-    # hardware_detect.py
-
-
+import argparse
 import json
-import subprocess
-import platform
+import logging
+import sys
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from typing import Any
+
+from runtime_config import (
+    RuntimeConfigurationError,
+    load_config,
+    validate_config,
+)
+
+LOGGER = logging.getLogger(__name__)
+
+
+class ModelDownloadError(RuntimeError):
+    """Report invalid policy or unsupported artifact downloads."""
+
+
+def download_models(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate the complete configuration before considering any download.
+
+    Return a policy result, not a claim that models exist or are usable.
+    Never invoke a model server, shell command, or download client.
+    """
+    try:
+        validated = validate_config(config)
+    except (RuntimeConfigurationError, RecursionError) as exc:
+        raise ModelDownloadError(
+            "Download-Konfiguration ist ungültig oder nicht freigegeben; "
+            "mit config_generator.py neu erzeugen."
+        ) from exc
+
+    downloads = validated["downloads"]
+
+    # Fail closed if a future schema enables downloads without implementing
+    # verified artifacts, pinned sources, licenses, and atomic persistence here.
+    if downloads["enabled"] is not False:
+        raise ModelDownloadError(
+            "Aktive Downloads werden von dieser Downloader-Version "
+            "nicht unterstützt. Es wurden keine Downloads gestartet."
+        )
+
+    if downloads["artifacts"] != []:
+        raise ModelDownloadError(
+            "Deaktivierte Downloads dürfen keine Artefakte enthalten."
+        )
+
+    LOGGER.info(
+        "Downloads für Profil %s deaktiviert; keine Modelle geladen.",
+        validated["tier"],
+    )
+
+    return {
+        "tier": validated["tier"],
+        "downloads_enabled": False,
+        "outcome": "skipped_by_policy",
+        "reason": downloads["reason"],
+        "downloaded_artifacts": [],
+        "model_presence_checked": False,
+        "models_ready": False,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Load persisted configuration and report the enforced download policy."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Prüft die slAIdshow-Downloadrichtlinie. "
+            "Schema-Version 1 erlaubt keine Modell-Downloads."
+        )
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help=(
+            "YAML-Pfad; alternativ CONFIG_PATH "
+            "oder /app/config/generated.yaml."
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        configuration = load_config(args.config)
+        result = download_models(configuration.as_dict())
+    except (RuntimeConfigurationError, ModelDownloadError) as exc:
+        print(f"Fehler: {exc}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(
+        "Downloads sind gemäß Konfiguration deaktiviert. "
+        "Es wurden keine Netzwerkzugriffe oder Download-Befehle ausgeführt. "
+        "Modellverfügbarkeit und Show-Startfähigkeit sind nicht bestätigt.",
+        file=sys.stderr,
+    )
+
+    # A disabled download policy was successfully enforced. This exit status
+    # must not be interpreted as backend or model readiness.
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+
+
+
+
+
+
+
+
+
+
+
+# hardware_detect.py
+
+
+"""Discover one NVIDIA GPU and atomically persist its hardware profile."""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import importlib
+import json
+import logging
+import os
+import platform
+import re
+import sys
+import tempfile
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
 
 OUTPUT_PATH = Path("/app/config/hardware.json")
+_GIB = 1024**3
+LOGGER = logging.getLogger(__name__)
 
 
-@dataclass
+class HardwareDetectionError(RuntimeError):
+    """Report unavailable hardware or unsuccessful persistence."""
+
+
+@dataclass(frozen=True)
 class HardwareProfile:
+    """Describe one GPU without aggregating memory across devices."""
+
     vram_gb: float
     gpu_name: str
     gpu_count: int
     cpu_ram_gb: float
     os: str
     is_apple_silicon: bool
-
-
-def detect_nvidia() -> list[HardwareProfile]:
-    """Via nvidia-ml-py (import: pynvml) – die aktuell gepflegte Library."""
-    import pynvml
-    pynvml.nvmlInit()
-    profiles = []
-    try:
-        count = pynvml.nvmlDeviceGetCount()
-        for i in range(count):
-            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            name = pynvml.nvmlDeviceGetName(handle).decode()
-            profiles.append(HardwareProfile(
-                vram_gb=mem.total / (1024**3),
-                gpu_name=name,
-                gpu_count=count,
-                cpu_ram_gb=0,  # separat ermitteln
-                os=platform.system(),
-                is_apple_silicon=False,
-            ))
-    finally:
-        pynvml.nvmlShutdown()
-    return profiles
+    gpu_index: int
+    gpu_uuid: str
+    vram_total_bytes: int
+    vram_free_bytes: int
+    vram_used_bytes: int
 
 
 def detect_cpu_ram() -> float:
-    """System-RAM in GB (via /proc/meminfo oder psutil)."""
+    """Return physical RAM in GiB, or zero when unavailable."""
     try:
-        with open("/proc/meminfo") as f:
-            for line in f:
+        with open("/proc/meminfo", encoding="ascii") as handle:
+            for line in handle:
                 if line.startswith("MemTotal:"):
-                    return int(line.split()[1]) / (1024**2)
-    except FileNotFoundError:
+                    return int(line.split()[1]) * 1024 / _GIB
+    except (OSError, ValueError, IndexError):
         pass
-    # Fallback: psutil
-    import psutil
-    return psutil.virtual_memory().total / (1024**3)
+
+    try:
+        return (
+            os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / _GIB
+        )
+    except (AttributeError, OSError, ValueError):
+        pass
+
+    if platform.system() == "Windows":
+
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("length", ctypes.c_uint32),
+                ("load", ctypes.c_uint32),
+                ("total_physical", ctypes.c_uint64),
+                ("available_physical", ctypes.c_uint64),
+                ("total_page_file", ctypes.c_uint64),
+                ("available_page_file", ctypes.c_uint64),
+                ("total_virtual", ctypes.c_uint64),
+                ("available_virtual", ctypes.c_uint64),
+                ("available_extended_virtual", ctypes.c_uint64),
+            ]
+
+        try:
+            state = MemoryStatus()
+            state.length = ctypes.sizeof(state)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(state)):
+                return state.total_physical / _GIB
+        except (AttributeError, OSError):
+            pass
+
+    return 0.0
 
 
 def detect_apple_silicon() -> bool:
-    """Macs erkennen (keine NVIDIA-GPU, aber unified memory)."""
-    if platform.system() != "Darwin":
-        return False
+    """Identify Apple Silicon without treating unified memory as VRAM."""
+    return platform.system() == "Darwin" and platform.machine().lower() in {
+        "arm64",
+        "aarch64",
+    }
+
+
+def _text(value: object) -> str:
+    """Normalize NVML versions returning either bytes or text."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def detect_nvidia() -> list[HardwareProfile]:
+    """Read GPU counters and close successfully initialized NVML."""
     try:
-        result = subprocess.run(
-            ["sysctl", "-n", "machdep.cpu.brand_string"],
-            capture_output=True, text=True, timeout=5
-        )
-        return "Apple" in result.stdout
-    except Exception:
-        return False
+        nvml = importlib.import_module("pynvml")
+    except ImportError as exc:
+        raise HardwareDetectionError(
+            "NVIDIA-Erkennung nicht möglich: Paket 'pynvml' installieren."
+        ) from exc
 
+    initialized = False
+    try:
+        try:
+            nvml.nvmlInit()
+            initialized = True
+        except Exception as exc:
+            raise HardwareDetectionError(
+                "NVML konnte nicht initialisiert werden. "
+                "NVIDIA-Treiber und Container-GPU-Zugriff prüfen."
+            ) from exc
 
-def detect() -> dict:
-    """Hauptfunktion – gibt das finale hardware.json zurück."""
-    is_macs = detect_apple_silicon()
-
-    if is_macs:
-        # Apple Silicon: unified memory = "VRAM"
+        count = nvml.nvmlDeviceGetCount()
         ram = detect_cpu_ram()
-        # Bei Macs ist ~75% des RAMs für GPU verfügbar
-        vram = ram * 0.75
-        profile = {
-            "vram_gb": round(vram, 1),
-            "gpu_name": "Apple Silicon (unified)",
-            "gpu_count": 1,
-            "cpu_ram_gb": round(ram, 1),
-            "os": "Darwin",
-            "is_apple_silicon": True,
-        }
-    else:
-        profiles = detect_nvidia()
-        if not profiles:
-            # Kein GPU – CPU-only Fallback
-            profile = {
-                "vram_gb": 0,
-                "gpu_name": "None (CPU-only)",
-                "gpu_count": 0,
-                "cpu_ram_gb": round(detect_cpu_ram(), 1),
-                "os": platform.system(),
-                "is_apple_silicon": False,
-            }
-        else:
-            # Beste GPU auswählen (meist nur eine)
-            best = max(profiles, key=lambda p: p.vram_gb)
-            profile = asdict(best)
-            profile["cpu_ram_gb"] = round(detect_cpu_ram(), 1)
+        profiles: list[HardwareProfile] = []
 
-    # Persistieren
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(json.dumps(profile, indent=2))
-    print(f"✅ Hardware-Profil geschrieben: {OUTPUT_PATH}")
-    print(f"   VRAM: {profile['vram_gb']} GB | GPU: {profile['gpu_name']}")
-    return profile
+        for index in range(count):
+            handle = nvml.nvmlDeviceGetHandleByIndex(index)
+            memory = nvml.nvmlDeviceGetMemoryInfo(handle)
+            total = int(memory.total)
+            free = int(memory.free)
+            used = int(memory.used)
+
+            if total <= 0 or min(free, used) < 0:
+                raise HardwareDetectionError(
+                    f"GPU {index} liefert ungültige VRAM-Werte."
+                )
+            if free > total or used > total or free + used > total:
+                raise HardwareDetectionError(
+                    f"GPU {index} liefert widersprüchliche VRAM-Werte."
+                )
+
+            profiles.append(
+                HardwareProfile(
+                    vram_gb=total / _GIB,
+                    gpu_name=_text(nvml.nvmlDeviceGetName(handle)),
+                    gpu_count=count,
+                    cpu_ram_gb=ram,
+                    os=platform.system(),
+                    is_apple_silicon=False,
+                    gpu_index=index,
+                    gpu_uuid=_text(nvml.nvmlDeviceGetUUID(handle)),
+                    vram_total_bytes=total,
+                    vram_free_bytes=free,
+                    vram_used_bytes=used,
+                )
+            )
+
+        return profiles
+    except HardwareDetectionError:
+        raise
+    except Exception as exc:
+        raise HardwareDetectionError(
+            "NVML-Daten konnten nicht gelesen werden."
+        ) from exc
+    finally:
+        if initialized:
+            try:
+                nvml.nvmlShutdown()
+            except Exception as exc:  # noqa: BLE001
+                # NVML cleanup must not discard a successful snapshot.
+                LOGGER.warning("NVML-Shutdown fehlgeschlagen: %s", exc)
+
+
+def _requested_index(gpu_index: int | None) -> int | None:
+    """Validate explicit selection before touching GPU hardware."""
+    if gpu_index is not None:
+        if type(gpu_index) is not int or gpu_index < 0:
+            raise HardwareDetectionError(
+                "GPU-Index muss eine nichtnegative ganze Zahl sein."
+            )
+        return gpu_index
+
+    raw = os.environ.get("GPU_INDEX")
+    if raw is None:
+        return None
+    if not re.fullmatch(r"(?:0|[1-9][0-9]*)", raw):
+        raise HardwareDetectionError(
+            "GPU_INDEX muss eine nichtnegative ganze Zahl sein."
+        )
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise HardwareDetectionError("GPU_INDEX ist zu groß.") from exc
+
+
+def _write_json_atomic(data: dict[str, Any], path: Path) -> None:
+    """Preserve an existing report if writing or replacement fails."""
+    temporary: str | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = handle.name
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temporary, path)
+        temporary = None
+    except (OSError, ValueError, TypeError) as exc:
+        raise HardwareDetectionError(
+            f"Hardware-Datei konnte nicht sicher geschrieben werden: {path}"
+        ) from exc
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def detect(
+    gpu_index: int | None = None,
+    output_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Select one GPU and persist exact byte counters."""
+    requested = _requested_index(gpu_index)
+
+    if platform.system() == "Darwin":
+        label = "Apple Silicon" if detect_apple_silicon() else "macOS"
+        raise HardwareDetectionError(
+            f"{label} wird nicht unterstützt; NVIDIA-NVML ist erforderlich."
+        )
+
+    profiles = detect_nvidia()
+    if not profiles:
+        raise HardwareDetectionError(
+            "Keine NVIDIA-GPU gefunden. Treiber und NVML-Zugriff prüfen."
+        )
+    if requested is None and len(profiles) > 1:
+        raise HardwareDetectionError(
+            "Mehrere NVIDIA-GPUs gefunden: GPU_INDEX oder --gpu-index angeben."
+        )
+
+    selected = (
+        profiles[0]
+        if requested is None
+        else next(
+            (profile for profile in profiles if profile.gpu_index == requested),
+            None,
+        )
+    )
+    if selected is None:
+        raise HardwareDetectionError(
+            f"GPU-Index {requested} ist nicht verfügbar."
+        )
+
+    if selected.vram_total_bytes < 6 * _GIB:
+        print(
+            f"Warnung: GPU {selected.gpu_index} hat weniger als 6 GiB VRAM.",
+            file=sys.stderr,
+        )
+
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "memory_unit": "GiB",
+        **asdict(selected),
+    }
+    target = Path(
+        output_path
+        if output_path is not None
+        else os.environ.get("HARDWARE_PATH", str(OUTPUT_PATH))
+    )
+    _write_json_atomic(result, target)
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run NVIDIA discovery without downloading or loading models."""
+    parser = argparse.ArgumentParser(
+        description="Ermittelt die NVIDIA-Hardware für slAIdshow."
+    )
+    parser.add_argument("--gpu-index", type=int)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args(argv)
+
+    try:
+        profile = detect(args.gpu_index, args.output)
+    except HardwareDetectionError as exc:
+        print(f"Fehler: {exc}", file=sys.stderr)
+        return 1
+
+    target = args.output or Path(
+        os.environ.get("HARDWARE_PATH", str(OUTPUT_PATH))
+    )
+    print(
+        f"Hardware-Datei geschrieben: {target} "
+        f"(GPU {profile['gpu_index']}: {profile['gpu_name']})",
+        file=sys.stderr,
+    )
+    return 0
 
 
 if __name__ == "__main__":
-    detect()
-Tests: tests/test_hardware_detect.py
-"""Tests mit Mocks – keine GPU im CI nötig."""
-from unittest.mock import patch, MagicMock
+    raise SystemExit(main())
+
+
+
+
+
+# runtime_config.py
+
+
+# runtime_config.py
+"""Load conservative generated configuration without initializing backends.
+
+This module has no import-time filesystem, GPU, or network side effects.
+Schema version 1 accepts only the current conservative generator output.
+Application integration must happen after dotenv loading and before importing
+backend modules that read environment variables.
+
+Loading configuration does not enforce runtime policy or establish readiness.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
 import json
+import os
+import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-
-def test_detect_no_gpu():
-    with patch("slaidshow.hardware_detect.detect_nvidia", return_value=[]), \
-         patch("slaidshow.hardware_detect.detect_cpu_ram", return_value=16.0), \
-         patch("slaidshow.hardware_detect.detect_apple_silicon", return_value=False):
-        result = detect()
-    assert result["vram_gb"] == 0
-    assert result["gpu_count"] == 0
-
-
-def test_detect_6gb_gpu():
-    mock_profile = HardwareProfile(
-        vram_gb=6.0, gpu_name="NVIDIA GeForce RTX 3050",
-        gpu_count=1, cpu_ram_gb=16.0, os="Linux", is_apple_silicon=False
-    )
-    with patch("slaidshow.hardware_detect.detect_nvidia", return_value=[mock_profile]), \
-         patch("slaidshow.hardware_detect.detect_cpu_ram", return_value=16.0), \
-         patch("slaidshow.hardware_detect.detect_apple_silicon", return_value=False):
-        result = detect()
-    assert result["vram_gb"] == 6.0
-    assert "RTX 3050" in result["gpu_name"]
-
-
-def test_detect_apple_silicon():
-    with patch("slaidshow.hardware_detect.detect_apple_silicon", return_value=True), \
-         patch("slaidshow.hardware_detect.detect_cpu_ram", return_value=32.0):
-        result = detect()
-    assert result["is_apple_silicon"] is True
-    assert result["vram_gb"] == 22.4  # 32 * 0.75
-
-Phase 0: config_generator.py (Tag 2)
-Datei: slaidshow/config_generator.py
-"""
-Generiert die optimale Konfiguration basierend auf VRAM.
-Input:  /app/config/hardware.json
-Output: /app/config/generated.yaml
-"""
-
-import json
 import yaml
-from pathlib import Path
 
-HARDWARE_PATH = Path("/app/config/hardware.json")
-OUTPUT_PATH = Path("/app/config/generated.yaml")
+from config_generator import (
+    DEFAULT_CONFIG_PATH,
+    SCHEMA_VERSION,
+    ConfigurationError,
+    build_config,
+    select_tier,
+    validate_hardware,
+)
 
-# ─── VRAM-Tiers ────────────────────────────────────────────────────────
-
-TIERS = {
-    "6gb": {
-        "min_vram": 6.0,
-        "max_vram": 7.9,
-        "stt": {
-            "model": "parakeet-tdt-0.6b-v3",
-            "device": "cpu",
-            "backend": "faster-whisper",
-        },
-        "llm": {
-            "model": "qwen3:1.7b-q4_K_M",
-            "device": "cuda",
-            "context": 4096,
-            "vram_budget_mb": 2560,
-        },
-        "image": {
-            "base_model": "sd_15.safetensors",
-            "lora": "lcm-lora-sdv1-5.safetensors",
-            "steps": 4,
-            "cfg": 1.0,
-            "resolution": [512, 512],
-            "device": "cuda",
-            "vram_budget_mb": 3584,
-            "unload_after_generate": True,
-        },
-        "features": {
-            "in_image_text": False,      # HTML-Overlay statt
-            "multi_model": False,        # nur 1 Bildmodell
-            "parallel_inference": False, # sequenziell
-            "styles": ["standard", "sketch"],
-        },
-        "expected_latency_s": 2.5,
-    },
-    "8gb": {
-        "min_vram": 8.0,
-        "max_vram": 11.9,
-        "stt": {
-            "model": "parakeet-tdt-0.6b-v3",
-            "device": "cuda",
-            "backend": "faster-whisper",
-        },
-        "llm": {
-            "model": "qwen3:4b-q4_K_M",
-            "device": "cuda",
-            "context": 8192,
-            "vram_budget_mb": 3072,
-        },
-        "image": {
-            "base_model": "sd_15.safetensors",
-            "lora": "lcm-lora-sdv1-5.safetensors",
-            "steps": 4,
-            "cfg": 1.0,
-            "resolution": [768, 768],
-            "device": "cuda",
-            "vram_budget_mb": 4096,
-            "unload_after_generate": False,
-        },
-        "features": {
-            "in_image_text": False,
-            "multi_model": False,
-            "parallel_inference": False,
-            "styles": ["standard", "sketch", "watercolor"],
-        },
-        "expected_latency_s": 1.8,
-    },
-    "16gb": {
-        "min_vram": 12.0,
-        "max_vram": 15.9,
-        "stt": {
-            "model": "parakeet-tdt-0.6b-v3",
-            "device": "cuda",
-            "backend": "faster-whisper",
-        },
-        "llm": {
-            "model": "gemma4:26b-a4b-q4_K_M",
-            "device": "cuda",
-            "context": 16384,
-            "vram_budget_mb": 14336,
-        },
-        "image": {
-            "base_model": "flux2_klein_4b_fp8.safetensors",
-            "lora": None,
-            "steps": 4,
-            "cfg": 1.0,
-            "resolution": [1024, 1024],
-            "device": "cuda",
-            "vram_budget_mb": 8192,
-            "unload_after_generate": True,
-        },
-        "features": {
-            "in_image_text": False,
-            "multi_model": True,
-            "parallel_inference": True,
-            "styles": ["standard", "photoreal", "sketch", "watercolor", "3d"],
-        },
-        "expected_latency_s": 1.2,
-    },
-    "24gb": {
-        "min_vram": 16.0,
-        "max_vram": 999.0,
-        "stt": {
-            "model": "parakeet-tdt-0.6b-v3",
-            "device": "cuda",
-            "backend": "faster-whisper",
-        },
-        "llm": {
-            "model": "qwen3.8:27b-q4_K_M",
-            "device": "cuda",
-            "context": 32768,
-            "vram_budget_mb": 18432,
-        },
-        "image": {
-            "base_model": "flux2_klein_4b_fp8.safetensors",
-            "lora": None,
-            "steps": 4,
-            "cfg": 1.0,
-            "resolution": [1024, 1024],
-            "device": "cuda",
-            "vram_budget_mb": 12288,
-            "unload_after_generate": False,
-        },
-        "features": {
-            "in_image_text": True,       # Qwen-Image 2.1 als 2. Modell
-            "multi_model": True,
-            "parallel_inference": True,
-            "styles": ["standard", "photoreal", "sketch", "watercolor", "3d", "text"],
-        },
-        "expected_latency_s": 0.8,
-    },
-}
+MAX_CONFIG_BYTES = 256 * 1024
+HARDWARE_REPORT_FIELDS = (
+    "is_apple_silicon",
+    "gpu_index",
+    "gpu_count",
+    "gpu_uuid",
+    "gpu_name",
+    "vram_total_bytes",
+    "vram_free_bytes",
+    "vram_used_bytes",
+)
 
 
-def select_tier(vram_gb: float) -> str:
-    """Wähle das passende Tier basierend auf verfügbarem VRAM."""
-    if vram_gb < 6.0:
-        raise ValueError(
-            f"VRAM {vram_gb} GB ist zu wenig (Minimum: 6 GB). "
-            f"Bitte GPU mit mind. 6 GB VRAM verwenden."
+class RuntimeConfigurationError(ValueError):
+    """Report missing, malformed, or unsupported runtime configuration."""
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Reject duplicate mapping keys instead of silently overwriting them."""
+
+
+def _construct_mapping(
+    loader: _UniqueKeyLoader,
+    node: yaml.MappingNode,
+) -> dict[str, Any]:
+    """Require unique string keys in every YAML mapping."""
+    result: dict[str, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if not isinstance(key, str):
+            raise RuntimeConfigurationError(
+                "YAML-Schlüssel müssen Zeichenketten sein."
+            )
+        if key in result:
+            # Do not echo untrusted keys or potential secrets.
+            raise RuntimeConfigurationError(
+                "Konfiguration enthält einen doppelten YAML-Schlüssel."
+            )
+        result[key] = loader.construct_object(value_node, deep=True)
+    return result
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_mapping,
+)
+
+
+def _match_baseline(
+    actual: object,
+    expected: object,
+    path: str = "config",
+) -> None:
+    """Check exact types and values without exposing configuration values."""
+    if type(actual) is not type(expected):
+        raise RuntimeConfigurationError(
+            f"Ungültiger Datentyp bei '{path}'."
         )
-    for tier_name, tier in TIERS.items():
-        if tier["min_vram"] <= vram_gb <= tier["max_vram"]:
-            return tier_name
-    # Fallback: höchstes erreichbares Tier
-    return "24gb"
+
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            raise RuntimeConfigurationError(
+                f"Ungültiges Objekt bei '{path}'."
+            )
+        if actual.keys() != expected.keys():
+            raise RuntimeConfigurationError(
+                f"Fehlende oder unbekannte Felder bei '{path}'."
+            )
+        # Only trusted baseline keys are included in diagnostic paths.
+        for key, value in expected.items():
+            _match_baseline(actual[key], value, f"{path}.{key}")
+        return
+
+    if isinstance(expected, list):
+        if not isinstance(actual, list) or len(actual) != len(expected):
+            raise RuntimeConfigurationError(
+                f"Nicht freigegebene Liste bei '{path}'."
+            )
+        for index, value in enumerate(expected):
+            _match_baseline(actual[index], value, f"{path}[{index}]")
+        return
+
+    if actual != expected:
+        raise RuntimeConfigurationError(
+            f"Nicht freigegebener Wert bei '{path}'; "
+            "Konfiguration mit config_generator.py neu erzeugen."
+        )
 
 
-def generate(hardware: dict) -> dict:
-    """Generiere die finale Konfiguration."""
-    vram = hardware["vram_gb"]
-    tier_name = select_tier(vram)
-    tier = TIERS[tier_name]
+def validate_config(data: object) -> dict[str, Any]:
+    """Accept only the current conservative configuration contract."""
+    if not isinstance(data, dict):
+        raise RuntimeConfigurationError(
+            "Konfiguration muss ein YAML-Objekt enthalten."
+        )
 
-    config = {
-        "profile": tier_name,
-        "hardware": hardware,
-        "stt": tier["stt"],
-        "llm": tier["llm"],
-        "image": tier["image"],
-        "features": tier["features"],
-        "orchestration": {
-            "parallel": tier["features"]["parallel_inference"],
-            "vram_scheduler": not tier["features"]["parallel_inference"],
-            "max_concurrent_generations": 1 if vram < 12 else 2,
-        },
-        "expected_latency_s": tier["expected_latency_s"],
+    version = data.get("schema_version")
+    if type(version) is not int or version != SCHEMA_VERSION:
+        raise RuntimeConfigurationError(
+            "Konfigurations-Schema-Version fehlt oder wird nicht unterstützt."
+        )
+
+    hardware = data.get("hardware")
+    if not isinstance(hardware, dict):
+        raise RuntimeConfigurationError("Hardware-Konfiguration fehlt.")
+
+    tier = data.get("tier")
+    if not isinstance(tier, str):
+        raise RuntimeConfigurationError("Konfigurationsprofil fehlt.")
+
+    if hardware.get("memory_unit") != "bytes":
+        raise RuntimeConfigurationError(
+            "Hardware-Konfiguration muss Byte-Zähler deklarieren."
+        )
+    if hardware.get("is_apple_silicon") is not False:
+        raise RuntimeConfigurationError(
+            "Dieses lokale GPU-Profil benötigt "
+            "'is_apple_silicon: false'."
+        )
+
+    # Adapt the generated schema to the detector schema explicitly.
+    # Preserve all supplied hardware facts, especially platform information.
+    # The detector's GiB label accompanies authoritative byte counters.
+    report = {
+        "schema_version": version,
+        "memory_unit": "GiB",
+        **{key: hardware.get(key) for key in HARDWARE_REPORT_FIELDS},
     }
 
-    # Persistieren
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(yaml.dump(config, default_flow_style=False, allow_unicode=True))
-    print(f"✅ Config generiert: {OUTPUT_PATH} (Tier: {tier_name})")
-    print(f"   STT: {tier['stt']['model']} on {tier['stt']['device']}")
-    print(f"   LLM: {tier['llm']['model']} on {tier['llm']['device']}")
-    print(f"   Bild: {tier['image']['base_model']} ({tier['image']['steps']} steps)")
-    return config
+    try:
+        normalized_hardware = validate_hardware(report)
+        selected = select_tier(
+            normalized_hardware["vram_total_bytes"],
+            tier,
+        )
+        expected = build_config(normalized_hardware, selected)
+    except ConfigurationError as exc:
+        # Generator errors may include untrusted override values.
+        raise RuntimeConfigurationError(
+            "Hardware-Konfiguration oder Profil ist ungültig; "
+            "Konfiguration mit config_generator.py neu erzeugen."
+        ) from exc
+
+    # Reject edits that could bypass the conservative memory/offline policy.
+    # Model selections and deployment variants need an explicit contract update.
+    _match_baseline(data, expected)
+    return copy.deepcopy(expected)
 
 
+@dataclass(frozen=True)
+class LoadedConfiguration:
+    """Hold validated data without claiming backend readiness.
+
+    Use as_dict() for application initialization. The private dictionary is
+    an internal implementation detail, not a security boundary.
+    """
+
+    path: Path
+    _data: dict[str, Any]
+
+    @property
+    def tier(self) -> str:
+        return str(self._data["tier"])
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a detached copy for application initialization."""
+        return copy.deepcopy(self._data)
+
+    def status(self) -> dict[str, Any]:
+        """Expose policy status without URLs, paths, prompts, or credentials."""
+        return {
+            "loaded": True,
+            "schema_version": self._data["schema_version"],
+            "tier": self.tier,
+            "offline_policy": self._data["runtime"]["offline"],
+            "stt_device_policy": self._data["stt"]["device"],
+            "scheduler_mode_policy": self._data["scheduler"]["mode"],
+            "parallel_allowed": self._data["scheduler"]["parallel_allowed"],
+            "image_size_policy": {
+                "width": self._data["image"]["width"],
+                "height": self._data["image"]["height"],
+            },
+            "downloads_enabled": self._data["downloads"]["enabled"],
+            "readiness": copy.deepcopy(self._data["readiness"]),
+            "runtime_policy_enforced": False,
+            "hardware_snapshot_revalidated": False,
+            "backend_readiness_checked": False,
+        }
 
 
+def _config_path(path: str | Path | None) -> Path:
+    """Resolve explicit or environment configuration paths without I/O."""
+    raw_path = (
+        path
+        if path is not None
+        else os.environ.get("CONFIG_PATH", str(DEFAULT_CONFIG_PATH))
+    )
+    if not isinstance(raw_path, (str, Path)):
+        raise RuntimeConfigurationError(
+            "CONFIG_PATH muss eine Zeichenkette oder ein Path sein."
+        )
+    if isinstance(raw_path, str) and not raw_path.strip():
+        raise RuntimeConfigurationError("CONFIG_PATH darf nicht leer sein.")
 
+    try:
+        source = Path(raw_path).expanduser()
+        if "\x00" in str(source):
+            raise RuntimeConfigurationError(
+                "CONFIG_PATH enthält ein ungültiges Nullzeichen."
+            )
+        return source
+    except (OSError, RuntimeError, ValueError) as exc:
+        if isinstance(exc, RuntimeConfigurationError):
+            raise
+        raise RuntimeConfigurationError(
+            "CONFIG_PATH konnte nicht aufgelöst werden."
+        ) from exc
+
+
+def load_config(
+    path: str | Path | None = None,
+) -> LoadedConfiguration:
+    """Load required configuration without silently mutating it."""
+    source = _config_path(path)
+
+    try:
+        with source.open("rb") as handle:
+            content = handle.read(MAX_CONFIG_BYTES + 1)
+    except (OSError, ValueError) as exc:
+        raise RuntimeConfigurationError(
+            "Konfiguration konnte nicht gelesen werden; "
+            "CONFIG_PATH und Dateiberechtigungen prüfen."
+        ) from exc
+
+    if len(content) > MAX_CONFIG_BYTES:
+        raise RuntimeConfigurationError(
+            "Konfigurationsdatei überschreitet 256 KiB."
+        )
+
+    try:
+        data = yaml.load(
+            content.decode("utf-8"),
+            Loader=_UniqueKeyLoader,
+        )
+    except RuntimeConfigurationError:
+        raise
+    except (UnicodeError, yaml.YAMLError, RecursionError, ValueError) as exc:
+        raise RuntimeConfigurationError(
+            "Konfiguration enthält ungültiges oder zu stark "
+            "verschachteltes UTF-8/YAML."
+        ) from exc
+
+    try:
+        validated = validate_config(data)
+    except RecursionError as exc:
+        raise RuntimeConfigurationError(
+            "Konfiguration enthält eine nicht unterstützte Verschachtelung."
+        ) from exc
+
+    # Overrides belong to generation, not hidden runtime mutation.
+    override = os.environ.get("SLAIDSHOW_TIER")
+    if override is not None and override != validated["tier"]:
+        raise RuntimeConfigurationError(
+            "SLAIDSHOW_TIER widerspricht der gespeicherten Konfiguration; "
+            "config_generator.py mit dem gewünschten Profil und --force "
+            "bewusst erneut ausführen."
+        )
+
+    return LoadedConfiguration(path=source, _data=validated)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Validate persisted YAML without loading models or contacting servers."""
+    parser = argparse.ArgumentParser(
+        description="Prüft die persistierte slAIdshow-Konfiguration."
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="YAML-Pfad; alternativ CONFIG_PATH oder /app/config/generated.yaml.",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        configuration = load_config(args.config)
+    except RuntimeConfigurationError as exc:
+        print(f"Fehler: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        json.dumps(
+            configuration.status(),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 
 
