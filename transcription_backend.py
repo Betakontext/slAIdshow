@@ -1312,7 +1312,6 @@ class RealtimeTranscriber:
 
         # Recording for file fallback
         self._record_bytes: Optional[io.BytesIO] = None
-        self._record_path: Optional[Path] = None
 
         # Running merged text and finalize debounce
         self._cur_utt: str = ""
@@ -1350,8 +1349,6 @@ class RealtimeTranscriber:
         self._fallback_min_record_ms: int = _env_int("APP_RT_FALLBACK_MIN_RECORD_MS", 1500)
 
         # Prepare fallback dir if needed
-        if self.config.rt_fallback_record:
-            Path(self.config.rt_fallback_dir).mkdir(parents=True, exist_ok=True)
 
     def subscribe(self, cb: RealtimeCallback) -> None:
         self._subs.append(cb)
@@ -1366,6 +1363,8 @@ class RealtimeTranscriber:
         if self.config.rt_fallback_record:
             self._record_bytes = io.BytesIO()
         self._task = asyncio.create_task(self._worker())
+
+        self._task.add_done_callback(_recording_repair_log_task_exception)
 
     async def stop(self) -> None:
         if self._task is None:
@@ -1431,6 +1430,10 @@ class RealtimeTranscriber:
 
                 if self.config.rt_fallback_record and self._record_bytes is not None:
                     self._record_bytes.write(item.astype(np.float32, copy=False).tobytes())
+
+                    if self._record_bytes.tell() > sr * 30 * 4:
+                        self._record_bytes.seek(-sr * 30 * 4, io.SEEK_END)
+                        self._record_bytes = io.BytesIO(self._record_bytes.read())
 
                 if self.config.vad_enabled:
                     if _rms(item) >= float(self.config.vad_rms_threshold):
@@ -1500,15 +1503,23 @@ class RealtimeTranscriber:
                 fallback_used = False
 
                 # If empty AND recording was sufficiently long, try file fallback
+                # In-memory fallback: decode the bounded realtime buffer
+                # RECORDING_REPAIR_V2: bounded fallback; errors are observable
                 if (not candidate_txt) and self.config.rt_fallback_record and (elapsed_ms >= self._fallback_min_record_ms):
-                    with contextlib.suppress(Exception):
-                        fp = await self._flush_recording_wav(sr)
-                        if fp is not None:
-                            fb_txt = await transcribe_file_for_fallback(fp)
+                    try:
+                        import sys
+                        pcm = (np.frombuffer(self._record_bytes.getvalue(), dtype=np.float32).copy() if self._record_bytes is not None else np.empty(0, dtype=np.float32))
+                        if pcm.size:
+                            fb_txt, _ = await self._decode_partial(pcm, finalize=True)
                             fb_txt = clean_transcript(fb_txt)
                             if fb_txt:
                                 candidate_txt = fb_txt
                                 fallback_used = True
+                            else:
+                                print('realtime fallback returned empty transcript', file=sys.stderr)
+                    except Exception:
+                        import traceback as _rt_traceback
+                        print('realtime fallback failed:\n' + _rt_traceback.format_exc(), file=sys.stderr)
 
                 # Merge into running utterance (dedupe)
                 if candidate_txt:
@@ -1533,11 +1544,8 @@ class RealtimeTranscriber:
                 self._last_voice_ms = _now_ms()
                 if self.config.rt_fallback_record:
                     self._record_bytes = io.BytesIO()
-                    self._record_path = None
 
         # Optionally flush on shutdown (non-critical)
-        with contextlib.suppress(Exception):
-            await self._flush_recording_wav(sr)
 
     async def _decode_partial(self, audio: np.ndarray, finalize: bool = False) -> Tuple[str, int]:
         """
@@ -1605,32 +1613,6 @@ class RealtimeTranscriber:
             except Exception as e:
                 print(f"[RT] subscriber error: {e}")
 
-    async def _flush_recording_wav(self, sr: int) -> Optional[Path]:
-        """
-        Write in-memory float32 mono PCM to a WAV file for fallback transcription.
-        """
-        if not self.config.rt_fallback_record or self._record_bytes is None:
-            return None
-
-        try:
-            raw = self._record_bytes.getvalue()
-            if not raw:
-                return None
-
-            import wave
-            out_dir = Path(self.config.rt_fallback_dir)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            p = out_dir / f"rt_{int(time.time())}.wav"
-            with wave.open(str(p), "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(4)  # float32
-                wf.setframerate(int(sr))
-                wf.writeframes(raw)
-            self._record_path = p
-            return p
-        except Exception as e:
-            print(f"[RT] writing fallback WAV failed: {e}")
-            return None
 
 
 # -----------------------
@@ -1733,3 +1715,17 @@ def _load_audio_as_f32_mono(path: Union[str, Path], target_sr: int = 16000) -> T
         data = np.interp(x_idx, np.arange(data.size), data).astype(np.float32)
         sr = target_sr
     return data, sr
+
+# RECORDING_PATCH_V1: in-memory realtime fallback
+
+
+def _recording_repair_log_task_exception(task):
+    import sys
+    try:
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                import traceback
+                print('realtime worker crashed:\n' + ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)), file=sys.stderr)
+    except Exception:
+        pass

@@ -1025,7 +1025,8 @@ async def audio_transcription_loop() -> None:
             if not STATE.running:
                 break
 
-            # Feed realtime transcriber with the current frame (non-blocking safety)
+            RECORDING.append_safe(frame)
+    # Feed realtime transcriber with the current frame (non-blocking safety)
             if RT.transcriber is not None:
                 try:
                     await RT.transcriber.feed(frame)
@@ -1828,6 +1829,138 @@ def audio_probe():
         print(f"[AUDIO] probe error: {e}\n{tb}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
+
+
+import sys as _rec_sys
+# RECORDING_PATCH_V1: bounded, explicit-save PCM recording
+# RECORDING_REPAIR_V2
+import os as _rec_os
+import threading as _rec_threading
+import wave as _rec_wave
+import uuid as _rec_uuid
+import traceback as _rec_traceback
+from pathlib import Path as _rec_Path
+import numpy as _rec_np
+from fastapi.responses import JSONResponse as _rec_JSONResponse
+from starlette.concurrency import run_in_threadpool as _rec_run_in_threadpool
+
+class _SessionRecording:
+    """Bounded PCM16 recorder. All capture failures are intentionally contained."""
+    def __init__(self):
+        self.max_bytes=64*1024*1024
+        self._lock=_rec_threading.Lock(); self._data=bytearray(); self.sample_rate=0
+        self.saved=False; self.saving=False; self.capture_active=False; self.limit_reached=False
+        self.generation=0; self.filename=None; self.fault=None
+    def start(self, sample_rate):
+        try: sr=int(sample_rate)
+        except Exception: return False
+        if sr < 8000 or sr > 384000: return False
+        with self._lock:
+            if self.saving: return False
+            self._data=bytearray(); self.sample_rate=sr; self.saved=False; self.limit_reached=False
+            self.capture_active=True; self.generation+=1; self.filename=None; self.fault=None
+            return True
+    def stop(self):
+        with self._lock: self.capture_active=False
+    def append(self, frame):
+        with self._lock:
+            if not self.capture_active or self.saved or self.limit_reached: return
+            remaining=self.max_bytes-len(self._data)
+            if remaining<=0: self.limit_reached=True; return
+            a=_rec_np.asarray(frame)
+            if a.ndim>1: a=a[:,0]
+            a=_rec_np.nan_to_num(a,nan=0.0,posinf=1.0,neginf=-1.0)
+            pcm=_rec_np.rint(_rec_np.clip(a.astype(_rec_np.float32,copy=False),-1,1)*32767).astype('<i2',copy=False).tobytes()
+            take=min(len(pcm),remaining); take-=take%2; self._data.extend(pcm[:take])
+            if take<len(pcm) or len(self._data)>=self.max_bytes: self.limit_reached=True
+    def append_safe(self, frame):
+        try: self.append(frame)
+        except Exception:
+            # Capture must never take down realtime transcription.
+            with self._lock: self.fault='append_failed'
+            try: print('recording append failed:\n'+_rec_traceback.format_exc(), file=_rec_sys.stderr)
+            except Exception: pass
+    def status(self):
+        with self._lock:
+            # A stopped backend is authoritative; do not leave stale active state after stop.
+            if not STATE.running: self.capture_active=False
+            n=len(self._data); active=self.capture_active
+            return {'bytes':n,'seconds':n/(2*self.sample_rate) if self.sample_rate else 0,
+             'max_bytes':self.max_bytes,'limit_reached':self.limit_reached,'saved':self.saved,
+             'saving':self.saving,'capture_active':active,'available':bool(n and not self.saved and not self.saving and not STATE.running),
+             'generation':self.generation,'filename':self.filename,'fault':self.fault}
+    def save(self):
+        # Imports are local deliberately: no application startup behavior is changed.
+        import builtins
+        import os
+        import wave
+        import uuid
+        import logging
+        from pathlib import Path
+        request_id = uuid.uuid4().hex
+        path = None
+        file_created = False
+        claimed = False
+        logger = logging.getLogger(__name__)
+        try:
+            with self._lock:
+                if STATE.running:
+                    return {"success": False, "error": "recording_active", "request_id": request_id}, 409
+                if self.saving:
+                    return {"success": False, "error": "save_in_progress", "request_id": request_id}, 409
+                if self.saved:
+                    return {"success": True, "filename": getattr(self, "filename", None), "generation": getattr(self, "generation", None), "request_id": request_id}, 200
+                if not self._data or not self.sample_rate:
+                    return {"success": False, "error": "no_recording", "request_id": request_id}, 409
+                self.saving = True
+                claimed = True
+                data = bytes(self._data)
+                sample_rate = int(self.sample_rate)
+                generation = getattr(self, "generation", None)
+            if sample_rate < 8000 or sample_rate > 384000:
+                raise ValueError("invalid_sample_rate")
+            if len(data) % 2:
+                raise ValueError("odd_pcm16_bytes")
+            directory = Path(os.environ.get("APP_RECORDINGS_DIR", "recordings")).expanduser()
+            if not directory.is_absolute():
+                directory = Path(__file__).resolve().parent / directory
+            directory = directory.resolve()
+            directory.mkdir(parents=True, exist_ok=True)
+            name = "recording-" + uuid.uuid4().hex + ".wav"
+            path = directory / name
+            with builtins.open(path, "xb") as f:
+                file_created = True
+                with wave.open(f, "wb") as wf:
+                    wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sample_rate); wf.writeframes(data)
+            with self._lock:
+                self.saved = True; self.saving = False; self.filename = name; self.fault = None
+            logger.info("recording saved request_id=%s path=%s", request_id, str(path))
+            return {"success": True, "filename": name, "generation": generation, "request_id": request_id}, 200
+        except Exception as exc:
+            try:
+                logger.exception("recording save failed request_id=%s", request_id)
+            except Exception:
+                import traceback
+                import sys
+                try: traceback.print_exc(file=_rec_sys.stderr)
+                except Exception: pass
+            if file_created and path is not None:
+                try: path.unlink(missing_ok=True)
+                except Exception: pass
+            if claimed:
+                with self._lock:
+                    self.saving = False; self.fault = "save_failed"
+            return {"success": False, "error": "save_failed", "error_type": type(exc).__name__, "request_id": request_id}, 500
+RECORDING=_SessionRecording()
+@app.get('/api/recording/status')
+async def recording_status(): return _rec_JSONResponse(RECORDING.status())
+def _recording_save_sync(): return RECORDING.save()
+@app.post('/api/recording/save')
+async def recording_save():
+    payload,code=await _rec_run_in_threadpool(_recording_save_sync)
+    return _rec_JSONResponse(payload,status_code=code)
+
+
 # ---------- Control routes ----------
 
 @app.post("/start", response_class=PlainTextResponse)
@@ -1838,6 +1971,9 @@ async def start_pipeline():
         return PlainTextResponse("already running", status_code=200)
     if STATE.shutting_down:
         return PlainTextResponse("shutting_down", status_code=409)
+
+    if not RECORDING.start(SAMPLE_RATE):
+        return PlainTextResponse("recording_save_in_progress", status_code=409)
 
     # NEW: start realtime transcriber for this session
     try:
@@ -1884,6 +2020,7 @@ async def stop_pipeline():
         finally:
             RT.transcriber = None
 
+    RECORDING.stop()
     await broadcast("status", "audio_stopped")
     print("[HTTP] /stop completed")
     return PlainTextResponse("stopped")
@@ -2970,3 +3107,4 @@ if __name__ == "__main__":
     host = os.getenv("APP_BIND_HOST", "127.0.0.1")
     port = int(os.getenv("APP_BIND_PORT", "8080"))
     uvicorn.run("app:app", host=host, port=port, reload=False)
+# RECORDING_SAVE_REPAIR_V3

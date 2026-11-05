@@ -1934,5 +1934,16 @@
     <span>SUPPORT: <a href="https://buymeacoffee.com/betakontext" target="_blank" rel="noopener">buymeacoffee.com/betakontext</a></span>
     <span>CONTACT: Christoph Medicus | <a href="mailto:dev@betakontext.de">dev@betakontext.de</a> | <a href="https://dev.betakontext.de" target="_blank" rel="noopener">dev.betakontext.de</a></span>
   </div>
+
+
+<!-- RECORDING_PATCH_V1 --><!-- RECORDING_REPAIR_V2 -->
+<script>
+(()=>{const stop=document.getElementById('btn-stop');if(!stop)return;const save=document.createElement('button'), note=document.createElement('span');save.id='btn-save-recording';save.type='button';note.id='recording-save-status';note.style.marginLeft='8px';save.className=stop.className;stop.insertAdjacentElement('afterend',save);save.insertAdjacentElement('afterend',note);let busy=false,saving=false,lastGen=null,last=null,err='';
+function de(){let x=(document.getElementById('lang-select')||{}).value||document.documentElement.lang||localStorage.getItem('ui_lang')||localStorage.getItem('lang')||'en';return /^de/i.test(x)}function tx(){let g=de(),s=last||{};save.textContent=g?'Aufnahme speichern':'Save recording';let a=g?'Aufnahme':'Recording',t=`${a}: ${Number(s.seconds||0).toFixed(1)} s`;if(s.limit_reached)t+=g?' – RAM-Limit erreicht; STT läuft weiter.':' – RAM limit reached; STT continues.';if(s.saved)t+=` – ${(g?'gespeichert':'saved')}${s.filename?': '+s.filename:''}.`;else t+=g?' – RAM-Audio geht bei Neustart verloren.':' – RAM audio is lost on restart.';if(err)t+=' – '+err;note.textContent=t;save.disabled=!!(saving||!s.available||s.saved||s.saving||s.capture_active)}
+function message(j,code){let g=de(),e=(j&&j.error)||'network_error',id=j&&j.request_id;let m={recording_active:g?'Aufnahme läuft noch.':'Recording is still active.',save_in_progress:g?'Speichern läuft bereits.':'Save already in progress.',no_recording:g?'Keine Aufnahme verfügbar.':'No recording available.',save_failed:g?'Speichern fehlgeschlagen.':'Save failed.',network_error:g?'Netzwerkfehler.':'Network error.'}[e]||(g?'Speicherfehler':'Save error');return m+' ['+e+(code?' / '+code:'')+(id?' / '+id:'')+']'}
+async function poll(){if(busy)return;busy=true;try{let r=await fetch('/api/recording/status',{credentials:'same-origin'}),j=await r.json();if(r.ok){if(lastGen!==null&&j.generation!==lastGen)err='';lastGen=j.generation;last=j;tx()}}catch(_){err=message(null,0);tx()}finally{busy=false}}
+save.addEventListener('click',async()=>{if(saving)return;saving=true;err='';tx();try{let r=await fetch('/api/recording/save',{method:'POST',credentials:'same-origin'}),j;try{j=await r.json()}catch(_){j=null}if(!r.ok||!j||!j.success)err=message(j,r.status);else {last=Object.assign(last||{},j,{saved:true});err=''}}catch(_){err=message(null,0)}finally{saving=false;await poll();tx()}});document.addEventListener('change',tx);new MutationObserver(tx).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});window.addEventListener('storage',tx);poll();setInterval(poll,2000)})();
+</script>
+
 </body>
 </html>
