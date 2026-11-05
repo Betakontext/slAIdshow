@@ -1,6 +1,11 @@
 # config_generator.py
 
-"""Generate conservative slAIdshow configuration from hardware.json."""
+"""Generate conservative local-NVIDIA configuration from hardware.json.
+
+Existing configurations require explicit replacement with --force.
+This generator does not validate runtime integration or model compatibility.
+CPU-only and remote operation require a separate configuration path.
+"""
 
 from __future__ import annotations
 
@@ -40,7 +45,7 @@ def _integer(data: dict[str, Any], key: str, minimum: int = 0) -> int:
 
 
 def validate_hardware(data: object) -> dict[str, Any]:
-    """Validate the report produced by hardware_detect.py."""
+    """Validate and normalize the report without replacing its metadata."""
     if not isinstance(data, dict):
         raise ConfigurationError("Hardware-Datei muss ein JSON-Objekt enthalten.")
 
@@ -51,25 +56,30 @@ def validate_hardware(data: object) -> dict[str, Any]:
         )
     if data.get("memory_unit") != "GiB":
         raise ConfigurationError("Hardware-Feld 'memory_unit' muss 'GiB' sein.")
-    if data.get("is_apple_silicon") is not False:
+
+    apple_silicon = data.get("is_apple_silicon")
+    if type(apple_silicon) is not bool:
         raise ConfigurationError(
-            "Dieses Profil benötigt NVIDIA-Hardware; "
-            "Apple Silicon ist nicht freigegeben."
+            "Hardware-Feld 'is_apple_silicon' muss ein Boolean sein."
+        )
+    if apple_silicon:
+        raise ConfigurationError(
+            "Dieses lokale GPU-Profil unterstützt Apple Silicon nicht."
         )
 
     index = _integer(data, "gpu_index")
     count = _integer(data, "gpu_count", 1)
     if index >= count:
-        raise ConfigurationError(
-            "GPU-Index liegt außerhalb der erkannten GPUs."
-        )
+        raise ConfigurationError("GPU-Index liegt außerhalb der erkannten GPUs.")
 
+    identity: dict[str, str] = {}
     for key in ("gpu_uuid", "gpu_name"):
         value = data.get(key)
         if not isinstance(value, str) or not value.strip():
             raise ConfigurationError(
                 f"Hardware-Feld '{key}' muss eine nichtleere Zeichenkette sein."
             )
+        identity[key] = value.strip()
 
     total = _integer(data, "vram_total_bytes", 1)
     free = _integer(data, "vram_free_bytes")
@@ -79,12 +89,15 @@ def validate_hardware(data: object) -> dict[str, Any]:
             "Hardware-Datei enthält widersprüchliche VRAM-Werte."
         )
 
+    # A gap may represent reserved memory; equality is not required.
     # Exact byte counters are authoritative, not rounded GiB values.
     return {
+        "schema_version": version,
+        "memory_unit": "GiB",
+        "is_apple_silicon": apple_silicon,
         "gpu_index": index,
-        "gpu_uuid": data["gpu_uuid"],
-        "gpu_name": data["gpu_name"],
         "gpu_count": count,
+        **identity,
         "vram_total_bytes": total,
         "vram_free_bytes": free,
         "vram_used_bytes": used,
@@ -95,7 +108,9 @@ def select_tier(total_bytes: int, override: str | None = None) -> str:
     """Select by single-device capacity; allow smaller profile overrides."""
     if type(total_bytes) is not int or total_bytes < TIER_MINIMUMS["6gb"]:
         raise ConfigurationError(
-            "Mindestens 6 GiB VRAM auf einer einzelnen NVIDIA-GPU erforderlich."
+            "Lokale GPU-Bildprofile benötigen mindestens 6 GiB VRAM auf "
+            "einer einzelnen NVIDIA-GPU; CPU-/Remote-Betrieb separat "
+            "konfigurieren."
         )
 
     detected = "6gb"
@@ -118,24 +133,24 @@ def select_tier(total_bytes: int, override: str | None = None) -> str:
 
 
 def build_config(hardware: dict[str, Any], tier: str) -> dict[str, Any]:
-    """Keep every tier conservative until model combinations are accepted."""
-    hardware = validate_hardware(
-        {
-            **hardware,
-            "schema_version": SCHEMA_VERSION,
-            "memory_unit": "GiB",
-            "is_apple_silicon": False,
-        }
-    )
-    tier = select_tier(hardware["vram_total_bytes"], tier)
+    """Use the conservative baseline until larger combinations are accepted."""
+    validated = validate_hardware(hardware)
+    selected = select_tier(validated["vram_total_bytes"], tier)
+    hardware_snapshot = {
+        key: value
+        for key, value in validated.items()
+        if key not in {"schema_version", "memory_unit"}
+    }
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "tier": tier,
+        "tier": selected,
         "hardware": {
-            **hardware,
+            **hardware_snapshot,
             "memory_unit": "bytes",
             "memory_values_are_snapshot": True,
+            "gpu_index_scope": "hardware_detection_environment",
+            "runtime_gpu_uuid_verification_required": True,
         },
         "readiness": {
             "runtime_integration_required": True,
@@ -197,17 +212,78 @@ def build_config(hardware: dict[str, Any], tier: str) -> dict[str, Any]:
         },
         "paths": {
             "models": "/app/models",
-            "outputs": "/app/static",
+            "outputs": "/app/outputs",
             "recordings": "/app/recordings",
         },
     }
 
 
-def _write_yaml_atomic(config: dict[str, Any], target: Path) -> None:
-    """Keep the previous file intact if serialization or replacement fails."""
+def _path(
+    explicit: str | Path | None,
+    environment_key: str,
+    default: Path,
+) -> Path:
+    """Reject empty paths instead of interpreting them as the current directory."""
+    raw = (
+        explicit
+        if explicit is not None
+        else os.environ.get(environment_key, str(default))
+    )
+    if not isinstance(raw, (str, Path)):
+        raise ConfigurationError(f"{environment_key}: ungültiger Dateipfad.")
+    if isinstance(raw, str) and not raw.strip():
+        raise ConfigurationError(f"{environment_key} darf nicht leer sein.")
+    try:
+        return Path(raw).expanduser()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{environment_key}: Dateipfad konnte nicht aufgelöst werden: {exc}"
+        ) from exc
+
+
+def _validate_paths(source: Path, target: Path) -> None:
+    """Protect the hardware report, including symlink and hard-link aliases."""
+    try:
+        identical = source.resolve() == target.resolve()
+        if not identical and source.exists() and target.exists():
+            identical = source.samefile(target)
+        if identical:
+            raise ConfigurationError(
+                "Hardware-Datei und Konfigurationsdatei "
+                "dürfen nicht identisch sein."
+            )
+        if target.is_symlink():
+            raise ConfigurationError(
+                "Die Konfigurationsdatei darf kein symbolischer Link sein."
+            )
+    except (OSError, RuntimeError, ValueError) as exc:
+        if isinstance(exc, ConfigurationError):
+            raise
+        raise ConfigurationError(
+            f"Dateipfade konnten nicht geprüft werden: {exc}"
+        ) from exc
+
+
+def _write_yaml_atomic(
+    config: dict[str, Any],
+    target: Path,
+    *,
+    overwrite: bool = False,
+) -> None:
+    """Publish a complete file, preserving existing files unless authorized."""
     temporary: str | None = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_symlink():
+            raise ConfigurationError(
+                "Die Konfigurationsdatei darf kein symbolischer Link sein."
+            )
+        if target.exists() and not overwrite:
+            raise ConfigurationError(
+                f"Konfiguration existiert bereits: {target}; "
+                "zum bewussten Ersetzen --force verwenden."
+            )
+
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
@@ -226,9 +302,22 @@ def _write_yaml_atomic(config: dict[str, Any], target: Path) -> None:
             handle.flush()
             os.fsync(handle.fileno())
 
-        os.replace(temporary, target)
-        temporary = None
-    except (OSError, yaml.YAMLError) as exc:
+        if overwrite:
+            os.replace(temporary, target)
+            temporary = None
+        else:
+            # Atomic no-clobber publication prevents concurrent regeneration.
+            # Fail safely if the filesystem does not support hard links.
+            try:
+                os.link(temporary, target)
+            except FileExistsError as exc:
+                raise ConfigurationError(
+                    f"Konfiguration existiert bereits: {target}; "
+                    "zum bewussten Ersetzen --force verwenden."
+                ) from exc
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        if isinstance(exc, ConfigurationError):
+            raise
         raise ConfigurationError(
             f"Konfiguration konnte nicht sicher gespeichert werden: "
             f"{target}: {exc}"
@@ -245,29 +334,16 @@ def generate(
     hardware_path: str | Path | None = None,
     output_path: str | Path | None = None,
     tier: str | None = None,
+    *,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     """Read hardware and persist configuration without contacting services."""
-    source = Path(
-        hardware_path
-        if hardware_path is not None
-        else os.environ.get("HARDWARE_PATH", str(DEFAULT_HARDWARE_PATH))
-    )
-    target = Path(
-        output_path
-        if output_path is not None
-        else os.environ.get("CONFIG_PATH", str(DEFAULT_CONFIG_PATH))
-    )
+    if type(overwrite) is not bool:
+        raise ConfigurationError("overwrite muss ein Boolean sein.")
 
-    try:
-        if source.resolve() == target.resolve():
-            raise ConfigurationError(
-                "Hardware-Datei und Konfigurationsdatei "
-                "dürfen nicht identisch sein."
-            )
-    except (OSError, RuntimeError) as exc:
-        raise ConfigurationError(
-            f"Dateipfade konnten nicht aufgelöst werden: {exc}"
-        ) from exc
+    source = _path(hardware_path, "HARDWARE_PATH", DEFAULT_HARDWARE_PATH)
+    target = _path(output_path, "CONFIG_PATH", DEFAULT_CONFIG_PATH)
+    _validate_paths(source, target)
 
     try:
         with source.open(encoding="utf-8") as handle:
@@ -281,14 +357,17 @@ def generate(
     override = tier if tier is not None else os.environ.get("SLAIDSHOW_TIER")
     selected = select_tier(hardware["vram_total_bytes"], override)
     config = build_config(hardware, selected)
-    _write_yaml_atomic(config, target)
+    _write_yaml_atomic(config, target, overwrite=overwrite)
     return config
 
 
 def main(argv: list[str] | None = None) -> int:
     """Provide a standalone configuration generation command."""
     parser = argparse.ArgumentParser(
-        description="Erzeugt eine konservative slAIdshow-Konfiguration."
+        description=(
+            "Erzeugt eine konservative lokale NVIDIA-Konfiguration; "
+            "bestehende Dateien werden nur mit --force ersetzt."
+        )
     )
     parser.add_argument("--hardware", type=Path)
     parser.add_argument("--output", type=Path)
@@ -297,25 +376,35 @@ def main(argv: list[str] | None = None) -> int:
         choices=tuple(TIER_MINIMUMS),
         help="Hat Vorrang vor SLAIDSHOW_TIER.",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Bestehende Konfiguration vollständig ersetzen.",
+    )
     args = parser.parse_args(argv)
 
     try:
-        config = generate(args.hardware, args.output, args.tier)
+        target = _path(args.output, "CONFIG_PATH", DEFAULT_CONFIG_PATH)
+        config = generate(
+            args.hardware,
+            target,
+            args.tier,
+            overwrite=args.force,
+        )
     except ConfigurationError as exc:
         print(f"Fehler: {exc}", file=sys.stderr)
         return 1
 
-    target = args.output or Path(
-        os.environ.get("CONFIG_PATH", str(DEFAULT_CONFIG_PATH))
-    )
     print(
         f"Konfiguration gespeichert: {target} "
         f"(Profil {config['tier']}, CPU-STT, sequenzielle GPU-Nutzung).",
         file=sys.stderr,
     )
     print(
-        "Hinweis: Laufzeitintegration sowie Modell-, Workflow- und "
-        "Hardware-Abnahme stehen noch aus; Downloads sind deaktiviert.",
+        "Hinweis: Alle Tiers verwenden vorerst dieselbe konservative Basis; "
+        "Laufzeitintegration, Dienst-Endpunkte, Modelle, Workflows und "
+        "Hardware-Abnahme müssen noch geprüft werden. "
+        "Downloads sind deaktiviert.",
         file=sys.stderr,
     )
     return 0
@@ -323,4 +412,5 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 

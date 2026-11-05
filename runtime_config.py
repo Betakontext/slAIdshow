@@ -2,9 +2,11 @@
 """Load conservative generated configuration without initializing backends.
 
 This module has no import-time filesystem, GPU, or network side effects.
-Schema version 1 currently accepts only the conservative generator output.
+Schema version 1 accepts only the current conservative generator output.
 Application integration must happen after dotenv loading and before importing
 backend modules that read environment variables.
+
+Loading configuration does not enforce runtime policy or establish readiness.
 """
 
 from __future__ import annotations
@@ -30,6 +32,16 @@ from config_generator import (
 )
 
 MAX_CONFIG_BYTES = 256 * 1024
+HARDWARE_REPORT_FIELDS = (
+    "is_apple_silicon",
+    "gpu_index",
+    "gpu_count",
+    "gpu_uuid",
+    "gpu_name",
+    "vram_total_bytes",
+    "vram_free_bytes",
+    "vram_used_bytes",
+)
 
 
 class RuntimeConfigurationError(ValueError):
@@ -53,8 +65,9 @@ def _construct_mapping(
                 "YAML-Schlüssel müssen Zeichenketten sein."
             )
         if key in result:
+            # Do not echo untrusted keys or potential secrets.
             raise RuntimeConfigurationError(
-                f"Doppelter YAML-Schlüssel: '{key}'."
+                "Konfiguration enthält einen doppelten YAML-Schlüssel."
             )
         result[key] = loader.construct_object(value_node, deep=True)
     return result
@@ -71,7 +84,7 @@ def _match_baseline(
     expected: object,
     path: str = "config",
 ) -> None:
-    """Check exact types and values without exposing values in errors."""
+    """Check exact types and values without exposing configuration values."""
     if type(actual) is not type(expected):
         raise RuntimeConfigurationError(
             f"Ungültiger Datentyp bei '{path}'."
@@ -79,11 +92,14 @@ def _match_baseline(
 
     if isinstance(expected, dict):
         if not isinstance(actual, dict):
-            raise RuntimeConfigurationError(f"Ungültiges Objekt bei '{path}'.")
+            raise RuntimeConfigurationError(
+                f"Ungültiges Objekt bei '{path}'."
+            )
         if actual.keys() != expected.keys():
             raise RuntimeConfigurationError(
                 f"Fehlende oder unbekannte Felder bei '{path}'."
             )
+        # Only trusted baseline keys are included in diagnostic paths.
         for key, value in expected.items():
             _match_baseline(actual[key], value, f"{path}.{key}")
         return
@@ -125,32 +141,52 @@ def validate_config(data: object) -> dict[str, Any]:
     if not isinstance(tier, str):
         raise RuntimeConfigurationError("Konfigurationsprofil fehlt.")
 
-    try:
-        normalized_hardware = validate_hardware(
-            {
-                **hardware,
-                "schema_version": SCHEMA_VERSION,
-                "memory_unit": "GiB",
-                "is_apple_silicon": False,
-            }
+    if hardware.get("memory_unit") != "bytes":
+        raise RuntimeConfigurationError(
+            "Hardware-Konfiguration muss Byte-Zähler deklarieren."
         )
+    if hardware.get("is_apple_silicon") is not False:
+        raise RuntimeConfigurationError(
+            "Dieses lokale GPU-Profil benötigt "
+            "'is_apple_silicon: false'."
+        )
+
+    # Adapt the generated schema to the detector schema explicitly.
+    # Preserve all supplied hardware facts, especially platform information.
+    # The detector's GiB label accompanies authoritative byte counters.
+    report = {
+        "schema_version": version,
+        "memory_unit": "GiB",
+        **{key: hardware.get(key) for key in HARDWARE_REPORT_FIELDS},
+    }
+
+    try:
+        normalized_hardware = validate_hardware(report)
         selected = select_tier(
             normalized_hardware["vram_total_bytes"],
             tier,
         )
         expected = build_config(normalized_hardware, selected)
     except ConfigurationError as exc:
-        raise RuntimeConfigurationError(str(exc)) from exc
+        # Generator errors may include untrusted override values.
+        raise RuntimeConfigurationError(
+            "Hardware-Konfiguration oder Profil ist ungültig; "
+            "Konfiguration mit config_generator.py neu erzeugen."
+        ) from exc
 
     # Reject edits that could bypass the conservative memory/offline policy.
-    # Validated model selections require an explicit future schema extension.
+    # Model selections and deployment variants need an explicit contract update.
     _match_baseline(data, expected)
     return copy.deepcopy(expected)
 
 
 @dataclass(frozen=True)
 class LoadedConfiguration:
-    """Hold validated data without claiming backend readiness."""
+    """Hold validated data without claiming backend readiness.
+
+    Use as_dict() for application initialization. The private dictionary is
+    an internal implementation detail, not a security boundary.
+    """
 
     path: Path
     _data: dict[str, Any]
@@ -181,29 +217,52 @@ class LoadedConfiguration:
             "readiness": copy.deepcopy(self._data["readiness"]),
             "runtime_policy_enforced": False,
             "hardware_snapshot_revalidated": False,
+            "backend_readiness_checked": False,
         }
 
 
-def load_config(
-    path: str | Path | None = None,
-) -> LoadedConfiguration:
-    """Load required configuration; never silently fall back to environment."""
+def _config_path(path: str | Path | None) -> Path:
+    """Resolve explicit or environment configuration paths without I/O."""
     raw_path = (
         path
         if path is not None
         else os.environ.get("CONFIG_PATH", str(DEFAULT_CONFIG_PATH))
     )
-    if not str(raw_path).strip():
+    if not isinstance(raw_path, (str, Path)):
+        raise RuntimeConfigurationError(
+            "CONFIG_PATH muss eine Zeichenkette oder ein Path sein."
+        )
+    if isinstance(raw_path, str) and not raw_path.strip():
         raise RuntimeConfigurationError("CONFIG_PATH darf nicht leer sein.")
 
-    source = Path(raw_path).expanduser()
+    try:
+        source = Path(raw_path).expanduser()
+        if "\x00" in str(source):
+            raise RuntimeConfigurationError(
+                "CONFIG_PATH enthält ein ungültiges Nullzeichen."
+            )
+        return source
+    except (OSError, RuntimeError, ValueError) as exc:
+        if isinstance(exc, RuntimeConfigurationError):
+            raise
+        raise RuntimeConfigurationError(
+            "CONFIG_PATH konnte nicht aufgelöst werden."
+        ) from exc
+
+
+def load_config(
+    path: str | Path | None = None,
+) -> LoadedConfiguration:
+    """Load required configuration without silently mutating it."""
+    source = _config_path(path)
 
     try:
         with source.open("rb") as handle:
             content = handle.read(MAX_CONFIG_BYTES + 1)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise RuntimeConfigurationError(
-            f"Konfiguration konnte nicht gelesen werden: {source}"
+            "Konfiguration konnte nicht gelesen werden; "
+            "CONFIG_PATH und Dateiberechtigungen prüfen."
         ) from exc
 
     if len(content) > MAX_CONFIG_BYTES:
@@ -216,20 +275,28 @@ def load_config(
             content.decode("utf-8"),
             Loader=_UniqueKeyLoader,
         )
-    except (UnicodeError, yaml.YAMLError, RecursionError) as exc:
+    except RuntimeConfigurationError:
+        raise
+    except (UnicodeError, yaml.YAMLError, RecursionError, ValueError) as exc:
         raise RuntimeConfigurationError(
             "Konfiguration enthält ungültiges oder zu stark "
             "verschachteltes UTF-8/YAML."
         ) from exc
 
-    validated = validate_config(data)
+    try:
+        validated = validate_config(data)
+    except RecursionError as exc:
+        raise RuntimeConfigurationError(
+            "Konfiguration enthält eine nicht unterstützte Verschachtelung."
+        ) from exc
 
     # Overrides belong to generation, not hidden runtime mutation.
     override = os.environ.get("SLAIDSHOW_TIER")
     if override is not None and override != validated["tier"]:
         raise RuntimeConfigurationError(
             "SLAIDSHOW_TIER widerspricht der gespeicherten Konfiguration; "
-            "config_generator.py mit dem gewünschten Profil erneut ausführen."
+            "config_generator.py mit dem gewünschten Profil und --force "
+            "bewusst erneut ausführen."
         )
 
     return LoadedConfiguration(path=source, _data=validated)
