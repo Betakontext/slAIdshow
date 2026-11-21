@@ -1,6 +1,6 @@
 <img src="assets/slAIdshow_logo.svg" width="500">
 
-## Local AI Speech→Image Generator
+## Realtime Speech to Image Generator
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#license)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)

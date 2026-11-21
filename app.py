@@ -1626,6 +1626,7 @@ if bridge_router is not None:
 
 # Static mounts
 app.mount("/static", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="static")
+app.mount("/assets", StaticFiles(directory=str(Path("assets").resolve())), name="assets")
 if not any(route for route in app.router.routes if getattr(route, "path", "") == "/workflows"):
     app.mount("/workflows", StaticFiles(directory=str(WORKFLOWS_DIR), html=False), name="workflows")
 
@@ -3297,6 +3298,8 @@ async def open_dir():
         }
         from fastapi.responses import JSONResponse
         return JSONResponse(detail, status_code=409)
+
+
 
 # ---------- App entry ----------
 
