@@ -11,9 +11,11 @@
 ![Docker Compose](https://img.shields.io/badge/orchestration-Docker%20Compose-2496ED)
 ![VRAM Auto-Detect](https://img.shields.io/badge/VRAM-auto--detect-success)
 
-Whisper–Ollama–ComfyUI pipeline for AI live illustrations via a FastAPI browser UI — local by default, LAN‑friendly, cloud optional (Pollinations). Zero subscriptions, zero vendor lock‑in: keep your data and your stack.
+slAIDshow is a Whisper–Ollama–ComfyUI pipeline for AI live illustrations via a FastAPI browser UI — local by default, LAN‑friendly, cloud optional (Pollinations).
 
-Perfect for streamers, lecturers, and storytellers: turn live speech into compelling visuals in seconds.
+Zero subscriptions, zero vendor lock‑in: keep your data and your stack.
+
+Perfect for artists, streamers, lecturers, and storytellers: turn live speech into compelling visuals in seconds.
 
 
 ---
