@@ -1,51 +1,163 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!-- assets/slaidshow-logo.svg -->
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="72" viewBox="0 0 256 72" role="img" aria-label="slAIdshow logo">
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#00D1B2"/>
-      <stop offset="1" stop-color="#6C5CE7"/>
+
+<svg
+   width="256"
+   height="72"
+   viewBox="0 0 256 72"
+   role="img"
+   aria-label="slAIdshow logo"
+   version="1.1"
+   id="svg35"
+   sodipodi:docname="slAIdshow_logo.svg"
+   inkscape:version="1.2.2 (b0a8486541, 2022-12-01)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview37"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     showgrid="false"
+     inkscape:zoom="4.46875"
+     inkscape:cx="128"
+     inkscape:cy="36.027972"
+     inkscape:window-width="1280"
+     inkscape:window-height="658"
+     inkscape:window-x="0"
+     inkscape:window-y="30"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="g33" />
+  <defs
+     id="defs9">
+    <linearGradient
+       id="g"
+       x1="0"
+       y1="0"
+       x2="1"
+       y2="1">
+      <stop
+         offset="0"
+         stop-color="#00D1B2"
+         id="stop2" />
+      <stop
+         offset="1"
+         stop-color="#6C5CE7"
+         id="stop4" />
     </linearGradient>
-    <style>
-      .word { font: 700 24px/1.1 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", Arial, sans-serif; letter-spacing: 0.5px; }
+    <style
+       id="style7">
+      .word { font: 700 24px/1.1 system-ui, -apple-system, &quot;Segoe UI&quot;, Roboto, Ubuntu, Cantarell, &quot;Noto Sans&quot;, Arial, sans-serif; letter-spacing: 0.5px; }
       .accent { fill: url(#g); }
       .muted { fill: #1F2937; }
       @media (prefers-color-scheme: dark){
         .muted { fill: #E5E7EB; }
       }
     </style>
+    <linearGradient
+       inkscape:collect="always"
+       xlink:href="#g"
+       id="linearGradient301"
+       x1="24.3405"
+       y1="3.9075747"
+       x2="43.63705"
+       y2="23.204125"
+       gradientTransform="matrix(1.1602063,0,0,0.86191571,-6.4809809,0)"
+       gradientUnits="userSpaceOnUse" />
   </defs>
-
   <!-- Icon: speech-bubble mouth with screen inside -->
-  <g transform="translate(8,8)">
+  <g
+     transform="translate(8,8)"
+     id="g25">
     <!-- Mouth / speech-bubble outline -->
-    <path d="M2 18 Q2 4 24 4 Q46 4 46 18 Q46 36 30 39 L14 50 L17 37 Q2 36 2 18 Z"
-          fill="none" stroke="url(#g)" stroke-width="3" stroke-linejoin="round"/>
+    <path
+       d="M2 18 Q2 4 24 4 Q46 4 46 18 Q46 36 30 39 L14 50 L17 37 Q2 36 2 18 Z"
+       fill="none"
+       stroke="url(#g)"
+       stroke-width="3"
+       stroke-linejoin="round"
+       id="path11" />
     <!-- Upper lip -->
-    <path d="M8 14 Q24 8 40 14"
-          fill="none" stroke="url(#g)" stroke-width="2" stroke-linecap="round"/>
+    <path
+       d="M8 14 Q24 8 40 14"
+       fill="none"
+       stroke="url(#g)"
+       stroke-width="2"
+       stroke-linecap="round"
+       id="path13" />
     <!-- Lower lip (same span as upper, centred) -->
-    <path d="M8 28 Q24 38 40 28"
-          fill="none" stroke="url(#g)" stroke-width="2" stroke-linecap="round"/>
-
+    <path
+       d="M8 28 Q24 38 40 28"
+       fill="none"
+       stroke="url(#g)"
+       stroke-width="2"
+       stroke-linecap="round"
+       id="path15" />
     <!-- Screen (centred in mouth) -->
-    <rect x="13" y="14" width="22" height="15" rx="2"
-          fill="none" stroke="url(#g)" stroke-width="2"/>
+    <rect
+       x="13"
+       y="14"
+       width="22"
+       height="15"
+       rx="2"
+       fill="none"
+       stroke="url(#g)"
+       stroke-width="2"
+       id="rect17" />
     <!-- Stand -->
-    <line x1="21" y1="29" x2="27" y2="29"
-          stroke="url(#g)" stroke-width="2" stroke-linecap="round"/>
+    <line
+       x1="21"
+       y1="29"
+       x2="27"
+       y2="29"
+       stroke="url(#g)"
+       stroke-width="2"
+       stroke-linecap="round"
+       id="line19" />
     <!-- Mountain (peak left) -->
-    <polyline points="16,27 21,22 26,27"
-              fill="none" stroke="url(#g)" stroke-width="1.5"
-              stroke-linecap="round" stroke-linejoin="round"/>
+    <polyline
+       points="16,27 21,22 26,27"
+       fill="none"
+       stroke="url(#g)"
+       stroke-width="1.5"
+       stroke-linecap="round"
+       stroke-linejoin="round"
+       id="polyline21" />
     <!-- Sun (right of peak) -->
-    <circle cx="29" cy="19" r="2" fill="url(#g)"/>
+    <circle
+       cx="29"
+       cy="19"
+       r="2"
+       fill="url(#g)"
+       id="circle23" />
   </g>
-
   <!-- Wordmark -->
-  <g transform="translate(70,18)">
-    <text class="word muted" x="0" y="20">sl</text>
-    <text class="word accent" x="28" y="20">AI</text>
-    <text class="word muted" x="62" y="20">dshow</text>
+  <g
+     transform="translate(70,18)"
+     id="g33">
+    <text
+       class="word muted"
+       x="0"
+       y="20"
+       id="text27">sl</text>
+    <text
+       class="word accent"
+       x="21.519018"
+       y="20"
+       id="text29"
+       style="font-style:normal;font-variant:normal;font-weight:700;font-stretch:normal;font-size:24px;line-height:1.1;font-family:system-ui, '-apple-system', 'Segoe UI', Roboto, Ubuntu, Cantarell, 'Noto Sans', Arial, sans-serif;fill:url(#linearGradient301)">AI</text>
+    <text
+       class="word muted"
+       x="45.949909"
+       y="20"
+       id="text31"
+       style="font-style:normal;font-variant:normal;font-weight:700;font-stretch:normal;font-size:24px;line-height:1.1;font-family:system-ui, '-apple-system', 'Segoe UI', Roboto, Ubuntu, Cantarell, 'Noto Sans', Arial, sans-serif">dshow</text>
   </g>
 </svg>
