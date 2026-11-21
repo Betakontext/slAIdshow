@@ -1,13 +1,5 @@
 #!/usr/bin/env pwsh
-<#
-Launcher for slAUdshow (Windows PowerShell)
-- Localhost only
-- Project virtual environment
-- Requirements installation
-- Optional webrtcvad-wheels, required pywhispercpp
-- Preflight checks for Ollama and ComfyUI
-- Start FastAPI app via uvicorn (app:app)
-#>
+
 
 param(
   # Server bind (localhost only for privacy)

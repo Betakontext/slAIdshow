@@ -1,0 +1,66 @@
+{
+  "1": {
+    "inputs": {
+      "ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": { "title": "Load Checkpoint" }
+  },
+  "2": {
+    "inputs": {
+      "text": "scientific infographic, vector illustration, flat design, clean layout, labeled diagram, clear typography, high contrast, minimal color palette, precise lines, data visualization, axis labels, legend, correct spelling, accurate numbers, sans-serif text, outline icons",
+      "clip": [ "1", 1 ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "Positive Prompt" }
+  },
+  "3": {
+    "inputs": {
+      "text": "photo, 3d render, realistic skin, ornate, clutter, noisy background, low quality, blurry, jpeg artifacts, heavy shading, complex textures, handwriting, misspelled text, garbled letters, random letters, watermark, logo, signature, distorted numbers, extra digits, bad anatomy",
+      "clip": [ "1", 1 ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "Negative Prompt" }
+  },
+  "4": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": { "title": "Empty Latent 1024x1024" }
+  },
+  "5": {
+    "inputs": {
+      "seed": 19127555788607,
+      "steps": 34,
+      "cfg": 6.8,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 1.0,
+      "model": [ "1", 0 ],
+      "positive": [ "2", 0 ],
+      "negative": [ "3", 0 ],
+      "latent_image": [ "4", 0 ]
+    },
+    "class_type": "KSampler",
+    "_meta": { "title": "KSampler (Text-optimized)" }
+  },
+  "6": {
+    "inputs": {
+      "samples": [ "5", 0 ],
+      "vae": [ "1", 2 ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": { "title": "VAE Decode" }
+  },
+  "7": {
+    "inputs": {
+      "filename_prefix": "ComfyUI_infographic_sd15",
+      "images": [ "6", 0 ]
+    },
+    "class_type": "SaveImage",
+    "_meta": { "title": "Save Image" }
+  }
+}

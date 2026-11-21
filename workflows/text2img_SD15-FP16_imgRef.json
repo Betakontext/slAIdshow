@@ -1,0 +1,82 @@
+{
+  "1": {
+    "inputs": {
+      "ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": { "title": "Load Checkpoint (SD1.5 FP16)" }
+  },
+  "2": {
+    "inputs": {
+      "text": "\"Kinder spielen in einem Schwimmbad an der Küste. Felsen glitzern im Sonnenlicht.\"",
+      "clip": ["1", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "CLIP Text Encode (Positive)" }
+  },
+  "3": {
+    "inputs": {
+      "text": "text, watermark, logo, low quality, blurry, bad anatomy",
+      "clip": ["1", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "CLIP Text Encode (Negative)" }
+  },
+  "4": {
+    "inputs": {
+      "width": 512,
+      "height": 512,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": { "title": "Empty Latent Image (Base Size)" }
+  },
+  "8": {
+    "inputs": {
+      "url": "http://127.0.0.1:8080/ref/PLACEHOLDER.png",
+      "timeout_sec": 6
+    },
+    "class_type": "ImageFromURL",
+    "_meta": { "title": "Image From URL (Reference)" }
+  },
+  "9": {
+    "inputs": {
+      "pixels": ["8", 0],
+      "vae": ["1", 2]
+    },
+    "class_type": "VAEEncode",
+    "_meta": { "title": "VAE Encode (Ref → Latents)" }
+  },
+  "5": {
+    "inputs": {
+      "seed": 19127555788607,
+      "steps": 20,
+      "cfg": 8,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 0.55,
+      "model": ["1", 0],
+      "positive": ["2", 0],
+      "negative": ["3", 0],
+      "latent_image": ["9", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": { "title": "KSampler (Ref-guided)" }
+  },
+  "6": {
+    "inputs": {
+      "samples": ["5", 0],
+      "vae": ["1", 2]
+    },
+    "class_type": "VAEDecode",
+    "_meta": { "title": "VAE Decode" }
+  },
+  "7": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": ["6", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": { "title": "Save Image" }
+  }
+}
