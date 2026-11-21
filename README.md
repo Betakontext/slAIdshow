@@ -13,6 +13,8 @@ Whisper–Ollama–ComfyUI pipeline for AI live illustrations via a FastAPI brow
 
 Perfect for streamers, lecturers, and storytellers: turn live speech into compelling visuals in seconds.
 
+![slAIdshow logo](assets/slaidshow-logo.svg)
+
 ---
 
 ## Highlights
@@ -25,18 +27,24 @@ Perfect for streamers, lecturers, and storytellers: turn live speech into compel
 - LLM via Ollama with tier‑based model presets
 - Image via ComfyUI (SD1.5+LCM for 6–8 GiB; FLUX.2 small FP8 for ≥16 GiB)
 - Optional image via Pollinations
+- Style Engine:
+  - Width/height, positive/negative prompts, seeds
+  - Workflow selection (ComfyUI)
+  - Reference images (upload or URL) with optional LLM‑Vision interpretation for content/style extraction
 - Server‑Sent Events (SSE) UI with Start/Stop, styles, gallery, fullscreen
 - No silent cloud fallbacks; Pollinations is opt‑in and disabled by default
 - Strict download policy: no automatic model downloads
 
 ---
 
+![Architecture](assets/architecture.svg)
+
 ## What’s new and current
 
 - VRAM auto‑detection (NVML/pynvml) + config generator (YAML)
   - hardware_detect.py → /app/config/hardware.json
   - config_generator.py → /app/config/generated.yaml
-- VRAM scheduler: sequential < 12 GiB; parallel ≥ 12 GiB
+- VRAM scheduler: sequential &lt; 12 GiB; parallel ≥ 12 GiB
 - Parakeet TDT 0.6B v3 available as GGUF via whisper.cpp (pywhispercpp); Faster‑Whisper remains supported
 - Docker Compose stack: init / ollama / comfyui / backend
 - model_downloader.py enforces “downloads disabled” (no network)
@@ -62,9 +70,9 @@ Prerequisites
 - Git
 
 1) Clone and env
-- git clone <repo> && cd slAIdshow
+- git clone &lt;repo&gt; && cd slAIdshow
 - cp .env.example .env
-- Optional: set SLAIDSHOW_TIER=6gb in .env for a conservative profile, POLLINATIONS_SECRET to use Pollinations as cloud image backend
+- Optional: set SLAIDSHOW_TIER=6gb in .env for a conservative profile; set POLLINATIONS_SECRET only if you plan to use Pollinations
 
 2) Start backends
 - docker compose up -d ollama comfyui
@@ -142,7 +150,7 @@ CPU / Remote image option
 - ./recordings — reserved for upcoming recording feature
 
 Env overrides
-- SLAIDSHOW_TIER=6gb|8gb|16gb|24gb (only <= detected tier)
+- SLAIDSHOW_TIER=6gb|8gb|16gb|24gb (only &lt;= detected tier)
 - GPU_INDEX to select a specific GPU before running hardware_detect.py
 
 ---

@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- assets/architecture.svg -->
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="520" viewBox="0 0 980 520" role="img" aria-label="slAIdshow architecture with Style Engine">
+  <defs>
+    <style>
+      .b { fill:#ffffff; stroke:#1F2937; stroke-width:2; }
+      .t { font: 600 13px/1.3 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", Arial, sans-serif; fill:#1F2937; }
+      .s { font: 12px/1.25 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", Arial, sans-serif; fill:#374151; }
+      .edge { stroke:#6C5CE7; stroke-width:2.2; marker-end:url(#arrow); fill:none; }
+      .alt  { stroke:#00D1B2; stroke-dasharray:6 4; marker-end:url(#arrow); fill:none; }
+      .note { fill:#F3F4F6; stroke:#CBD5E1; }
+      .swim { fill:#FAFAFA; stroke:#E5E7EB; }
+      .caps { text-transform: uppercase; letter-spacing: .6px; }
+      @media (prefers-color-scheme: dark){
+        .b{ fill:#111827; stroke:#9CA3AF; }
+        .t,.s{ fill:#E5E7EB; }
+        .note{ fill:#0F172A; stroke:#334155; }
+        .swim{ fill:#0B1220; stroke:#1F2937; }
+      }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6C5CE7"/>
+    </marker>
+  </defs>
+
+  <!-- Swimlanes -->
+  <rect x="10" y="10" width="960" height="190" class="swim" rx="12" ry="12"/>
+  <text x="20" y="32" class="s caps">Realtime pipeline</text>
+
+  <rect x="10" y="210" width="960" height="130" class="swim" rx="12" ry="12"/>
+  <text x="20" y="232" class="s caps">Style Engine (prompt shaping, refs, sizes, negatives)</text>
+
+  <rect x="10" y="345" width="960" height="160" class="swim" rx="12" ry="12"/>
+  <text x="20" y="367" class="s caps">Runtime &amp; Orchestration</text>
+
+  <!-- Realtime pipeline boxes -->
+  <!-- Microphone -->
+  <rect x="30" y="70" width="130" height="64" class="b" rx="10" ry="10"/>
+  <text x="95" y="98" text-anchor="middle" class="t">Microphone</text>
+
+  <!-- STT -->
+  <rect x="180" y="58" width="220" height="92" class="b" rx="10" ry="10"/>
+  <text x="290" y="82" text-anchor="middle" class="t">STT</text>
+  <text x="290" y="102" text-anchor="middle" class="s">
+    <tspan x="290" dy="0">Faster‑Whisper (CPU/GPU)</tspan>
+    <tspan x="290" dy="15">whisper.cpp + Parakeet GGUF</tspan>
+  </text>
+
+  <!-- Ollama -->
+  <rect x="420" y="70" width="170" height="68" class="b" rx="10" ry="10"/>
+  <text x="505" y="95" text-anchor="middle" class="t">Ollama LLM</text>
+  <text x="505" y="113" text-anchor="middle" class="s">tier presets</text>
+
+  <!-- Image Backends -->
+  <rect x="610" y="50" width="190" height="78" class="b" rx="10" ry="10"/>
+  <text x="705" y="76" text-anchor="middle" class="t">Image Backend</text>
+  <text x="705" y="96" text-anchor="middle" class="s">ComfyUI (local/remote)</text>
+
+  <rect x="610" y="134" width="190" height="50" class="b" rx="10" ry="10"/>
+  <text x="705" y="160" text-anchor="middle" class="s">Pollinations (opt‑in)</text>
+
+  <!-- Frontend -->
+  <rect x="820" y="70" width="140" height="78" class="b" rx="10" ry="10"/>
+  <text x="890" y="96" text-anchor="middle" class="t">Frontend UI</text>
+  <text x="890" y="116" text-anchor="middle" class="s">HTMX + Tailwind, SSE</text>
+
+  <!-- Edges realtime -->
+  <path d="M160 102 L180 102" class="edge"/>
+  <path d="M400 102 L420 102" class="edge"/>
+  <path d="M590 89 L610 89" class="edge"/>
+  <path d="M800 109 L820 109" class="edge"/>
+
+  <!-- Style Engine main block -->
+  <rect x="180" y="244" width="780" height="90" class="b" rx="10" ry="10"/>
+  <text x="570" y="268" text-anchor="middle" class="t">Style Engine</text>
+  <text x="570" y="288" text-anchor="middle" class="s">
+    <tspan x="570" dy="0">Size (W×H), positive/negative prompts, seeds, workflow selection</tspan>
+    <tspan x="570" dy="15">Reference image (upload/URL) + optional LLM‑Vision interpretation</tspan>
+  </text>
+
+  <!-- Style Engine inputs -->
+  <rect x="30" y="246" width="130" height="38" class="b" rx="10" ry="10"/>
+  <text x="95" y="269" text-anchor="middle" class="s">User styles</text>
+
+  <rect x="30" y="292" width="130" height="38" class="b" rx="10" ry="10"/>
+  <text x="95" y="315" text-anchor="middle" class="s">Reference image</text>
+
+  <!-- Reference Interpreter -->
+  <rect x="330" y="380" width="250" height="70" class="b" rx="10" ry="10"/>
+  <text x="455" y="404" text-anchor="middle" class="t">Reference Interpreter</text>
+  <text x="455" y="424" text-anchor="middle" class="s">
+    <tspan x="455" dy="0">Ollama Vision / LLM‑Vision</tspan>
+    <tspan x="455" dy="15">(optional)</tspan>
+  </text>
+
+  <!-- Scheduler & Config -->
+  <rect x="610" y="380" width="190" height="70" class="note" rx="8" ry="8"/>
+  <text x="705" y="404" text-anchor="middle" class="s">
+    <tspan x="705" dy="0">Scheduler:</tspan>
+    <tspan x="705" dy="15">seq &lt; 12 GiB, parallel ≥ 12 GiB</tspan>
+  </text>
+
+  <rect x="820" y="380" width="140" height="86" class="note" rx="8" ry="8"/>
+  <text x="890" y="402" text-anchor="middle" class="s">
+    <tspan x="890" dy="0">hardware.json</tspan>
+    <tspan x="890" dy="15">→ generated.yaml</tspan>
+    <tspan x="890" dy="15">downloads:</tspan>
+    <tspan x="890" dy="15">disabled (schema v1)</tspan>
+  </text>
+
+  <!-- Edges Style Engine inputs -->
+  <path d="M160 265 L180 265" class="edge"/>
+  <path d="M160 311 L180 311" class="edge"/>
+
+  <!-- Style Engine to interpreter and back -->
+  <path d="M570 334 L570 356 L455 356 L455 380" class="alt"/>
+  <path d="M455 450 L455 334" class="alt"/>
+
+  <!-- Style params to backends -->
+  <path d="M570 334 L570 220 L705 220 L705 200" class="alt"/>
+  <text x="705" y="214" text-anchor="middle" class="s">style params → backend</text>
+
+  <!-- Frontend connection from Image -->
+  <path d="M705 178 L705 200 L890 200 L890 148" class="edge"/>
+
+  <!-- Legend -->
+  <rect x="30" y="430" width="300" height="60" class="note" rx="8" ry="8"/>
+  <text x="40" y="454" class="s">Solid arrow: core data flow</text>
+  <text x="40" y="474" class="s">Dashed teal: optional style/ref interpretation paths</text>
+</svg>
