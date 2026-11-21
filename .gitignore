@@ -113,7 +113,12 @@ pip-wheel-metadata/
 /transcription_backend00.py
 /web/index00.html
 /sourcecode_snapshot.py
+
+#Agents files
 /Brave.md
+/roadmap.md
+/SKILL.md
+/slAIdshow_aktuell.md
 
 # Intentionally tracked:
 # - workflows/*.json: reproducible ComfyUI workflow definitions
