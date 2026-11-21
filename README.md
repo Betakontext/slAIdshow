@@ -24,6 +24,7 @@ Perfect for streamers, lecturers, and storytellers: turn live speech into compel
   - Parakeet TDT 0.6B v3 as a GGUF model via whisper.cpp (pywhispercpp)
 - LLM via Ollama with tier‑based model presets
 - Image via ComfyUI (SD1.5+LCM for 6–8 GiB; FLUX.2 small FP8 for ≥16 GiB)
+- Optional image via Pollinations
 - Server‑Sent Events (SSE) UI with Start/Stop, styles, gallery, fullscreen
 - No silent cloud fallbacks; Pollinations is opt‑in and disabled by default
 - Strict download policy: no automatic model downloads
@@ -63,7 +64,7 @@ Prerequisites
 1) Clone and env
 - git clone <repo> && cd slAIdshow
 - cp .env.example .env
-- Optional: set SLAIDSHOW_TIER=6gb in .env for a conservative profile
+- Optional: set SLAIDSHOW_TIER=6gb in .env for a conservative profile, POLLINATIONS_SECRET to use Pollinations as cloud image backend
 
 2) Start backends
 - docker compose up -d ollama comfyui
