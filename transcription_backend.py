@@ -1,5 +1,3 @@
-# transcription_backend.py
-
 from __future__ import annotations
 
 import asyncio
@@ -295,6 +293,11 @@ class TranscriptionConfig:
     faster_whisper_vad_filter: bool
     faster_whisper_download_root: Optional[str]
 
+    # Parakeet toggles
+    parakeet_enable: bool
+    parakeet_device: str  # auto|cpu|cuda
+    parakeet_model: str   # logical name for loader (e.g., "tdt_0.6b_v3")
+
     # Realtime parameters (unchanged; low-end switch does not touch them)
     rt_slice_sec: float
     rt_window_sec: float
@@ -335,7 +338,7 @@ class TranscriptionConfig:
         )
 
         requested_backend = _env_str("APP_WHISPER_BACKEND", "auto").lower()
-        if requested_backend not in {"auto", "faster_whisper", "pywhispercpp"}:
+        if requested_backend not in {"auto", "faster_whisper", "pywhispercpp", "parakeet"}:
             print(
                 "[TRANSCRIBE] Invalid APP_WHISPER_BACKEND="
                 f"{requested_backend!r}; using 'auto'."
@@ -371,6 +374,13 @@ class TranscriptionConfig:
                 logprob_threshold = float(logprob_threshold_env)
             except Exception:
                 print("[TRANSCRIBE] Ignoring invalid APP_WHISPER_LOGPROB_THRESHOLD")
+
+        # Parakeet toggles (optional; 6GB-first => default disabled)
+        parakeet_enable = _env_bool("APP_PARAKEET_ENABLE", False) or (requested_backend == "parakeet")
+        parakeet_device = _env_str("APP_PARAKEET_DEVICE", "auto").lower()
+        if parakeet_device not in {"auto", "cpu", "cuda"}:
+            parakeet_device = "auto"
+        parakeet_model = _env_str("APP_PARAKEET_MODEL", "tdt_0.6b_v3")
 
         # Realtime params with sensible defaults
         rt_slice_sec = _env_float("APP_RT_SLICE_SEC", 3.0)
@@ -415,6 +425,10 @@ class TranscriptionConfig:
                 False,
             ),
             faster_whisper_download_root=download_root,
+            # Parakeet toggles
+            parakeet_enable=parakeet_enable,
+            parakeet_device=parakeet_device,
+            parakeet_model=parakeet_model,
             # Realtime params (unchanged by low-end switch)
             rt_slice_sec=rt_slice_sec,
             rt_window_sec=rt_window_sec,
@@ -449,6 +463,9 @@ class TranscriptionConfig:
             f"workers={cfg.faster_whisper_num_workers} "
             f"beam_size={cfg.faster_whisper_beam_size} "
             f"vad_filter={int(cfg.faster_whisper_vad_filter)} "
+            f"parakeet_enable={int(cfg.parakeet_enable)} "
+            f"parakeet_device={cfg.parakeet_device} "
+            f"parakeet_model={cfg.parakeet_model} "
             f"language={cfg.language} "
             f"temperature={cfg.temperature:.2f} "
             f"min_sec={cfg.min_seconds:.2f} "
@@ -573,12 +590,10 @@ class FasterWhisperBackend(BaseTranscriptionBackend):
             return ""
 
         # Determine effective language at runtime:
-        # Priority: (no explicit per-call override here) config.language > APP_INPUT_LOCALE_HINT > None
         hint_lang = (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip().lower() or None
         conf_lang = self.config.language or None
         eff_lang = conf_lang or hint_lang or None
 
-        # Build kwargs conditionally to avoid overriding library defaults with None
         kwargs: Dict[str, Any] = dict(
             language=eff_lang,  # None enables auto-detect
             beam_size=self.config.faster_whisper_beam_size,
@@ -666,6 +681,53 @@ class PyWhisperCppBackend(BaseTranscriptionBackend):
 
 
 # -----------------------
+# Parakeet backend (optional; only if installed/enabled)
+# -----------------------
+
+class ParakeetBackend(BaseTranscriptionBackend):
+    """Subprozess-Backend für parakeet.cpp (GGUF)."""
+    backend_name = "parakeet"
+    def __init__(self, config: TranscriptionConfig, device: str, model_name: str) -> None:
+        import subprocess as _sp
+        self.device = device
+        self.model_name = model_name
+        self._subprocess = _sp
+        self.binary = os.getenv("APP_PARAKEET_BINARY", "./bin/parakeet-cli")
+        self.model_path = str(Path(model_name))  # oder absoluter Pfad
+        self.threads = int(os.getenv("APP_PARAKEET_THREADS", "4"))
+        # Sanity-Check: Binary vorhanden?
+        if not Path(self.binary).is_file():
+            raise FileNotFoundError(f"parakeet-cli not found: {self.binary}")
+        print(f"[TRANSCRIBE] parakeet init: binary={self.binary} model={self.model_path} threads={self.threads}")
+
+    def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
+        import tempfile, wave
+        # 1. Audio → temp WAV
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
+            audio_int16 = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
+            with wave.open(tmp_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                wf.writeframes(audio_int16.tobytes())
+        try:
+            # 2. Subprozess
+            result = self._subprocess.run(
+                [self.binary, "transcribe",
+                 "--model", self.model_path,
+                 "--input", tmp_path,
+                 "--threads", str(self.threads)],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"parakeet-cli failed: {result.stderr}")
+            return result.stdout.strip()
+        finally:
+            os.unlink(tmp_path)
+
+
+# -----------------------
 # Manager and initialization
 # -----------------------
 
@@ -742,7 +804,10 @@ class TranscriptionManager:
             f"requested_backend={self.config.requested_backend} "
             f"faster_device={self.config.faster_whisper_device} "
             f"compute_type={self.config.faster_whisper_compute_type} "
-            f"model={self.config.faster_whisper_model}"
+            f"model={self.config.faster_whisper_model} "
+            f"parakeet_enable={int(self.config.parakeet_enable)} "
+            f"parakeet_device={self.config.parakeet_device} "
+            f"parakeet_model={self.config.parakeet_model}"
         )
         self.status = TranscriptionStatus(
             requested_backend=self.config.requested_backend,
@@ -764,12 +829,16 @@ class TranscriptionManager:
             self._initialize_explicit_faster_whisper_or_fail(attempts)
             return
 
+        if self.config.requested_backend == "parakeet":
+            self._initialize_explicit_parakeet_or_fail(attempts)
+            return
+
         self._initialize_auto(attempts)
 
     def _initialize_auto(self, attempts: List[str]) -> None:
-        """Try faster-whisper CUDA, then CPU, then pywhispercpp."""
-
+        """Try faster-whisper CUDA, then CPU, then Parakeet (if enabled), then pywhispercpp."""
         faster_error: Optional[str] = None
+        para_error: Optional[str] = None
 
         try:
             if self.config.faster_whisper_device in {"auto", "cuda"}:
@@ -792,13 +861,27 @@ class TranscriptionManager:
             attempts.append(cpu_error)
             print(f"[TRANSCRIBE] {cpu_error}")
 
+        # Optional Parakeet in auto only if enabled
+        if self.config.parakeet_enable:
+            try:
+                self._initialize_parakeet_auto()
+                # mark previous attempts as reasons for fallback, if any
+                if attempts:
+                    self.status.fallback_used = True
+                    self.status.fallback_reason = "; ".join(attempts)
+                return
+            except Exception as exc:
+                para_error = f"Parakeet unavailable: {exc}"
+                attempts.append(para_error)
+                print(f"[TRANSCRIBE] {para_error}")
+
         try:
             self._initialize_pywhispercpp()
             self.status.fallback_used = True
             self.status.fallback_reason = (
                 "; ".join(attempts)
                 if attempts
-                else "faster-whisper could not be initialized"
+                else "preferred backends could not be initialized"
             )
             return
         except Exception as exc:
@@ -854,6 +937,51 @@ class TranscriptionManager:
         print(
             "[TRANSCRIBE] Explicit faster-whisper selection failed. "
             f"Details: {self.status.initialization_error}"
+        )
+
+    def _initialize_explicit_parakeet_or_fail(self, attempts: List[str]) -> None:
+        try:
+            self._initialize_parakeet_auto()
+            return
+        except Exception as exc:
+            message = f"Parakeet explicit unavailable: {exc}"
+            attempts.append(message)
+            print(f"[TRANSCRIBE] {message}")
+
+        self.backend = None
+        self.status.selected_backend = "unavailable"
+        self.status.ready = False
+        self.status.initialization_error = " | ".join(attempts)
+        print(
+            "[TRANSCRIBE] Explicit parakeet selection failed. "
+            f"Details: {self.status.initialization_error}"
+        )
+
+    def _initialize_parakeet_auto(self) -> None:
+        # Device selection: default CPU on 6GB to avoid CUDA contention
+        dev = self.config.parakeet_device
+        if dev == "auto":
+            # Respect VRAM tiers via existing vram scheduler outside; here pick CPU by default
+            dev = "cpu"
+        backend = ParakeetBackend(
+            config=self.config,
+            device=dev,
+            model_name=self.config.parakeet_model,
+        )
+        self.backend = backend
+        self.status.selected_backend = backend.backend_name
+        self.status.selected_device = getattr(backend, "device", "cpu")
+        self.status.selected_compute_type = None
+        self.status.model = getattr(backend, "model_name", self.config.parakeet_model)
+        self.status.ready = True
+        self.status.initialized_at_unix = time.time()
+        self.status.initialization_error = None
+        self.status.lowend_mode = _env_bool("APP_LOWEND_MODE", False)
+
+        print(
+            "[TRANSCRIBE] Ready: backend=parakeet "
+            f"device={self.status.selected_device} model={self.status.model} "
+            f"language={self.config.language} lowend_mode={int(self.status.lowend_mode)}"
         )
 
     def _initialize_faster_whisper_cuda(self) -> None:
@@ -1275,12 +1403,110 @@ def get_transcription_status() -> Dict[str, Any]:
 
 
 # -----------------------
-# Realtime Transcriber (preserved)
+# Realtime Transcriber (preserved + worker utilities)
 # -----------------------
 
 RealtimeEvent = Dict[str, Any]
 RealtimeCallback = Callable[[RealtimeEvent], None]
 
+
+
+# --- BEGIN injected: Async buffer worker + Parakeet adapter (kept, inert unless used) ---
+import asyncio as _rt_asyncio
+import time as _rt_time
+from collections import deque
+from typing import Optional as _rt_Optional, Deque as _rt_Deque, Any as _rt_Any, Tuple as _rt_Tuple
+
+class AudioBufferWorker:
+    """
+    Receives PCM chunks (bytes) via .enqueue(pcm_bytes, sr)
+    and periodically flushes aggregated audio to a transcribe callback so
+    that capture loop remains smooth. Uses a background asyncio task.
+    """
+    def __init__(self, transcribe_callback, flush_interval: float = 0.5,
+                 max_buffer_sec: float = 30.0, sample_rate: int = 16000):
+        self._cb = transcribe_callback
+        self._flush_interval = flush_interval
+        self._max_buffer_sec = max_buffer_sec
+        self._sr = sample_rate
+        self._dq: _rt_Deque[bytes] = deque()
+        self._dq_bytes = 0
+        self._task: _rt_Optional[_rt_asyncio.Task] = None
+        self._closed = False
+        self._lock = _rt_asyncio.Lock()
+        self._last_flush = _rt_time.time()
+
+    async def start(self):
+        if self._task is None:
+            self._task = _rt_asyncio.create_task(self._runner())
+
+    async def stop(self):
+        self._closed = True
+        if self._task:
+            await self._task
+            self._task = None
+
+    async def enqueue(self, pcm_bytes: bytes):
+        async with self._lock:
+            self._dq.append(pcm_bytes)
+            self._dq_bytes += len(pcm_bytes)
+            max_bytes = int(self._sr * 2 * self._max_buffer_sec)
+            if self._dq_bytes > max_bytes:
+                while self._dq and self._dq_bytes > max_bytes:
+                    b = self._dq.popleft()
+                    self._dq_bytes -= len(b)
+
+    async def _runner(self):
+        try:
+            while not self._closed:
+                await _rt_asyncio.sleep(self._flush_interval)
+                await self._maybe_flush()
+        except _rt_asyncio.CancelledError:
+            pass
+        finally:
+            await self._maybe_flush(finalize=True)
+
+    async def _maybe_flush(self, finalize: bool = False):
+        async with self._lock:
+            if not self._dq:
+                return
+            bytes_ready = self._dq_bytes
+            threshold = int(self._sr * 2 * 0.5)
+            if bytes_ready < threshold and not finalize:
+                return
+            parts = list(self._dq)
+            self._dq.clear()
+            self._dq_bytes = 0
+            aggregated = b''.join(parts)
+        try:
+            result = self._cb(aggregated, self._sr, finalize)
+            if _rt_asyncio.iscoroutine(result):
+                _rt_asyncio.create_task(result)
+        except Exception:
+            import traceback as _rt_tb; _rt_tb.print_exc()
+
+class ParakeetAdapter:
+    """Adapter für RealtimeTranscriber – nutzt ParakeetBackend via subprocess."""
+
+    def __init__(self):
+        self._backend = None
+
+    def load(self):
+        # ParakeetBackend aus dem Manager holen oder neu instantiieren
+        from transcription_backend import get_transcription_manager
+        mgr = get_transcription_manager()
+        self._backend = mgr._backend  # muss ParakeetBackend sein
+        if not isinstance(self._backend, ParakeetBackend):
+            raise RuntimeError("ParakeetAdapter: Backend is not ParakeetBackend")
+
+    async def transcribe_bytes(self, pcm_bytes: bytes, sr: int) -> str:
+        import asyncio
+        samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        loop = asyncio.get_event_loop()
+        # Subprozess ist blocking → in Thread offloaden
+        return await loop.run_in_executor(
+            None, self._backend.transcribe, samples, sr
+        )
 
 class RealtimeTranscriber:
     """
@@ -1503,8 +1729,6 @@ class RealtimeTranscriber:
                 fallback_used = False
 
                 # If empty AND recording was sufficiently long, try file fallback
-                # In-memory fallback: decode the bounded realtime buffer
-                # RECORDING_REPAIR_V2: bounded fallback; errors are observable
                 if (not candidate_txt) and self.config.rt_fallback_record and (elapsed_ms >= self._fallback_min_record_ms):
                     try:
                         import sys
@@ -1561,7 +1785,6 @@ class RealtimeTranscriber:
             backend = self.manager.backend
         txt = ""
         try:
-            # Keep same low-latency decode path for both partial and finalize
             txt = backend.transcribe(audio, sample_rate=self.sample_rate) if backend else ""
         except Exception as e:
             print(f"[RT] decode error: {e}")
@@ -1573,7 +1796,6 @@ class RealtimeTranscriber:
         """
         Debounced scheduling of final emit. Cancels any pending finalize task.
         """
-        # Cancel any previous finalize
         if self._finalize_task and not self._finalize_task.done():
             self._finalize_task.cancel()
         loop = asyncio.get_running_loop()
@@ -1591,9 +1813,7 @@ class RealtimeTranscriber:
             return
         text = re.sub(r"\s+", " ", (self._cur_utt or "")).strip()
         if not _is_meaningful(text, min_chars=self._min_chars, min_words=self._min_words):
-            # Keep as partial; do not finalize meaningless fragments
             return
-        # Emit final
         self._emit({
             "type": "final",
             "text": text,
@@ -1601,7 +1821,6 @@ class RealtimeTranscriber:
             "record_ms": record_ms,
             "fallback_used": bool(fallback_used),
         })
-        # Reset current utterance buffer and partial-debounce trackers
         self._cur_utt = ""
         self._last_emitted_partial_norm = ""
         self._last_partial_emit_ms = _now_ms()
@@ -1648,6 +1867,7 @@ async def transcribe_file_for_fallback(path: Union[str, Path]) -> str:
     """
     Transcribe an audio file using the already-initialized backend.
     For faster-whisper we can pass a path. For pywhispercpp, we decode to float32 16k first.
+    For parakeet we decode to float32 16k and pass buffer.
     """
     manager = get_transcription_manager()
     manager.initialize()
@@ -1658,7 +1878,6 @@ async def transcribe_file_for_fallback(path: Union[str, Path]) -> str:
     # If faster-whisper backend is active, try path directly via its .transcribe by loading file
     if isinstance(backend, FasterWhisperBackend):
         try:
-            # Determine effective language at runtime also for file fallback
             hint_lang = (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip().lower() or None
             conf_lang = manager.config.language or None
             eff_lang = conf_lang or hint_lang or None
@@ -1687,6 +1906,15 @@ async def transcribe_file_for_fallback(path: Union[str, Path]) -> str:
             return clean_transcript(" ".join(parts))
         except Exception as e:
             print(f"[FALLBACK] faster-whisper file transcribe failed: {e}")
+            return ""
+
+    # Parakeet: decode file and pass as float32
+    if isinstance(backend, ParakeetBackend):
+        try:
+            data, sr = _load_audio_as_f32_mono(path, target_sr=16000)
+            return backend.transcribe(data, sr)
+        except Exception as e:
+            print(f"[FALLBACK] parakeet file transcribe failed: {e}")
             return ""
 
     # For pywhispercpp backend: decode file to float32 mono 16k and pass into backend.transcribe

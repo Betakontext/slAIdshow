@@ -1,122 +1,205 @@
-# Docker Compose v2 file for slAIdshow (complete)
-# - Supports conditional GPU usage via environment variable USE_GPU (true/false)
-# - Provides persistent volumes for config, models, outputs and recordings
-# - Healthchecks for the HTTP service (app) and optional ComfyUI / Ollama services
-# - Keeps GPU/CUDA services separate; when USE_GPU != "true" no GPU devices are requested
-# - Use `docker compose --env-file .env up --build` to run (or `sudo docker compose ...` on systems without docker group)
+# Docker Compose file for slAIdshow (complete, English comments)
+
 version: "3.9"
 
+name: slaidshow
+
+# Common defaults for environment variables
+x-app-env: &app_env
+  # FastAPI app bind/ports
+  APP_BIND_HOST: 0.0.0.0
+  APP_BIND_PORT: "8080"
+
+  # Standard in-container paths
+  CONFIG_PATH: /app/config/generated.yaml
+  CONFIG_DIR: /app/config
+  MODELS_DIR: /app/models
+  OUTPUTS_DIR: /app/outputs
+  RECORDINGS_DIR: /app/recordings
+
+  # Hardware/Tier files
+  HARDWARE_JSON: /app/config/hardware.json
+  GENERATED_YAML: /app/config/generated.yaml
+
+  # Orchestration endpoints (app reaches services by hostname)
+  APP_OLLAMA_HOST: ollama
+  APP_OLLAMA_PORT: "11434"
+  IMAGE_BACKEND: comfyui
+  APP_COMFY_MODE: auto          # auto | local | remote (app logic from .env.example)
+  APP_COMFY_HOST: comfyui
+  APP_COMFY_PORT: "8188"
+  APP_DISABLE_COMFYUI: "0"
+
+  # Cloud backends explicitly disabled until approved
+  ALLOW_CLOUD_IMAGE_BACKEND: "0"
+  APP_ALLOW_REMOTE_BACKENDS: "0"
+  APP_OLLAMA_DISABLE: "0"
+  APP_OLLAMA_WARMUP_ENABLE: "1"
+
+  # VRAM auto-detection override (empty = auto)
+  # Valid per project: 6gb / 8gb / 16gb / 24gb
+  SLAIDSHOW_TIER:
+
+  # 6‑GB default model (effectively set via config_generator.py)
+  APP_OLLAMA_MODEL: qwen3:1.7b-q4
+
+  # Default image size (may be overridden by generated.yaml/ENV)
+  APP_IMAGE_WIDTH: "1280"
+  APP_IMAGE_HEIGHT: "720"
+  APP_COMFY_WORKFLOW: /app/workflows/text2img_SD15-FP16.json
+
 services:
-  app:
-    image: slaidshow:m0
-    container_name: slaidshow_app
-    restart: unless-stopped
+  # One-shot initialization: Hardware → Config → Validate → Download-policy
+  init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: slaidshow_init
+    restart: "no"
     env_file:
-      - .env
+      - ./.env
+      - ./.env.example
     environment:
-      # Application binding & runtime config (overrides inside container)
-      APP_BIND_HOST: "0.0.0.0"
-      APP_BIND_PORT: "8080"
-      CONFIG_PATH: "/app/config/generated.yaml"
-      # Offline by default to avoid unexpected HF downloads
-      HF_HUB_OFFLINE: "1"
-      TRANSFORMERS_OFFLINE: "1"
-      APP_FASTER_WHISPER_DEVICE: "${APP_FASTER_WHISPER_DEVICE:-cpu}"
-      APP_ALLOW_REMOTE_VISION: "${APP_ALLOW_REMOTE_VISION:-no}"
-      # Opt-in to allow cloud backends (Pollinations) - default no
-      APP_ALLOW_CLOUD: "${APP_ALLOW_CLOUD:-no}"
-      # Control image backend: comfyui | pollinations
-      APP_IMAGE_BACKEND: "${APP_IMAGE_BACKEND:-comfyui}"
-      # Toggle GPU use at runtime (true/false). Compose will mount devices only if "true".
-      USE_GPU: "${USE_GPU:-false}"
-    # Only expose port to host for local development; use a reverse proxy in production.
-    ports:
-      - "8080:8080"
+      <<: *app_env
     volumes:
-      - ./config:/app/config:rw
-      - ./models:/app/models:rw
-      - ./outputs:/app/outputs:rw
-      - ./recordings:/app/recordings:rw
-      - ./static:/app/static:ro
+      - ./config:/app/config
+      - ./models:/app/models
+      - ./outputs:/app/outputs
+      - ./recordings:/app/recordings
       - ./workflows:/app/workflows:ro
-    # Conditional device/privileges: handled by an entrypoint wrapper (see note)
-    # For GPU usage with Nvidia Container Toolkit and Compose, set USE_GPU=true and pass runtime args:
-    deploy:
-      resources: {}
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,os; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('APP_BIND_PORT','8080') + '/health', timeout=6).close()\" || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+      - ./models/faster-whisper-cache:/app/models/faster-whisper-cache
+    # Runs the four init steps sequentially; failures are non-fatal for Compose,
+    # acceptance is performed separately (Makefile "install"/"validate").
+    command: >
+      bash -lc "
+        set -e;
+        echo '==> Step 1/4: hardware_detect.py';
+        python /app/hardware_detect.py --out ${HARDWARE_JSON:-/app/config/hardware.json} || true;
+        echo '==> Step 2/4: config_generator.py';
+        python /app/config_generator.py
+          --hardware ${HARDWARE_JSON:-/app/config/hardware.json}
+          --output ${GENERATED_YAML:-/app/config/generated.yaml}
+          ${SLAIDSHOW_TIER:+--tier ${SLAIDSHOW_TIER}} || true;
+        echo '==> Step 3/4: runtime_config.py (validate)';
+        python /app/runtime_config.py --config ${GENERATED_YAML:-/app/config/generated.yaml} || true;
+        echo '==> Step 4/4: model_downloader.py (policy only)';
+        python /app/model_downloader.py --config ${GENERATED_YAML:-/app/config/generated.yaml} --policy-only || true;
+        echo '==> Init complete (policy check done, no downloads performed).'
+      "
 
-  comfyui:
-    image: ghcr.io/comfyanonymous/comfyui:latest
-    container_name: slaidshow_comfyui
-    restart: unless-stopped
-    environment:
-      SERVICE_HOST: "0.0.0.0"
-      SERVICE_PORT: "11434"
-    ports:
-      - "11434:11434"
-    volumes:
-      - ./models/comfyui:/home/user/.comfyui/models:rw
-      - ./workflows/comfyui:/home/user/.comfyui/workflows:ro
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:11434/ || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
-    # Do NOT request GPU devices here by default; use the optional nvidia service below
-    # If the host supports nvidia and you want GPU acceleration, run Compose with
-    #   USE_GPU=true and add `--profile gpu` (see "Usage" below)
-    profiles: ["default", "gpu-optional"]
-
+  # Ollama (LLM) – GPU optional; falls back to CPU when unavailable
   ollama:
     image: ollama/ollama:latest
     container_name: slaidshow_ollama
     restart: unless-stopped
     environment:
-      OLLAMA_HOST: "0.0.0.0"
-      OLLAMA_PORT: "11434"
-    ports:
-      - "11434:11434"
+      - OLLAMA_HOST=0.0.0.0
     volumes:
-      - ./models/ollama:/var/lib/ollama/models:rw
+      - ollama:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+              count: "all"
+              driver: nvidia
+        limits:
+          cpus: "4.0"
+          memory: 8g
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:11434/v1 || exit 1"]
-      interval: 30s
-      timeout: 6s
-      retries: 3
-      start_period: 60s
-    profiles: ["default", "gpu-optional"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
 
-  # Optional service which requests GPU devices via nvidia runtime.
-  # Start with: docker compose --profile gpu up --build
-  nvidia_proxy:
-    image: nvidia/cuda:12.2.0-runtime-ubuntu22.04
-    container_name: slaidshow_nvidia_proxy
-    runtime: nvidia
-    # The nvidia service exists only to bind GPU devices into the docker host network namespace
-    # and to ensure the nvidia runtime is available. It is intentionally minimal and NOT required
-    # for CPU/offline operation. Start with profile `gpu`.
-    command: ["sleep", "infinity"]
-    deploy: {}
-    devices:
-      - "/dev/nvidiactl:/dev/nvidiactl"
-      - "/dev/nvidia-uvm:/dev/nvidia-uvm"
-      - "/dev/nvidia0:/dev/nvidia0"
-    profiles: ["gpu-optional"]
+  # ComfyUI – local image backend, GPU-accelerated; keep autoload small
+  comfyui:
+    image: ghcr.io/comfyanonymous/comfyui:latest
+    container_name: slaidshow_comfyui
+    restart: unless-stopped
+    environment:
+      - CLI_ARGS=--listen 0.0.0.0 --port 8188 --quick-test-start
+    volumes:
+      - comfyui-models:/root/ComfyUI/models
+      - comfyui-output:/root/ComfyUI/output
+      - ./workflows:/app/workflows:ro
+    ports:
+      - "127.0.0.1:8188:8188"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+              count: "all"
+              driver: nvidia
+        limits:
+          cpus: "6.0"
+          memory: 12g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8188/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 25s
 
-# Top-level volumes (optionally declared, but Compose will create them automatically for host mounts)
+  # Backend (FastAPI app) – uses generated.yaml, scheduler, bridges
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: slaidshow_backend
+    depends_on:
+      ollama:
+        condition: service_healthy
+      comfyui:
+        condition: service_started
+    restart: unless-stopped
+    env_file:
+      - ./.env
+      - ./.env.example
+    environment:
+      <<: *app_env
+      # Default: CPU for STT; VRAM-budget scheduler coordinates GPU workloads
+      APP_FASTER_WHISPER_DEVICE: "cpu"
+      APP_FASTER_WHISPER_COMPUTE_TYPE: "int8"
+    volumes:
+      - ./config:/app/config
+      - ./models:/app/models
+      - ./outputs:/app/outputs
+      - ./recordings:/app/recordings
+      - ./workflows:/app/workflows:ro
+      - ./models/faster-whisper-cache:/app/models/faster-whisper-cache
+    ports:
+      - "127.0.0.1:8080:8080"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+              count: "all"
+              driver: nvidia
+        limits:
+          cpus: "8.0"
+          memory: 8g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 35s
+    command: >
+      bash -lc "
+        set -euo pipefail;
+        # Runtime validation of existing configuration (no downloads)
+        python /app/runtime_config.py --config ${GENERATED_YAML:-/app/config/generated.yaml} || true;
+        # Start the app; use uvicorn directly on app.py
+        exec python -m uvicorn app:app --host ${APP_BIND_HOST:-0.0.0.0} --port ${APP_BIND_PORT:-8080} --workers 1 --timeout-graceful-shutdown 30
+      "
+
 volumes:
-  models:
-  outputs:
-  recordings:
-  config:
+  ollama:
+  comfyui-models:
+  comfyui-output:

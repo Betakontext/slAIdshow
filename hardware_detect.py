@@ -1,6 +1,7 @@
 # hardware_detect.py
-
-"""Discover one NVIDIA GPU and atomically persist its hardware profile."""
+#
+# Discover one NVIDIA GPU via NVML and atomically persist its hardware profile
+# to JSON. No model downloads, no network calls, no runtime validation.
 
 from __future__ import annotations
 
@@ -55,9 +56,7 @@ def detect_cpu_ram() -> float:
         pass
 
     try:
-        return (
-            os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / _GIB
-        )
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / _GIB
     except (AttributeError, OSError, ValueError):
         pass
 
@@ -108,7 +107,7 @@ def detect_nvidia() -> list[HardwareProfile]:
         nvml = importlib.import_module("pynvml")
     except ImportError as exc:
         raise HardwareDetectionError(
-            "NVIDIA-Erkennung nicht möglich: Paket 'pynvml' installieren."
+            "NVIDIA detection not available: install package 'pynvml'."
         ) from exc
 
     initialized = False
@@ -118,8 +117,7 @@ def detect_nvidia() -> list[HardwareProfile]:
             initialized = True
         except Exception as exc:
             raise HardwareDetectionError(
-                "NVML konnte nicht initialisiert werden. "
-                "NVIDIA-Treiber und Container-GPU-Zugriff prüfen."
+                "Failed to initialize NVML. Check NVIDIA drivers and container GPU access."
             ) from exc
 
         count = nvml.nvmlDeviceGetCount()
@@ -134,13 +132,9 @@ def detect_nvidia() -> list[HardwareProfile]:
             used = int(memory.used)
 
             if total <= 0 or min(free, used) < 0:
-                raise HardwareDetectionError(
-                    f"GPU {index} liefert ungültige VRAM-Werte."
-                )
+                raise HardwareDetectionError(f"GPU {index} reports invalid VRAM values.")
             if free > total or used > total or free + used > total:
-                raise HardwareDetectionError(
-                    f"GPU {index} liefert widersprüchliche VRAM-Werte."
-                )
+                raise HardwareDetectionError(f"GPU {index} reports inconsistent VRAM values.")
 
             profiles.append(
                 HardwareProfile(
@@ -162,42 +156,36 @@ def detect_nvidia() -> list[HardwareProfile]:
     except HardwareDetectionError:
         raise
     except Exception as exc:
-        raise HardwareDetectionError(
-            "NVML-Daten konnten nicht gelesen werden."
-        ) from exc
+        raise HardwareDetectionError("Failed to read NVML data.") from exc
     finally:
         if initialized:
             try:
                 nvml.nvmlShutdown()
             except Exception as exc:  # noqa: BLE001
                 # NVML cleanup must not discard a successful snapshot.
-                LOGGER.warning("NVML-Shutdown fehlgeschlagen: %s", exc)
+                LOGGER.warning("NVML shutdown failed: %s", exc)
 
 
 def _requested_index(gpu_index: int | None) -> int | None:
     """Validate explicit selection before touching GPU hardware."""
     if gpu_index is not None:
         if type(gpu_index) is not int or gpu_index < 0:
-            raise HardwareDetectionError(
-                "GPU-Index muss eine nichtnegative ganze Zahl sein."
-            )
+            raise HardwareDetectionError("GPU index must be a non-negative integer.")
         return gpu_index
 
     raw = os.environ.get("GPU_INDEX")
     if raw is None:
         return None
     if not re.fullmatch(r"(?:0|[1-9][0-9]*)", raw):
-        raise HardwareDetectionError(
-            "GPU_INDEX muss eine nichtnegative ganze Zahl sein."
-        )
+        raise HardwareDetectionError("GPU_INDEX must be a non-negative integer.")
     try:
         return int(raw)
     except ValueError as exc:
-        raise HardwareDetectionError("GPU_INDEX ist zu groß.") from exc
+        raise HardwareDetectionError("GPU_INDEX is too large.") from exc
 
 
 def _write_json_atomic(data: dict[str, Any], path: Path) -> None:
-    """Preserve an existing report if writing or replacement fails."""
+    """Write JSON atomically; replace target only after a durable temp write."""
     temporary: str | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -219,7 +207,7 @@ def _write_json_atomic(data: dict[str, Any], path: Path) -> None:
         temporary = None
     except (OSError, ValueError, TypeError) as exc:
         raise HardwareDetectionError(
-            f"Hardware-Datei konnte nicht sicher geschrieben werden: {path}"
+            f"Failed to safely write hardware file: {path}"
         ) from exc
     finally:
         if temporary is not None:
@@ -239,17 +227,17 @@ def detect(
     if platform.system() == "Darwin":
         label = "Apple Silicon" if detect_apple_silicon() else "macOS"
         raise HardwareDetectionError(
-            f"{label} wird nicht unterstützt; NVIDIA-NVML ist erforderlich."
+            f"{label} is not supported; NVIDIA NVML is required."
         )
 
     profiles = detect_nvidia()
     if not profiles:
         raise HardwareDetectionError(
-            "Keine NVIDIA-GPU gefunden. Treiber und NVML-Zugriff prüfen."
+            "No NVIDIA GPU found. Check driver installation and NVML access."
         )
     if requested is None and len(profiles) > 1:
         raise HardwareDetectionError(
-            "Mehrere NVIDIA-GPUs gefunden: GPU_INDEX oder --gpu-index angeben."
+            "Multiple NVIDIA GPUs found: set GPU_INDEX or use --gpu-index."
         )
 
     selected = (
@@ -261,13 +249,11 @@ def detect(
         )
     )
     if selected is None:
-        raise HardwareDetectionError(
-            f"GPU-Index {requested} ist nicht verfügbar."
-        )
+        raise HardwareDetectionError(f"GPU index {requested} is not available.")
 
     if selected.vram_total_bytes < 6 * _GIB:
         print(
-            f"Warnung: GPU {selected.gpu_index} hat weniger als 6 GiB VRAM.",
+            f"Warning: GPU {selected.gpu_index} has less than 6 GiB VRAM.",
             file=sys.stderr,
         )
 
@@ -288,7 +274,7 @@ def detect(
 def main(argv: list[str] | None = None) -> int:
     """Run NVIDIA discovery without downloading or loading models."""
     parser = argparse.ArgumentParser(
-        description="Ermittelt die NVIDIA-Hardware für slAIdshow."
+        description="Discover NVIDIA hardware for slAIdshow."
     )
     parser.add_argument("--gpu-index", type=int)
     parser.add_argument("--output", type=Path)
@@ -297,14 +283,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         profile = detect(args.gpu_index, args.output)
     except HardwareDetectionError as exc:
-        print(f"Fehler: {exc}", file=sys.stderr)
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    target = args.output or Path(
-        os.environ.get("HARDWARE_PATH", str(OUTPUT_PATH))
-    )
+    target = args.output or Path(os.environ.get("HARDWARE_PATH", str(OUTPUT_PATH)))
     print(
-        f"Hardware-Datei geschrieben: {target} "
+        f"Hardware file written: {target} "
         f"(GPU {profile['gpu_index']}: {profile['gpu_name']})",
         file=sys.stderr,
     )
@@ -313,4 +297,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

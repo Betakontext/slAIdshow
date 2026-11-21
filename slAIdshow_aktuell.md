@@ -1,0 +1,18500 @@
+# slAIdshow - aktuelle Quellkopie
+
+Erstellt: 2026-11-21 01:17:53
+
+## Verzeichnisbaum (Auszug)
+
+```
+slAIdshow/
+├── .dockerignore
+├── .env
+├── .env.example
+├── .git
+│   ├── COMMIT_EDITMSG
+│   ├── FETCH_HEAD
+│   ├── HEAD
+│   ├── ORIG_HEAD
+│   ├── branches
+│   ├── config
+│   ├── description
+│   ├── hooks
+│   ├── index
+│   ├── info
+│   ├── logs
+│   ├── objects
+│   ├── packed-refs
+│   └── refs
+├── .gitignore
+├── .tmp
+├── .venv
+│   ├── bin
+│   ├── include
+│   ├── lib
+│   ├── lib64
+│   └── pyvenv.cfg
+├── Dockerfile
+├── Makefile
+├── README.md
+├── SKILL.md
+├── __pycache__
+│   ├── app.cpython-312.pyc
+│   ├── comfyui_bridge.cpython-312.pyc
+│   ├── image_backend.cpython-312.pyc
+│   ├── pollinations_reference_resolver.cpython-312.pyc
+│   ├── style_engine.cpython-312.pyc
+│   ├── style_features.cpython-312.pyc
+│   └── transcription_backend.cpython-312.pyc
+├── app.py
+├── comfyui.service
+├── comfyui_bridge.py
+├── config
+├── config_generator.py
+├── data
+│   ├── references
+│   └── refs
+├── docker-compose.yml
+├── hardware_detect.py
+├── image_backend.py
+├── model_downloader.py
+├── models
+│   ├── .keep
+│   ├── Parakeet_install.md
+│   ├── faster-whisper-cache
+│   ├── ggml-base.bin
+│   ├── ggml-medium-q5_0.bin
+│   ├── ggml-small-q5_1.bin
+│   ├── ggml-tiny.bin
+│   └── tdt-0.6b-v3-q8_0.gguf
+├── outputs
+│   ├── audio
+│   ├── config
+│   ├── images
+│   └── voice_fallback
+├── recordings
+├── repair_transcribe_parakeet_patch.py
+├── requirements.txt
+├── roadmap.md
+├── run.ps1
+├── run.sh
+├── runtime_config.py
+├── slAIdshow_aktuell.md
+├── sourcecode_snapshot.py
+├── static
+│   ├── .keep
+│   └── uploads
+├── style_engine.py
+├── tests
+│   ├── test_config_generator.py
+│   └── test_hardware_detect.py
+├── transcription_backend.py
+├── utils
+│   ├── ComfyUI_QuickTunnel
+│   ├── __pycache__
+│   ├── dev_check.py
+│   ├── mic_check_whisper.py
+│   ├── os_open.py
+│   ├── style_features.py
+│   ├── test_comfy_local.py
+│   ├── test_pollinations_style_ref_auto_style.py
+│   └── verify_runtime.py
+├── vram_scheduler.py
+├── web
+│   └── index.html
+└── workflows
+    ├── text2img_Dreamshaper8-15.json
+    ├── text2img_Dreamshaper8-15_infografic.json
+    ├── text2img_SD15-FP16.json
+    ├── text2img_SD15-FP16_Infografic.json
+    ├── text2img_SD15-FP16_Infografic_text.json
+    ├── text2img_SD15-FP16_fileRef.json
+    ├── text2img_SD15-FP16_imgRef.json
+    ├── text2img_any45.json
+    ├── text2img_ema15.json
+    └── text2img_rV15.json
+```
+
+## Enthaltene Quelldateien (Code-only snapshot)
+
+Die folgenden Dateien sind im Snapshot enthalten. Nach jedem Dateinamen folgt dessen Inhalt.
+
+
+---
+
+### .dockerignore
+
+```
+# Keep local credentials out of the build context.
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+*.pem
+**/*.pem
+*.key
+**/*.key
+*.p12
+**/*.p12
+*.pfx
+**/*.pfx
+secrets/
+**/secrets/
+
+# Git metadata is not required at runtime.
+.git/
+**/.git/
+
+# Exclude local Python environments and caches.
+.venv/
+venv/
+env/
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.tox/
+**/.nox/
+
+# Exclude generated test and packaging artifacts.
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+build/
+dist/
+**/*.egg-info/
+
+# Models and runtime data must be provisioned separately.
+models/
+outputs/
+recordings/
+logs/
+**/*.log
+
+# Hardware reports and generated configuration are host-specific.
+config/hardware.json
+config/generated.yaml
+hardware.json
+
+# Local audio routing and tunnel state must not enter image layers.
+.asoundrc
+.pulse/
+.config/pulse/
+tunnel_url.json
+**/tunnel_url.json
+
+# Exclude editor metadata and temporary files.
+.idea/
+.vscode/
+.DS_Store
+**/.DS_Store
+**/*~
+**/*.swp
+**/*.swo
+
+# Source, tests, workflows, frontend assets, dependency manifests,
+# lockfiles and configuration templates remain in the build context.
+```
+
+---
+
+### .env.example
+
+```example
+# =========================
+# Base settings (local & cloud)
+# =========================
+
+# =========================
+# Audio / Realtime / SSE
+# =========================
+APP_AUDIO_DEVICE=pipewire
+APP_SAMPLE_RATE=16000
+APP_FRAME_DURATION_MS=20
+APP_STREAM_LATENCY_SEC=0.08
+APP_SSE_TICK_SEC=30.0
+
+# =========================
+# VAD (robust, fewer early cut-offs)
+# =========================
+APP_DISABLE_VAD=0
+APP_USE_WEBRTC_VAD=1
+APP_VAD_AGGRESSIVENESS=2
+APP_RMS_VAD_THRESHOLD=0.013
+
+# =========================
+# Snapshot / Segmentation (sentence-oriented)
+# Slightly tightened for cleaner single-sentence finalization on short utterances
+# =========================
+APP_SNAPSHOT_SEC=2.2            # was 2.4
+APP_MIN_BUF_SEC=2.4             # was 2.6
+APP_MAX_SILENCE_MS=1800         # was 2000
+APP_MAX_SEGMENT_SEC=20.0
+APP_FIRST_SNAPSHOT_DEADLINE_SEC=3.0  # was 3.4
+
+# =========================
+# Frontend text filter (avoid tiny fragments)
+# Keep final outputs meaningful; combine with server-side "final-only" display policy
+# =========================
+APP_TEXT_MIN_CHARS=18
+APP_TEXT_MIN_WORDS=4
+APP_FORCE_MEANINGFUL_CHECK=1
+
+# ==========================================
+# Whisper (shared)
+# Non-low-end defaults here are optimized for ThinkPad E14
+# ==========================================
+APP_WHISPER_BACKEND=pywhispercpp
+# leave empty globally; LOWEND_ forces "de"
+APP_WHISPER_MODEL_PATH=/app/models/tdt-0.6b-v3-q8_0.gguf
+APP_WHISPER_LANGUAGE=
+APP_WHISPER_THREADS=4             # E14: balanced CPU parallelism
+APP_WHISPER_TEMPERATURE=0.0
+APP_WHISPER_MIN_SEC=1.6           # faster finalization than 1.9, still stable on E14
+APP_WHISPER_MIN_PEAK=0.0015
+APP_WHISPER_NO_SPEECH_THRESHOLD=0.8
+APP_WHISPER_LOGPROB_THRESHOLD=-0.8
+APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT=1
+APP_WHISPER_COMPRESSION_RATIO_THRESHOLD=2.4
+
+# ==========================================
+Parakeet
+# Vorbereitet für M2 (aktivierbar via UI/Config)
+#APP_ENABLE_PARAKEET=1
+# Optional spätere Feineinstellungen (Platzhalter, aktuell ungenutzt oder per Code-Defaults):
+#APP_PARAKEET_DEVICE=cpu
+#APP_PARAKEET_MODEL=parakeet-0.6b-v3
+#APP_PARAKEET_SAMPLE_RATE=16000
+# ==========================================
+
+# ==========================================
+# Faster-Whisper specific (Non-low-end = ThinkPad E14)
+# Choose model per language mix:
+# - base (multilingual) for mixed DE/EN
+# - small.en if English-only and you want lower CPU use
+# ==========================================
+APP_FASTER_WHISPER_MODEL=base     # E14 main profile: quality-focused, still real-time
+# APP_FASTER_WHISPER_MODEL=small.en
+APP_FASTER_WHISPER_DEVICE=cpu
+APP_FASTER_WHISPER_COMPUTE_TYPE=int8
+APP_FASTER_WHISPER_CPU_THREADS=6
+APP_FASTER_WHISPER_NUM_WORKERS=2
+APP_FASTER_WHISPER_BEAM_SIZE=1
+APP_FASTER_WHISPER_VAD_FILTER=1
+APP_FASTER_WHISPER_DOWNLOAD_ROOT=./models/faster-whisper-cache
+
+# =========================
+# LLM prompt optimization via Ollama (local REST)
+# =========================
+APP_CONTEXT_MAX_SEGMENTS=6        # E14 can handle a bit more context
+APP_CONTEXT_MAX_CHARS=600
+
+# Native-Default (localhost). Für Docker siehe DOCKER-Block unten (Service-Hostnamen).
+APP_OLLAMA_HOST=127.0.0.1
+APP_OLLAMA_PORT=11434
+APP_OLLAMA_TEMPERATURE=0.2
+APP_OLLAMA_NUM_CTX=3072
+APP_OLLAMA_NUM_PREDICT=640
+APP_OLLAMA_TOP_K=40
+APP_OLLAMA_TOP_P=0.9
+APP_OLLAMA_REPEAT_PENALTY=1.1
+APP_OLLAMA_TIMEOUT_SEC=90
+APP_OLLAMA_MAX_RETRIES=4
+APP_OLLAMA_RETRY_BASE_DELAY=0.8
+APP_LLM_INTERVAL_SEC=10.0
+APP_OLLAMA_DISABLE=0
+APP_OLLAMA_WARMUP_ENABLE=1
+APP_OLLAMA_WARMUP_TIMEOUT_SEC=45
+APP_OLLAMA_WARMUP_RETRY_DELAY=1.2
+
+# System prompt for prompt optimization
+APP_OLLAMA_SYS_PROMPT=Du bist Expertin/Experte für Bild-Prompting. Formuliere prägnante, anschauliche Prompts für Bildgeneratoren (z. B. SDXL), ohne Meta-Kommentare. Bevorzuge konkrete Motive, Stil, Licht, Komposition und Schlüsselattribute. Halte die Antwort kurz (1–2 Sätze). Antworte in der Sprache des Nutzers.
+
+# Choose ONE local-friendly model by default
+APP_OLLAMA_MODEL=gemma3:1b
+# APP_OLLAMA_MODEL=phi3:mini
+# APP_OLLAMA_MODEL=llama3.2:latest
+# APP_OLLAMA_MODEL=qwen2.5:1.5b-instruct-q4_0
+# Cloud via Ollama (prompts may leave your machine):
+# APP_OLLAMA_MODEL=glm-4.7:cloud
+
+# =========================
+# Style analysis via Ollama vision
+# =========================
+APP_OLLAMA_VISION_MODEL=gemma4:31b-cloud
+APP_ALLOW_REMOTE_VISION=1
+FEATURE_OLLAMA_VISION_DEFAULT=1
+# FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON=1
+STYLE_ENGINE_MAX_TOKENS_STYLE_TEXT=40
+STYLE_ENGINE_MAX_TOKENS_VISION=24
+STYLE_ENGINE_MAX_TOKENS_DESCRIPTORS=12
+STYLE_ENGINE_MAX_TOKENS_FINAL=40
+
+# =========================
+# Image generation backend selection (UI can switch)
+# =========================
+IMAGE_BACKEND=comfyui                 # comfyui | pollinations
+# Wichtig: UI soll zwischen lokal/remote/cloud wählen können → Flags auf 1 lassen
+ALLOW_CLOUD_IMAGE_BACKEND=1
+APP_ALLOW_REMOTE_BACKENDS=1
+
+# Default output image size (applies to all backends if UI omits width/height)
+APP_IMAGE_WIDTH=1280
+APP_IMAGE_HEIGHT=720
+
+# Optional subnet restriction for LAN discovery
+APP_ALLOWED_SUBNETS=192.168.188.0/24
+
+# =========================
+# ComfyUI mode (UI can switch)
+# =========================
+# auto | local | remote
+APP_COMFY_MODE=auto
+
+# --- Local/LAN Comfy preset (same machine or LAN host) ---
+# Native-Default (localhost). Für Docker siehe DOCKER-Block (remote/LAN).
+APP_COMFY_HOST=127.0.0.1              # Use LAN IP if ComfyUI runs on another device (e.g., 192.168.188.24)
+APP_COMFY_PORT=8188
+# Mehrere Fallback-Hosts durch Komma trennen; App versucht nacheinander.
+APP_COMFY_FALLBACK_HOSTS=192.168.188.24
+AUTO_DISCOVERY_ENABLE=1
+AUTO_DISCOVERY_SUBNETS=192.168.188.0/24
+
+# http://192.168.188.24:8188/ -> URL to reach ComfyUi on other device in local Network
+
+# --- Remote/Cloud Comfy preset (Cloudflared / other network) ---
+# Wenn gesetzt, kann die App im "remote"-Modus eine gegebene feste Bridge nutzen.
+APP_COMFY_REMOTE_HOST=
+APP_COMFY_REMOTE_PORT=443
+APP_COMFY_REMOTE_SCHEME=https
+APP_COMFY_FORCE_VIEW_MODE=query
+
+# URL to ComfyUI endpoint to get the quick tunnel url from a Cloudflared remote ComfyUI
+# App pollt diese URL (JSON), um eine frische Bridge-URL zu erhalten (z. B. https://<random>.trycloudflare.com)
+PULL_URL=https://dev.betakontext.de/slAIdshow/bridge/tunnel_url.json
+
+# =========================
+# Pollinations (cloud image backend; always reachable)
+# =========================
+POLLINATIONS_API_BASE=https://gen.pollinations.ai
+POLLINATIONS_SECRET=
+POLLINATIONS_MODEL=flux
+POLLINATIONS_NOLOGO=1
+POLLINATIONS_SEED=1234
+POLLINATIONS_USE_V1=1
+POLLINATIONS_WIDTH=
+POLLINATIONS_HEIGHT=
+POLLINATIONS_INLINE_NEG=1
+
+# =========================
+# ComfyUI workflow and common settings
+# =========================
+APP_COMFY_WORKFLOW=./workflows/text2img_SD15-FP16.json
+APP_DISABLE_COMFYUI=0
+APP_COMFY_TIMEOUT_SEC=240
+APP_COMFY_WIDTH=
+APP_COMFY_HEIGHT=
+APP_COMFY_NODE_STYLE_POS=8
+APP_COMFY_NODE_COND_COMBINE=9
+APP_COMFY_STYLE_WEIGHT=1.8
+
+# =========================
+# Server bind (this FastAPI app)
+# =========================
+APP_BIND_HOST=127.0.0.1               # 127.0.0.1 = local only; 0.0.0.0 = expose to LAN
+APP_BIND_PORT=8080
+
+# =========================
+# Outputs
+# =========================
+APP_COMFY_OUTPUT_DIR=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/output/
+APP_OUTPUT_DIR=./outputs/images
+
+# =========================
+# Low-end toggle (empty = off). When "1", LOWEND_* override APP_*.
+# =========================
+APP_LOWEND_MODE=
+
+# =========================
+# LOW-END hard overrides (ThinkPad X260)
+# Goals: very low latency, stable; fewer fragments; force German to avoid mixed-language artifacts
+# =========================
+# Whisper shared (LOWEND_)
+LOWEND_WHISPER_BACKEND=faster_whisper
+LOWEND_WHISPER_LANGUAGE=de          # force German for your scenario
+LOWEND_WHISPER_THREADS=4            # E14 can also use low-end; 4 keeps it responsive but stable
+LOWEND_WHISPER_TEMPERATURE=0.0
+LOWEND_WHISPER_MIN_SEC=1.6          # less flicker than 1.2; still fast closures
+LOWEND_WHISPER_MIN_PEAK=0.0015
+LOWEND_WHISPER_NO_SPEECH_THRESHOLD=0.92  # stricter: suppress filler during short pauses
+LOWEND_WHISPER_LOGPROB_THRESHOLD=-0.6    # stricter: drop low-confidence tokens
+LOWEND_WHISPER_CONDITION_ON_PREVIOUS_TEXT=1
+LOWEND_WHISPER_COMPRESSION_RATIO_THRESHOLD=2.4
+
+# Faster-Whisper (LOWEND_)
+# Prefer small for clarity on X260 if tiny produces fragments; switch back to tiny for max speed
+LOWEND_FASTER_WHISPER_MODEL=small
+# LOWEND_FASTER_WHISPER_MODEL=tiny
+LOWEND_FASTER_WHISPER_DEVICE=cpu
+LOWEND_FASTER_WHISPER_COMPUTE_TYPE=int8
+LOWEND_FASTER_WHISPER_CPU_THREADS=4
+LOWEND_FASTER_WHISPER_NUM_WORKERS=1
+LOWEND_FASTER_WHISPER_BEAM_SIZE=1
+LOWEND_FASTER_WHISPER_VAD_FILTER=1
+LOWEND_FASTER_WHISPER_DOWNLOAD_ROOT=./models/faster-whisper-cache
+
+# =========================
+# DOCKER
+# =========================
+
+# =========================
+# VRAM-Auto-Detection & Tier-Override
+# =========================
+# Leer lassen = Auto anhand hardware_detect.py; gültig: 6gb | 8gb | 16gb | 24gb
+SLAIDSHOW_TIER=
+
+# Pfade für gemeinsam genutzte Hardware-/Config-Dateien (werden von Compose gemountet)
+HARDWARE_JSON=/app/config/hardware.json
+GENERATED_YAML=/app/config/generated.yaml
+CONFIG_PATH=/app/config/generated.yaml
+
+# =========================
+# Service-Hosts in Docker (App spricht Dienste via Compose-Hostnamen)
+# =========================
+# Für Docker-Compose interne Aufrufe: nutze Servicenamen statt 127.0.0.1
+APP_OLLAMA_HOST=ollama
+APP_OLLAMA_PORT=11434
+
+# ComfyUI im selben Docker-Netz (lokaler Service):
+APP_COMFY_MODE=auto
+APP_COMFY_HOST=comfyui
+APP_COMFY_PORT=8188
+
+# Zusätzlich: Zugriff aus Docker auf ein ComfyUI im selben WLAN auf einem anderen Rechner
+# Setze diese ENV in der UI auf "remote" ODER "auto" mit Discovery/Fallbacks:
+# - Für „LAN-Remote“ kann die App APP_COMFY_FALLBACK_HOSTS nutzen (oben definiert).
+# - Alternativ kannst du hier optional eine bevorzugte LAN-IP hinterlegen, wenn gewünscht:
+# DOCKER_LAN_COMFY_HOST=192.168.188.24
+# DOCKER_LAN_COMFY_PORT=8188
+
+# Remote/Cloudflared-Modus auch aus Docker heraus nutzbar:
+# APP_COMFY_REMOTE_HOST/PORT/SCHEME/PULL_URL sind oben bereits gesetzt und werden auch im Container verwendet.
+
+# =========================
+# Bild-Backend/UI-Flags (UI entscheidet)
+# =========================
+# Wichtig: Auf 1 belassen, damit UI Cloud-/Remote-Optionen anbieten kann
+ALLOW_CLOUD_IMAGE_BACKEND=1
+APP_ALLOW_REMOTE_BACKENDS=1
+
+# =========================
+# STT/LLM Docker-Sicherheitsdefaults (werden durch generated.yaml/Tier übersteuert)
+# =========================
+# 6–8 GB: CPU STT empfohlen; LLM klein. Diese Werte sind kompatibel mit Auto-Tier.
+APP_FASTER_WHISPER_DEVICE=cpu
+APP_FASTER_WHISPER_COMPUTE_TYPE=int8
+# Ein kleines, Docker-freundliches LLM als Default; Auto-Tier setzt später passend um.
+APP_OLLAMA_MODEL=gemma3:1b
+```
+
+---
+
+### .gitignore
+
+```
+# Python bytecode and native build artifacts
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.dll
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.iml
+*~
+*.swp
+*.swo
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+
+# Local environment files and secrets
+# Keep sanitized templates available for version control.
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.local.json
+*.local.yaml
+*.local.yml
+
+# Generated hardware detection and runtime configuration
+/config/hardware.json
+/config/generated.yaml
+/config/generated.yaml.*
+/hardware.json
+/generated.yaml
+
+# Local model weights and download caches
+# Models are installed by the downloader, not distributed through Git.
+/models/
+/.cache/
+/huggingface/
+/hf_cache/
+
+# Generated images, audio, recordings and runtime state
+/outputs/
+/recordings/
+
+# Local ComfyUI installation and model-server storage
+/ComfyUI/
+/comfyui/
+/ollama/
+/.ollama/
+
+# Frontend build artifacts
+# Keep frontend source files and local runtime assets tracked.
+static/**/dist/
+static/**/build/
+static/**/.cache/
+node_modules/
+
+# Test, lint, type-checking and coverage caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.tox/
+.nox/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit.xml
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Python packaging and build artifacts
+/build/
+/dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Local planning document
+/plan.odt
+
+# Legacy backup copies
+/app00.py
+/image_backend00.py
+/style_engine00.py
+/comfyui_bridge00.py
+/transcription_backend00.py
+/web/index00.html
+sourcecode_snapshot.py
+
+# Intentionally tracked:
+# - workflows/*.json: reproducible ComfyUI workflow definitions
+# - dependency lockfiles: reproducible dependency versions
+# - README, roadmap, project documentation and tests
+# - Dockerfile, Compose files, scripts and service definitions
+# - sanitized configuration templates
+```
+
+---
+
+### Dockerfile
+
+```
+# syntax=docker/dockerfile:1.7
+
+ARG PYTHON_IMAGE=python:3.12-slim-bookworm
+
+# -------- Stage 1: dependencies (build venv) --------
+FROM ${PYTHON_IMAGE} AS dependencies
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    CMAKE_BUILD_PARALLEL_LEVEL=2 \
+    GGML_CUDA=OFF
+
+# System libs for building and for Python wheels that link to audio backends
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        git \
+        pkg-config \
+        # PortAudio/ALSA for sounddevice (mic runtime and import check)
+        libasound2-dev \
+        libportaudio2 \
+        portaudio19-dev \
+        # libsndfile for soundfile (file-fallback decode)
+        libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# Install Python deps
+COPY requirements.txt /tmp/requirements.txt
+RUN python -m pip install --upgrade pip \
+ && python -m pip install --requirement /tmp/requirements.txt \
+ && python -m pip check
+
+# Sanity import check including pywhispercpp and soundfile
+RUN python - <<'PY'
+import fastapi, uvicorn, numpy, sounddevice, soundfile
+import pywhispercpp, faster_whisper
+print("Imports OK")
+PY
+
+
+# -------- Stage 2: runtime --------
+FROM ${PYTHON_IMAGE} AS runtime
+
+ENV PATH="/opt/venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HOME=/home/slaidshow \
+    XDG_CACHE_HOME=/app/models/cache \
+    HF_HOME=/app/models/huggingface \
+    HF_HUB_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    CONFIG_PATH=/app/config/generated.yaml \
+    APP_BIND_HOST=0.0.0.0 \
+    APP_BIND_PORT=8080 \
+    APP_FASTER_WHISPER_DEVICE=cpu \
+    APP_FASTER_WHISPER_COMPUTE_TYPE=int8 \
+    APP_FASTER_WHISPER_DOWNLOAD_ROOT=/app/models/faster-whisper \
+    OMP_NUM_THREADS=2 \
+    OPENBLAS_NUM_THREADS=2
+
+# Runtime system libs: audio + BLAS/OpenMP
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        libstdc++6 \
+        libgomp1 \
+        # audio stack for mic + file decoding
+        libasound2 \
+        libportaudio2 \
+        libsndfile1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 slaidshow \
+    && useradd --uid 10001 --gid slaidshow \
+         --create-home --shell /usr/sbin/nologin slaidshow
+
+# Bring venv from builder
+COPY --from=dependencies /opt/venv /opt/venv
+
+WORKDIR /app
+
+# Copy source with a restrictive context; avoid models/secrets in layers
+RUN --mount=type=bind,source=.,target=/source,readonly \
+    tar --create --file=- --directory=/source \
+        --exclude='.git' \
+        --exclude='.env' \
+        --exclude='.env.*' \
+        --exclude='*.pem' \
+        --exclude='*.key' \
+        --exclude='.venv' \
+        --exclude='venv' \
+        --exclude='__pycache__' \
+        --exclude='*.pyc' \
+        --exclude='.pytest_cache' \
+        --exclude='.ruff_cache' \
+        --exclude='models' \
+        --exclude='recordings' \
+        --exclude='outputs' \
+        --exclude='config/hardware.json' \
+        --exclude='config/generated.yaml' \
+        . \
+    | tar --extract --file=- --directory=/app --no-same-owner
+
+# Verify entrypoint and critical imports (now within runtime image)
+RUN test -f /app/app.py \
+ && mkdir -p /app/config /app/models /app/recordings /app/outputs \
+ && chown -R slaidshow:slaidshow /app \
+ && python - <<'PY'
+import fastapi, uvicorn, numpy, sounddevice, soundfile
+import pywhispercpp, faster_whisper
+print("Runtime imports OK")
+PY
+
+USER slaidshow:slaidshow
+
+EXPOSE 8080
+
+# Simple HTTP health; does not verify model availability
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+  CMD python - <<'PY' || exit 1
+import os, urllib.request
+port=os.environ.get('APP_BIND_PORT','8080')
+with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=8) as r:
+    pass
+print("healthy")
+PY
+
+STOPSIGNAL SIGTERM
+
+CMD ["sh", "-c", "exec python -m uvicorn app:app --host \"${APP_BIND_HOST}\" --port \"${APP_BIND_PORT}\" --workers 1 --timeout-graceful-shutdown 30"]
+```
+
+---
+
+### Makefile
+
+```
+.DEFAULT_GOAL := help
+
+COMPOSE ?= docker compose
+
+.PHONY: help build install hardware config validate download-policy up down logs test
+
+help:
+	@echo "slAIdshow"
+	@echo ""
+	@echo "make build            Container bauen"
+	@echo "make install          Hardware erfassen und Konfiguration prüfen"
+	@echo "make hardware         Hardware-Datei erzeugen"
+	@echo "make config           Konfiguration erzeugen"
+	@echo "make validate         Persistierte Konfiguration prüfen"
+	@echo "make download-policy  Downloadrichtlinie prüfen"
+	@echo "make up               Laufzeitdienste explizit starten"
+	@echo "make down             Dienste stoppen"
+	@echo "make logs             Laufzeitprotokolle anzeigen"
+	@echo "make test             pytest ausführen"
+	@echo ""
+	@echo "Hinweis: install bestätigt keine Modell- oder Show-Startfähigkeit."
+
+build:
+	$(COMPOSE) build init backend
+
+# Keep initialization sequential, including when make is invoked with -j.
+# Do not start runtime services before model and workflow acceptance.
+install:
+	@echo "═══ slAIdshow: Konfiguration vorbereiten ═══"
+	$(COMPOSE) build init
+	@echo ""
+	@echo "Schritt 1/4: NVIDIA-Hardware erfassen"
+	$(COMPOSE) run --rm --no-deps --workdir /app init python hardware_detect.py
+	@echo ""
+	@echo "Schritt 2/4: Konfiguration erzeugen"
+	$(COMPOSE) run --rm --no-deps --workdir /app init python config_generator.py
+	@echo ""
+	@echo "Schritt 3/4: Konfiguration validieren"
+	$(COMPOSE) run --rm --no-deps --workdir /app init python runtime_config.py
+	@echo ""
+	@echo "Schritt 4/4: Downloadrichtlinie prüfen"
+	$(COMPOSE) run --rm --no-deps --workdir /app init python model_downloader.py
+	@echo ""
+	@echo "Konfigurationsvorbereitung abgeschlossen."
+	@echo "Downloads bleiben deaktiviert; Laufzeitdienste wurden nicht gestartet."
+	@echo "Modell-, Workflow-, Scheduler- und Hardware-Abnahme stehen noch aus."
+
+hardware:
+	$(COMPOSE) run --rm --no-deps --workdir /app init python hardware_detect.py
+
+config:
+	$(COMPOSE) run --rm --no-deps --workdir /app init python config_generator.py
+
+validate:
+	$(COMPOSE) run --rm --no-deps --workdir /app init python runtime_config.py
+
+download-policy:
+	$(COMPOSE) run --rm --no-deps --workdir /app init python model_downloader.py
+
+# Configuration validation does not establish backend or model readiness.
+# Start only runtime services; the init service must remain one-shot.
+up:
+	$(COMPOSE) run --rm --no-deps --workdir /app init python runtime_config.py
+	$(COMPOSE) up -d ollama comfyui backend
+	@echo "Start angefordert; Betriebsbereitschaft ist noch nicht bestätigt."
+
+down:
+	$(COMPOSE) down
+
+logs:
+	$(COMPOSE) logs --follow --tail=100 backend ollama comfyui
+
+# Unit tests must mock GPU access and external model servers.
+test:
+	$(COMPOSE) run --rm --no-deps --workdir /app init python -m pytest tests/ -v
+```
+
+---
+
+### app.py
+
+```py
+# app.py
+from __future__ import annotations
+
+import asyncio
+
+# --- BEGIN injected: start capture uses AudioBufferWorker (parakeet opt-in) ---
+import os, asyncio
+_APP_ENABLE_PARAKEET = os.getenv("APP_ENABLE_PARAKEET", "") == "1"
+try:
+    _parakeet_adapter = None
+    if _APP_ENABLE_PARAKEET:
+        from transcription_backend import ParakeetAdapter  # type: ignore
+        _parakeet_adapter = ParakeetAdapter()
+        _parakeet_adapter.load()
+except Exception:
+    _parakeet_adapter = None
+
+# locate existing RealtimeTranscriber or similar transcribe function
+# Provide a wrapper callback to accept aggregated bytes from worker.
+async def _buffer_transcribe_cb(pcm_bytes: bytes, sr: int, finalize: bool = False):
+    """
+    Called by AudioBufferWorker with aggregated PCM bytes.
+    This wrapper chooses backend: Parakeet (if enabled and loaded and
+    conditions met) else original transcribe facility.
+    """
+    # Lazy import of the module's transcribe function to avoid circular imports.
+    try:
+        import transcription_backend as tb
+    except Exception:
+        tb = None
+
+    text = ""
+    try:
+        # Prefer parakeet if enabled and loaded and language heuristics suggest it
+        if _parakeet_adapter and getattr(_parakeet_adapter, "_loaded", False):
+            # heuristic: if configured to prefer english or detected language is en,
+            # try parakeet first (non-fatal on failure)
+            try:
+                lang_hint = os.getenv("APP_TRANSCRIBE_LANG_HINT", "")  # optional
+                if lang_hint.lower().startswith("en"):
+                    txt = await _parakeet_adapter.transcribe_bytes(pcm_bytes, sr)
+                    if txt:
+                        text = txt
+                        # hand over to existing backend for integration (if needed)
+                        if tb and hasattr(tb, "accept_transcript"):
+                            await tb.accept_transcript(text, source="parakeet")
+                        return
+            except Exception:
+                # parakeet failure is non-fatal; fall back
+                pass
+
+        # fallback to existing transcription pipeline
+        if tb and hasattr(tb, "transcribe_bytes"):
+            # transcribe_bytes should be an async function returning text
+            txt = tb.transcribe_bytes(pcm_bytes, sr, finalize=finalize)
+            if asyncio.iscoroutine(txt):
+                txt = await txt
+            text = txt or ""
+            # accept into backend structures if available
+            if tb and hasattr(tb, "accept_transcript"):
+                await tb.accept_transcript(text, source="buffered")
+    except Exception:
+        import traceback; traceback.print_exc()
+    return text
+# --- END injected ---
+import contextlib
+import inspect
+import json
+import re
+import time
+import traceback
+from collections import deque
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
+from utils.os_open import open_folder_os, OpenDirError
+
+# ---------- Optional dotenv loading ----------
+
+ENV_PATH: Optional[str] = None
+try:
+    from dotenv import find_dotenv, load_dotenv
+    explicit = os.environ.get("ENV_FILE")
+    if explicit:
+        found = find_dotenv(explicit, usecwd=True)
+        if found:
+            load_dotenv(found, override=True)
+            ENV_PATH = found
+        elif os.path.isfile(explicit):
+            load_dotenv(explicit, override=True)
+            ENV_PATH = os.path.abspath(explicit)
+    if ENV_PATH is None:
+        found = find_dotenv(".env", usecwd=True)
+        if found:
+            load_dotenv(found, override=True)
+            ENV_PATH = found
+except Exception as e:
+    print(f"[ENV] dotenv not available or failed: {e}")
+
+print(f"[ENV] APP_OLLAMA_VISION_MODEL={os.getenv('APP_OLLAMA_VISION_MODEL')}, "
+      f"APP_ALLOW_REMOTE_VISION={os.getenv('APP_ALLOW_REMOTE_VISION')}, "
+      f"APP_OLLAMA_HOST={os.getenv('APP_OLLAMA_HOST')}, "
+      f"APP_OLLAMA_PORT={os.getenv('APP_OLLAMA_PORT')}")
+
+import httpx
+import numpy as np
+import sounddevice as sd
+
+from transcription_backend import (
+    get_transcription_status,
+    init_transcription_backend,
+    transcribe_chunk,
+    RealtimeTranscriber,
+)
+
+from fastapi import FastAPI, Request, UploadFile, File, Body, Query
+from fastapi.responses import (
+    JSONResponse,
+    PlainTextResponse,
+    StreamingResponse,
+    RedirectResponse,
+    Response,
+)
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field, field_validator, HttpUrl
+
+from starlette.responses import Response
+
+# Image backend factory and interface
+from image_backend import build_image_backend, ImageBackend, merge_style_prompt, register_event_listener
+
+from utils.os_open import open_folder_os, OpenDirError
+
+
+try:
+    from image_backend import LocalComfyBackend  # type: ignore
+except Exception:
+    LocalComfyBackend = None  # type: ignore
+
+# style_engine is optional and versioned; functions may be missing
+try:
+    import style_engine  # may expose: ensure_dirs, save_reference_from_bytes, save_reference_from_url, build_styles, StyleEngineRequest
+except Exception as e:
+    style_engine = None  # We'll error lazily when required
+    print(f"[STYLE] style_engine not available: {e}")
+
+# NEW: import comfyui_bridge router to expose /api/bridge/apply_from_pull and /api/settings/pull_url
+try:
+    from comfyui_bridge import bridge_router  # provides new bridge endpoints
+except Exception as e:
+    bridge_router = None  # type: ignore
+    print(f"[BRIDGE] comfyui_bridge not available: {e}")
+
+# ---------- ENV helpers ----------
+
+def _env_str(k: str, d: str) -> str:
+    return (os.getenv(k, d) or "").strip()
+
+def _env_int(k: str, d: int) -> int:
+    try:
+        return int(os.getenv(k, str(d)))
+    except Exception:
+        return d
+
+def _env_float(k: str, d: float) -> float:
+    try:
+        return float(os.getenv(k, str(d)))
+    except Exception:
+        return d
+
+def _env_bool01(k: str, d: int = 0) -> bool:
+    v = (os.getenv(k, str(d)) or "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+
+def _backend_default_size(backend_name: str) -> tuple[int, int]:
+    """
+    Backend-specific default sizes from .env:
+    - pollinations: POLLINATIONS_WIDTH/HEIGHT, fallback 1024×1024
+    - otherwise (comfy): APP_COMFY_WIDTH/HEIGHT, fallback 128×128
+    """
+    b = (backend_name or "comfyui").lower()
+    if b == "pollinations":
+        w = _env_int("POLLINATIONS_WIDTH", 1024)
+        h = _env_int("POLLINATIONS_HEIGHT", 1024)
+    else:
+        w = _env_int("APP_COMFY_WIDTH", 128)
+        h = _env_int("APP_COMFY_HEIGHT", 128)
+    w = max(64, min(2048, w))
+    h = max(64, min(2048, h))
+    return w, h
+
+
+# ---------- Audio config ----------
+
+AUDIO_DEVICE_PREF = _env_str("APP_AUDIO_DEVICE", "") or None
+SAMPLE_RATE = _env_int("APP_SAMPLE_RATE", 48000)
+FRAME_MS = _env_int("APP_FRAME_DURATION_MS", 20)
+APP_STREAM_LATENCY_SEC = _env_float("APP_STREAM_LATENCY_SEC", 0.12)
+
+DISABLE_VAD = _env_bool01("APP_DISABLE_VAD", 1)
+RMS_VAD_THRESHOLD = _env_float("APP_RMS_VAD_THRESHOLD", 0.015)
+
+SNAPSHOT_SEC = _env_float("APP_SNAPSHOT_SEC", 2.5)
+MIN_BUF_SEC = _env_float("APP_MIN_BUF_SEC", 0.35)
+MAX_SILENCE_MS = _env_int("APP_MAX_SILENCE_MS", 700)
+MAX_SEGMENT_SEC = _env_float("APP_MAX_SEGMENT_SEC", 12.0)
+FIRST_SNAPSHOT_DEADLINE_SEC = _env_float("APP_FIRST_SNAPSHOT_DEADLINE_SEC", 1.2)
+
+# Realtime session holder (one per active recording)
+class _RTSession:
+    def __init__(self) -> None:
+        self.transcriber: Optional[RealtimeTranscriber] = None
+        self.sample_rate: int = SAMPLE_RATE  # use existing SAMPLE_RATE from app.py
+
+RT = _RTSession()
+
+# ---------- SSE heartbeat ----------
+
+APP_SSE_TICK_SEC = _env_float("APP_SSE_TICK_SEC", 1.0)
+
+# ---------- Transcription backend configuration ----------
+
+# The implementation and backend selection live in transcription_backend.py.
+# These values remain here because app.py exposes them in /config and uses
+# them for the audio pipeline configuration display.
+WHISPER_BACKEND_REQUESTED = _env_str("APP_WHISPER_BACKEND", "auto").lower()
+WHISPER_MODEL_PATH = _env_str("APP_WHISPER_MODEL_PATH", "")
+WHISPER_LANGUAGE_RAW = _env_str("APP_WHISPER_LANGUAGE", "")
+WHISPER_LANGUAGE = WHISPER_LANGUAGE_RAW.strip() or None
+WHISPER_THREADS = _env_int("APP_WHISPER_THREADS", 2)
+WHISPER_TEMPERATURE = _env_float("APP_WHISPER_TEMPERATURE", 0.0)
+WHISPER_MIN_SEC = _env_float("APP_WHISPER_MIN_SEC", 0.35)
+WHISPER_MIN_PEAK = _env_float("APP_WHISPER_MIN_PEAK", 0.0009)
+
+FASTER_WHISPER_MODEL = _env_str("APP_FASTER_WHISPER_MODEL", "small")
+FASTER_WHISPER_DEVICE = _env_str("APP_FASTER_WHISPER_DEVICE", "auto")
+FASTER_WHISPER_COMPUTE_TYPE = _env_str(
+    "APP_FASTER_WHISPER_COMPUTE_TYPE",
+    "auto",
+)
+FASTER_WHISPER_CPU_THREADS = _env_int(
+    "APP_FASTER_WHISPER_CPU_THREADS",
+    WHISPER_THREADS,
+)
+FASTER_WHISPER_NUM_WORKERS = _env_int(
+    "APP_FASTER_WHISPER_NUM_WORKERS",
+    1,
+)
+FASTER_WHISPER_BEAM_SIZE = _env_int(
+    "APP_FASTER_WHISPER_BEAM_SIZE",
+    1,
+)
+FASTER_WHISPER_VAD_FILTER = _env_bool01(
+    "APP_FASTER_WHISPER_VAD_FILTER",
+    0,
+)
+FASTER_WHISPER_DOWNLOAD_ROOT = _env_str(
+    "APP_FASTER_WHISPER_DOWNLOAD_ROOT",
+    "",
+)
+# ---------- Transcription input-locale hint (runtime-aware) ----------
+INPUT_LOCALE_HINT = (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip() or None
+
+
+
+# ---------- Text filtering ----------
+
+TEXT_MIN_CHARS = _env_int("APP_TEXT_MIN_CHARS", 3)
+TEXT_MIN_WORDS = _env_int("APP_TEXT_MIN_WORDS", 1)
+FORCE_MEANINGFUL_CHECK = _env_bool01("APP_FORCE_MEANINGFUL_CHECK", 0)
+
+CONTEXT_MAX_SEGMENTS = _env_int("APP_CONTEXT_MAX_SEGMENTS", 5)
+CONTEXT_MAX_CHARS = _env_int("APP_CONTEXT_MAX_CHARS", 480)
+
+# ---------- Output/static config ----------
+
+OUTPUT_DIR = Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")).resolve()
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Gallery configuration. Only files directly inside OUTPUT_DIR are listed.
+GALLERY_IMAGE_LIMIT = max(1, min(100, _env_int("APP_GALLERY_IMAGE_LIMIT", 50)))
+GALLERY_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+
+def rel_for_ui(p: Path) -> str:
+    return Path(p).name
+
+def ensure_in_output_dir(p: Path) -> Path:
+    """
+    Ensure the generated file is placed in OUTPUT_DIR; move/copy if needed.
+    """
+    try:
+        p = Path(p).resolve()
+    except Exception:
+        p = Path(p)
+    if p.parent == OUTPUT_DIR:
+        return p
+    target = OUTPUT_DIR / p.name
+    if target.exists():
+        stem, suf = p.stem, p.suffix
+        for i in range(1, 1000):
+            cand = OUTPUT_DIR / f"{stem}_{i}{suf}"
+            if not cand.exists():
+                target = cand
+                break
+    try:
+        with contextlib.suppress(Exception):
+            p.replace(target)
+            print(f"[SAVE] moved image to {target}")
+            return target
+        data = p.read_bytes()
+        target.write_bytes(data)
+        with contextlib.suppress(Exception):
+            p.unlink()
+        print(f"[SAVE] copied image to {target}")
+        return target
+    except Exception as e:
+        print(f"[SAVE] failed to move/copy image: {e}")
+        return p
+
+def _list_gallery_images(limit: int) -> List["GalleryImageItem"]:
+    """
+    Return recent generated images directly inside OUTPUT_DIR.
+
+    Non-recursive on purpose. Excludes:
+      - refs/ (reference uploads)
+      - bridge/ (tunnel sync artifacts)
+      - any subdirectories or symlinks
+    """
+    items: List[GalleryImageItem] = []
+    try:
+        entries = list(OUTPUT_DIR.iterdir())
+    except FileNotFoundError:
+        return items
+    except Exception as e:
+        print(f"[GALLERY] failed to read output directory: {e}")
+        return items
+
+    for path in entries:
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            if path.suffix.lower() not in GALLERY_IMAGE_SUFFIXES:
+                continue
+            st = path.stat()
+            items.append(
+                GalleryImageItem(
+                    name=path.name,
+                    url=f"/static/{path.name}",
+                    modified=float(st.st_mtime),
+                )
+            )
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            print(f"[GALLERY] skipped entry {path!s}: {e}")
+
+    items.sort(key=lambda it: it.modified, reverse=True)
+    return items[: max(1, int(limit))]
+
+# UI-defaults (initial)
+APP_IMAGE_WIDTH = _env_int("APP_IMAGE_WIDTH", 512)
+APP_IMAGE_HEIGHT = _env_int("APP_IMAGE_HEIGHT", 512)
+
+# ---------- Workflows (ComfyUI) ----------
+
+WORKFLOWS_DIR = Path(os.getenv("WORKFLOWS_DIR", "workflows")).resolve()
+WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---------- Ollama ----------
+
+OLLAMA_HOST = _env_str("APP_OLLAMA_HOST", "127.0.0.1")
+OLLAMA_PORT = _env_int("APP_OLLAMA_PORT", 11434)
+OLLAMA_MODEL = _env_str("APP_OLLAMA_MODEL", "llama3.2:latest")
+OLLAMA_TEMPERATURE = _env_float("APP_OLLAMA_TEMPERATURE", 0.2)
+OLLAMA_NUM_CTX = _env_int("APP_OLLAMA_NUM_CTX", 3072)
+OLLAMA_NUM_PREDICT = _env_int("APP_OLLAMA_NUM_PREDICT", 640)
+OLLAMA_TOP_K = _env_int("APP_OLLAMA_TOP_K", 40)
+OLLAMA_TOP_P = _env_float("APP_OLLAMA_TOP_P", 0.9)
+OLLAMA_REPEAT_PENALTY = _env_float("APP_OLLAMA_REPEAT_PENALTY", 1.1)
+OLLAMA_TIMEOUT_SEC = _env_float("APP_OLLAMA_TIMEOUT_SEC", 90.0)
+OLLAMA_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 4)
+OLLAMA_RETRY_BASE_DELAY = _env_float("APP_OLLAMA_RETRY_BASE_DELAY", 0.8)
+LLM_INTERVAL_SEC = _env_float("APP_LLM_INTERVAL_SEC", 10.0)
+OLLAMA_DISABLED = _env_bool01("APP_OLLAMA_DISABLE", 0)
+
+OLLAMA_SYS_PROMPT = _env_str(
+    "APP_OLLAMA_SYS_PROMPT",
+    "Du bist ein präziser Prompt-Designer für Bildgeneratoren. Erzeuge kurze, klare, fotografische oder illustrative Bild-Prompts, ohne Meta-Kommentare, in Deutsch.",
+)
+
+# --- NEW: Docker-vs-Native assert_local (only for diagnostics; do not restrict hosts here) ---
+import pathlib, socket, platform
+def _is_running_in_docker() -> bool:
+    try:
+        if os.path.exists("/.dockerenv"):
+            return True
+        txt = pathlib.Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="ignore")
+        low = txt.lower()
+        return ("docker" in low) or ("kubepods" in low) or ("containerd" in low)
+    except Exception:
+        return False
+
+def _assert_local_ctx() -> Dict[str, Any]:
+    return {
+        "docker": _is_running_in_docker(),
+        "hostname": socket.gethostname(),
+        "platform": platform.platform(),
+        "python_version": platform.python_version(),
+        "cwd": str(pathlib.Path.cwd()),
+    }
+
+def assert_local(host: str) -> None:
+    """
+    Hard safety: do not allow remote hosts for Ollama.
+    """
+    if host != "127.0.0.1" and host != "ollama":  # allow service host in Docker compose
+        raise AssertionError(f"Only localhost/service allowed, got {host}")
+
+assert_local(OLLAMA_HOST)
+
+def _env_bool01_alt(k: str, d: int = 0) -> bool:
+    v = (os.getenv(k, str(d)) or "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+def _assert_image_backend_host():
+    """
+    On startup, only enforce strict host policy when running local Comfy mode.
+    Respect both static APP_ALLOW_REMOTE_BACKENDS and runtime ALLOW_CLOUD_IMAGE_BACKEND.
+    """
+    comfy_mode = os.getenv("APP_COMFY_MODE", "auto").strip().lower()
+    if comfy_mode != "local":
+        return
+    allow_remote = (
+        _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
+        or _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0)
+    )
+    host = os.getenv("APP_COMFY_HOST", "127.0.0.1")
+    if not allow_remote:
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            raise RuntimeError(
+                "APP_COMFY_MODE=local but APP_COMFY_HOST is not localhost and remote backends are not allowed. "
+                "Either set APP_ALLOW_REMOTE_BACKENDS=1 or toggle cloud/remote allowance at runtime."
+            )
+
+_assert_image_backend_host()
+
+WARMUP_ENABLE = _env_bool01("APP_OLLAMA_WARMUP_ENABLE", 1)
+WARMUP_PROMPT = _env_str("APP_OLLAMA_WARMUP_PROMPT", "Sag Hallo auf Deutsch.")
+WARMUP_TIMEOUT_SEC = _env_float("APP_OLLAMA_TIMEOUT_SEC", 45.0)
+WARMUP_MAX_RETRIES = _env_int("APP_OLLAMA_MAX_RETRIES", 3)
+WARMUP_RETRY_DELAY = _env_float("APP_OLLAMA_RETRY_DELAY", 1.2)
+WARMUP_GRACE_SEC = _env_float("APP_OLLAMA_GRACE_SEC", 10.0)
+
+# ---------- NEW: Direct-live settings ----------
+
+DIRECT_LIVE_DEFAULT = _env_bool01("APP_DIRECT_LIVE_DEFAULT", 0)
+
+# ---------- Ollama Vision settings (for style_engine to consume) ----------
+
+class OllamaVisionSettings(BaseModel):
+    enabled: bool = True
+    mode: Literal["local", "remote", "cloud"] = "local"
+    local_url: str = "http://127.0.0.1:11434"
+    remote_url: str = ""
+    cloud_url: str = ""
+
+@dataclass
+class OllamaVisionState:
+    enabled: bool = True
+    mode: str = "local"
+    local_url: str = "http://127.0.0.1:11434"
+    remote_url: str = ""
+    cloud_url: str = ""
+
+VISION = OllamaVisionState()
+
+# ---------- Pydantic payloads ----------
+
+class OllamaGenerateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model: str
+    prompt: str
+    stream: bool = False
+    options: dict = Field(default_factory=dict)
+
+class OllamaChatTurn(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+class OllamaChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model: str
+    messages: List[OllamaChatTurn]
+    stream: bool = False
+    options: dict = Field(default_factory=dict)
+
+class PlanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(..., min_length=1)
+    tags: List[str] = Field(default_factory=list)
+    width: Optional[int] = None
+    height: Optional[int] = None
+    style_positive: Optional[str] = None
+
+# --- NEW: 6GB-safe config and tier exposure support ---
+
+# Paths typically mounted in Docker; keep harmless for native
+DEFAULT_CONFIG_DIR = "/app/config"
+HARDWARE_JSON_PATH = os.getenv("HARDWARE_JSON", f"{DEFAULT_CONFIG_DIR}/hardware.json")
+GENERATED_YAML_PATH = os.getenv("GENERATED_YAML", f"{DEFAULT_CONFIG_DIR}/generated.yaml")
+# Allow CONFIG_PATH to be either dir or file; store dir for presentation
+CONFIG_PATH_RAW = os.getenv("CONFIG_PATH", DEFAULT_CONFIG_DIR)
+
+# Minimal YAML loader without external deps; safe for key: value
+def _load_yaml_minimal(raw: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for line in (raw or "").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or ":" not in s:
+            continue
+        k, v = s.split(":", 1)
+        out[k.strip()] = v.strip().strip("'\"")
+    return out
+
+def _read_file_text(p: str) -> Optional[str]:
+    try:
+        return Path(p).read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+
+def _read_json_obj(p: str) -> Optional[Dict[str, Any]]:
+    try:
+        txt = _read_file_text(p)
+        return json.loads(txt) if txt else None
+    except Exception:
+        return None
+
+def _read_yaml_obj(p: str) -> Optional[Dict[str, Any]]:
+    try:
+        txt = _read_file_text(p)
+        if not txt:
+            return None
+        # Try PyYAML if present, else minimal
+        try:
+            import yaml  # type: ignore
+            data = yaml.safe_load(txt) or {}
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return _load_yaml_minimal(txt)
+    except Exception:
+        return None
+
+KNOWN_TIERS = {"6gb", "8gb", "16gb", "24gb"}
+SAFE_TIER = "6gb"
+
+def _extract_tier(generated: Optional[Dict[str, Any]], env_override: Optional[str]) -> Tuple[str, str]:
+    if env_override:
+        val = env_override.strip().lower()
+        if val in KNOWN_TIERS:
+            return val, "env"
+        return SAFE_TIER, "env_invalid"
+    if isinstance(generated, dict):
+        for key in ("tier", "vram_tier", "profile", "hardware_profile"):
+            t = generated.get(key)
+            if isinstance(t, str) and t.lower() in KNOWN_TIERS:
+                return t.lower(), "generated.yaml"
+    return SAFE_TIER, "fallback"
+
+def _summarize_generated(gen: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(gen, dict):
+        return {}
+    safe = {
+        "tier", "vram_tier", "profile", "hardware_profile",
+        "stt_backend", "stt_device",
+        "llm_model", "llm_endpoint",
+        "image_backend", "comfyui_endpoint",
+        "allow_cloud", "scheduler_mode", "resolution",
+    }
+    return {k: v for k, v in gen.items() if k in safe}
+
+def _gather_config_tier_state() -> Dict[str, Any]:
+    # CONFIG_PATH may be a file; we show a dir path in responses for clarity
+    cfg_path_for_ui = CONFIG_PATH_RAW
+    try:
+        p = Path(CONFIG_PATH_RAW)
+        if p.exists() and p.is_file():
+            cfg_path_for_ui = str(p.parent.resolve())
+        else:
+            cfg_path_for_ui = str((p if p.is_absolute() else p.resolve()))
+    except Exception:
+        pass
+
+    hardware = _read_json_obj(HARDWARE_JSON_PATH)
+    generated = _read_yaml_obj(GENERATED_YAML_PATH)
+    tier_env = os.getenv("SLAIDSHOW_TIER", "") or None
+    tier, tier_src = _extract_tier(generated, tier_env)
+
+    return {
+        "config_path": cfg_path_for_ui,
+        "hardware": hardware,
+        "generated": generated,
+        "tier": tier,
+        "tier_source": tier_src,
+        "assert_local": _assert_local_ctx(),
+    }
+
+class HealthReport(BaseModel):
+    ollama_ok: bool
+    image_backend: str
+    allow_cloud: bool
+    output_dir: str
+    output_dir_exists: bool
+    last_prompt: Optional[str] = None
+    last_llm_error: Optional[str] = None
+    pollinations_key_present: bool = False
+    # NEW
+    docker: bool = False
+    config_path: str = ""
+    tier: str = SAFE_TIER
+    tier_source: str = "fallback"
+
+class ImageBackendSwitch(BaseModel):
+    backend: Literal["comfyui", "pollinations"]
+    reset: bool = False
+
+# NEW: Comfy mode/remote settings and debug models
+class ComfyModeRequest(BaseModel):
+    mode: Literal["local", "remote", "auto"]
+
+class ComfyRemoteRequest(BaseModel):
+    scheme: Literal["http", "https"] = "http"
+    host: str
+    port: int = Field(default=8188, ge=1, le=65535)
+
+class DebugImageTarget(BaseModel):
+    backend_type: str
+    active_backend: str
+    comfy_mode: Optional[str] = None
+    target: Dict[str, Any] = Field(default_factory=dict)
+
+_MIN_SIZE = 128
+_MAX_SIZE = 2048
+
+class ImageRequest(BaseModel):
+    prompt: str = Field(min_length=0, max_length=2000)
+    width: int | None = Field(default=None)
+    height: int | None = Field(default=None)
+    negative_prompt: Optional[str] = None
+    style_positive: Optional[str] = None
+
+    @field_validator("width", "height")
+    @classmethod
+    def _clamp_size(cls, v: int | None) -> int | None:
+        if v is None:
+            return v
+        try:
+            iv = int(v)
+        except Exception:
+            return None
+        if iv < _MIN_SIZE:
+            iv = _MIN_SIZE
+        if iv > _MAX_SIZE:
+            iv = _MAX_SIZE
+        return iv
+
+class DirectImageRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=2000)
+    width: int | None = None
+    height: int | None = None
+    negative_prompt: Optional[str] = None
+    style_positive: Optional[str] = None
+
+class ImageResponse(BaseModel):
+    filename: str
+    relpath: str
+    rel: Optional[str] = None
+    width: int | None = None
+    height: int | None = None
+
+class GalleryImageItem(BaseModel):
+    """A generated image available for the UI thumbnail gallery."""
+    name: str
+    url: str
+    modified: float
+
+class GalleryImageList(BaseModel):
+    """Response payload for the generated-image gallery endpoint."""
+    items: List[GalleryImageItem]
+
+class ImageSizeSettings(BaseModel):
+    width: int = Field(ge=_MIN_SIZE, le=_MAX_SIZE)
+    height: int = Field(ge=_MIN_SIZE, le=_MAX_SIZE)
+
+class NegativePromptSettings(BaseModel):
+    negative_prompt: str = Field(default="", max_length=4000)
+
+class StylePromptSettings(BaseModel):
+    style_positive: str = Field(default="", max_length=4000)
+
+# ---------- NEW: Direct-live settings API models ----------
+
+class DirectLiveSettings(BaseModel):
+    enabled: bool
+
+# Workflows API payloads
+class WorkflowItem(BaseModel):
+    name: str = Field(..., description="Display name (stem)")
+    filename: str = Field(..., description="Base filename ending with .json")
+
+class WorkflowList(BaseModel):
+    items: List[WorkflowItem]
+
+class WorkflowSelect(BaseModel):
+    filename: str = Field(..., description="Base filename ending with .json")
+
+    @field_validator("filename")
+    @classmethod
+    def safe_filename(cls, v: str) -> str:
+        if "/" in v or "\\" in v:
+            raise ValueError("Invalid filename")
+        if not v.endswith(".json"):
+            raise ValueError("Must end with .json")
+        if not re.fullmatch(r"[A-Za-z0-9._\\-]+", v):
+            raise ValueError("Illegal characters in filename")
+        return v
+# ---------- Low-end mode settings API model ----------
+
+class LowEndSettings(BaseModel):
+    enabled: bool
+
+
+# ---------- Audio utils ----------
+
+def pick_input_device(prefer: Optional[str] = None) -> int:
+    devs = sd.query_devices()
+    if not devs:
+        raise RuntimeError("No audio devices found")
+    if prefer:
+        for i, d in enumerate(devs):
+            if d.get("name") == prefer and d.get("max_input_channels", 0) > 0:
+                return i
+        for i, d in enumerate(devs):
+            if prefer.lower() in (d.get("name", "").lower()) and d.get("max_input_channels", 0) > 0:
+                return i
+    for i, d in enumerate(devs):
+        if "pulse" in (d.get("name", "").lower()) and d.get("max_input_channels", 0) > 0:
+            return i
+    for i, d in enumerate(devs):
+        if d.get("max_input_channels", 0) > 0:
+            return i
+    raise RuntimeError("No input device with max_input_channels>0 found.")
+
+def rms_vad(frame: np.ndarray, rms_threshold: float = 0.01) -> bool:
+    if frame.size == 0:
+        return False
+    rms = float(np.sqrt(np.mean(np.square(frame, dtype=np.float32), dtype=np.float64)))
+    return rms >= rms_threshold
+
+
+
+# ---------- HTTP utils ----------
+
+def _httpx_limits() -> httpx.Limits:
+    return httpx.Limits(max_keepalive_connections=6, max_connections=12, keepalive_expiry=20.0)
+
+def _timeout_short_http() -> httpx.Timeout:
+    return httpx.Timeout(connect=2.5, read=4.0, write=3.0, pool=3.0)
+
+def _timeout_normal() -> httpx.Timeout:
+    t = min(max(5.0, OLLAMA_TIMEOUT_SEC), 120.0)
+    return httpx.Timeout(connect=5.0, read=t, write=5.0, pool=5.0)
+
+# ---------- Ollama helpers ----------
+
+def _ollama_url(path: str) -> str:
+    return f"http://{OLLAMA_HOST}:{OLLAMA_PORT}{path}"
+
+def _ollama_options_for_prompt() -> dict:
+    return {
+        "temperature": OLLAMA_TEMPERATURE,
+        "num_ctx": OLLAMA_NUM_CTX,
+        "num_predict": OLLAMA_NUM_PREDICT,
+        "top_k": OLLAMA_TOP_K,
+        "top_p": OLLAMA_TOP_P,
+        "repeat_penalty": OLLAMA_REPEAT_PENALTY,
+    }
+
+async def _post_with_retries(client: httpx.AsyncClient, url: str, body: dict, timeout: float) -> dict:
+    delay = float(_env_float("APP_OLLAMA_RETRY_BASE_DELAY", 0.8))
+    max_retries = int(_env_int("APP_OLLAMA_MAX_RETRIES", 4))
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = await client.post(url, json=body, timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
+            last_exc = e
+            status = getattr(e, "response", None).status_code if getattr(e, "response", None) else None
+            retryable = status in (429, 500, 502, 503) or isinstance(
+                e, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.ConnectError)
+            )
+            print(f"[OLLAMA] attempt {attempt} failed (status={status}): {e}")
+            if attempt >= max_retries or not retryable:
+                break
+            await asyncio.sleep(delay)
+            delay *= 2.0
+    raise RuntimeError(f"Ollama request failed after {max_retries} attempts: {last_exc}")
+
+async def _ollama_available() -> bool:
+    try:
+        async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short_http()) as c:
+            r = await c.get(_ollama_url("/api/tags"))
+            r.raise_for_status()
+            return True
+    except Exception:
+        return False
+
+async def ollama_generate_prompt(client: httpx.AsyncClient, user_text: str) -> str:
+    sys = OLLAMA_SYS_PROMPT
+    payload = {
+        "user_text": (user_text or "").strip(),
+        "constraints": {"no_meta": True, "max_sentences": 2, "avoid_sensitive": True},
+        "output_hint": "One compact image prompt, no explanations.",
+    }
+    prompt_text = f"<<SYS>>{sys}<</SYS>>\n\nINPUT_JSON:\n{json.dumps(payload, ensure_ascii=False)}\n\nOUTPUT:\n"
+    body = {"model": OLLAMA_MODEL, "prompt": prompt_text, "stream": False, "options": _ollama_options_for_prompt()}
+    data = await _post_with_retries(client, _ollama_url("/api/generate"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
+    return (data.get("response") or "").strip()
+
+# ---------- Global state ----------
+
+@dataclass
+class PipelineState:
+    running: bool = False
+    shutting_down: bool = False
+    task: Optional[asyncio.Task] = None
+    listeners: List[asyncio.Queue] = field(default_factory=list)
+    actual_sr: int = 16000
+    device_used_index: Optional[int] = None
+    device_used_name: Optional[str] = None
+    last_prompt: Optional[str] = None
+    last_llm_error: Optional[str] = None
+    last_llm_run_ts: float = 0.0
+    bg_tasks: Set[asyncio.Task] = field(default_factory=set)
+    ollama_ready_at: float = 0.0
+    last_pending_text: Optional[str] = None
+    start_ts: float = 0.0
+    image_backend_name: str = _env_str("IMAGE_BACKEND", "comfyui").lower()
+    allow_cloud: bool = _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0)
+    image_width: int = APP_IMAGE_WIDTH
+    image_height: int = APP_IMAGE_HEIGHT
+    negative_prompt: str = ""
+    active_workflow: Optional[str] = None
+    audio_stream: Any = None
+    audio_stopped_broadcasted: bool = False
+    style_positive: Optional[str] = None
+    reference_text: Optional[str] = None
+    # NEW: Direct-live toggle
+    direct_live: bool = DIRECT_LIVE_DEFAULT
+
+STATE = PipelineState()
+STOP_DEBOUNCE_SEC = float(os.getenv("APP_STOP_DEBOUNCE_SEC", "2.0") or "2.0")
+
+async def safe_stop_audio_stream() -> None:
+    if getattr(STATE, "audio_stream", None) is not None:
+        with contextlib.suppress(Exception):
+            STATE.audio_stream.stop()
+        with contextlib.suppress(Exception):
+            STATE.audio_stream.close()
+        STATE.audio_stream = None
+    if not STATE.audio_stopped_broadcasted:
+        await broadcast("status", "audio_stream_stopped")
+        STATE.audio_stopped_broadcasted = True
+
+BACKEND: Optional[ImageBackend] = None
+
+def sse_format(event: str, data: str) -> str:
+    return f"event: {event}\ndata: {data}\n\n"
+
+async def broadcast(event: str, data: str) -> None:
+    if STATE.shutting_down:
+        return
+    for q in list(STATE.listeners):
+        with contextlib.suppress(Exception):
+            await q.put(sse_format(event, data))
+
+_context_buffer: deque[str] = deque(maxlen=CONTEXT_MAX_SEGMENTS)
+
+# Lightweight dedupe and partial blacklist for realtime transcripts
+_last_partial_text: Optional[str] = None
+_last_partial_ts: float = 0.0
+# Lowercased phrases that often appear as hallucinations in partials
+_PARTIAL_BLACKLIST = {
+    "copyright wdr 2020",
+    "untertitelung im auftrag",
+    "im auftrag des wdr",
+}
+
+def _should_suppress_partial(txt: str) -> bool:
+    """
+    Returns True if this partial should be suppressed:
+    - Empty after strip
+    - Matches blacklist of frequent hallucination fillers (lowercased)
+    - Identical to last partial within 1.0s
+    - Very small 'wiggle' update within 1.0s (prefix + <=2 chars)
+    """
+    global _last_partial_text, _last_partial_ts
+    now = time.time()
+    t = (txt or "").strip()
+    if not t:
+        return True
+    tl = t.lower()
+
+    # Blacklist check for obvious filler/hallucination phrases in partials
+    if tl in _PARTIAL_BLACKLIST:
+        return True
+
+    # Dedupe: same as last partial very recently
+    if _last_partial_text and t == _last_partial_text and (now - _last_partial_ts) < 1.0:
+        return True
+
+    # Very small "wiggle": last is prefix and new adds <=2 chars quickly
+    if _last_partial_text and t.startswith(_last_partial_text) and len(t) - len(_last_partial_text) <= 2 and (now - _last_partial_ts) < 1.0:
+        return True
+
+    return False
+
+# Bridge realtime events to existing UI broadcast (with dedupe)
+def _on_realtime_event(evt: dict) -> None:
+    # Declare globals before any assignment in this function
+    global _last_partial_text, _last_partial_ts
+
+    et = evt.get("type")
+    txt = (evt.get("text") or "").strip()
+    if not txt:
+        return
+
+    if et == "partial":
+        if _should_suppress_partial(txt):
+            return
+        # Track last partial for dedupe timing window
+        _last_partial_text = txt
+        _last_partial_ts = time.time()
+        asyncio.create_task(broadcast("transcript_partial", txt))
+        asyncio.create_task(broadcast("transcript", txt))  # Keep UI compatibility
+
+    elif et == "final":
+        # Clear partial memory on finalization
+        _last_partial_text = None
+        _last_partial_ts = 0.0
+        asyncio.create_task(broadcast("transcript_final", txt))
+        asyncio.create_task(broadcast("transcript", txt))  # Keep UI compatibility
+
+
+
+
+
+
+async def _close_sse_listeners(timeout: float = 0.25) -> None:
+    listeners = getattr(STATE, "listeners", None)
+    if not listeners:
+        return
+    queues: List[asyncio.Queue] = list(listeners)
+
+    async def _signal(q: asyncio.Queue) -> None:
+        try:
+            q.put_nowait("")
+        except Exception:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(q.put(""), timeout=timeout)
+
+    tasks = [asyncio.create_task(_signal(q)) for q in queues]
+    with contextlib.suppress(Exception):
+        await asyncio.wait(tasks, timeout=timeout + 0.25)
+    try:
+        listeners.clear()
+    except Exception:
+        setattr(STATE, "listeners", [])
+
+def update_context_buffer(text: str) -> str:
+    _context_buffer.append(text)
+    ctx = " ".join(_context_buffer)
+    if len(ctx) > CONTEXT_MAX_CHARS:
+        ctx = ctx[-CONTEXT_MAX_CHARS:]
+    return ctx
+
+def _log_effective_config() -> None:
+    # NEW: also print Docker/native and tier info (non-fatal)
+    tier_state = _gather_config_tier_state()
+    print(
+        "[CONFIG]",
+        f"env_file= {ENV_PATH or '(none)'}",
+        "| audio:",
+        f"sr={SAMPLE_RATE} frame_ms={FRAME_MS} stream_lat={APP_STREAM_LATENCY_SEC}",
+        "| vad:",
+        f"disable={DISABLE_VAD} rms_th={RMS_VAD_THRESHOLD}",
+        "| snap:",
+        f"snapshot_sec={SNAPSHOT_SEC} min_buf_sec={MIN_BUF_SEC} max_sil_ms={MAX_SILENCE_MS} max_seg={MAX_SEGMENT_SEC}",
+        "| transcription:",
+        f"requested_backend={WHISPER_BACKEND_REQUESTED} "
+        f"lang={WHISPER_LANGUAGE} "
+        f"min_sec={WHISPER_MIN_SEC} "
+        f"min_peak={WHISPER_MIN_PEAK} "
+        f"faster_model={FASTER_WHISPER_MODEL} "
+        f"faster_device={FASTER_WHISPER_DEVICE} "
+        f"faster_compute={FASTER_WHISPER_COMPUTE_TYPE}",
+        "| text:",
+        f"min_chars={TEXT_MIN_CHARS} min_words={TEXT_MIN_WORDS} force_meaningful={FORCE_MEANINGFUL_CHECK}",
+        "| llm:",
+        f"interval={LLM_INTERVAL_SEC}s model={OLLAMA_MODEL}",
+        "| image:",
+        f"backend={STATE.image_backend_name} allow_cloud={STATE.allow_cloud} out={OUTPUT_DIR} default={APP_IMAGE_WIDTH}x{APP_IMAGE_HEIGHT}",
+        "| sse:",
+        f"tick={APP_SSE_TICK_SEC}s",
+        "| vision:",
+        f"enabled={VISION.enabled} mode={VISION.mode} local={VISION.local_url} remote={VISION.remote_url} cloud={VISION.cloud_url}",
+        "| direct_live:",
+        f"enabled={STATE.direct_live}",
+        "| env:",
+        f"docker={tier_state['assert_local']['docker']} config_path={tier_state['config_path']} tier={tier_state['tier']}({tier_state['tier_source']})",
+    )
+
+# ---------- Runtime-aware backend wrapper ----------
+
+def build_image_backend_rt(backend_name: Optional[str] = None, allow_cloud: Optional[bool] = None) -> ImageBackend:
+    wanted_backend = (backend_name or STATE.image_backend_name or _env_str("IMAGE_BACKEND", "comfyui")).lower()
+    allowed = (STATE.allow_cloud if allow_cloud is None else bool(allow_cloud))
+    old_backend = os.environ.get("IMAGE_BACKEND")
+    old_allow = os.environ.get("ALLOW_CLOUD_IMAGE_BACKEND")
+    try:
+        os.environ["IMAGE_BACKEND"] = wanted_backend
+        os.environ["ALLOW_CLOUD_IMAGE_BACKEND"] = "1" if allowed else "0"
+        be = build_image_backend()
+        return be
+    finally:
+        if old_backend is None:
+            with contextlib.suppress(Exception):
+                del os.environ["IMAGE_BACKEND"]
+        else:
+            os.environ["IMAGE_BACKEND"] = old_backend
+        if old_allow is None:
+            with contextlib.suppress(Exception):
+                del os.environ["ALLOW_CLOUD_IMAGE_BACKEND"]
+        else:
+            os.environ["ALLOW_CLOUD_IMAGE_BACKEND"] = old_allow
+
+def rel_for_ui_path(p: Path) -> str:
+    return Path(p).name
+
+# ---------- Workflow helpers ----------
+
+def _list_workflow_files() -> List[WorkflowItem]:
+    items: List[WorkflowItem] = []
+    if not WORKFLOWS_DIR.exists():
+        return items
+    for p in WORKFLOWS_DIR.iterdir():
+        if p.is_file() and p.suffix.lower() == ".json":
+            items.append(WorkflowItem(name=p.stem, filename=p.name))
+    items.sort(key=lambda it: it.name.lower())
+    return items
+
+def _ensure_workflow_exists(filename: str) -> Path:
+    candidate = (WORKFLOWS_DIR / filename).resolve()
+    if WORKFLOWS_DIR not in candidate.parents and candidate != WORKFLOWS_DIR:
+        raise FileNotFoundError("Invalid workflow path")
+    if not candidate.exists() or not candidate.is_file():
+        raise FileNotFoundError("Workflow not found")
+    return candidate
+
+def _apply_active_workflow_if_local() -> None:
+    if LocalComfyBackend is None or BACKEND is None:
+        return
+    if not isinstance(BACKEND, LocalComfyBackend):
+        return
+    fname = getattr(STATE, "active_workflow", None)
+    if not fname:
+        return
+    wf_path = (WORKFLOWS_DIR / fname).resolve()
+    if not wf_path.exists() or not wf_path.is_file():
+        print(f"[WF] active_workflow missing on disk: {wf_path}")
+        return
+    try:
+        if WORKFLOWS_DIR not in wf_path.parents and wf_path != WORKFLOWS_DIR:
+            print(f"[WF] invalid workflow path escape blocked: {wf_path}")
+            return
+        BACKEND.cfg.workflow_path = wf_path  # type: ignore[attr-defined]
+        print(f"[WF] applied workflow to LocalComfyBackend: {wf_path.name}")
+    except Exception as e:
+        print(f"[WF] failed to apply active workflow: {e}")
+
+# --- Meaningful text guard for transcripts (robust minimal impl) ---
+import re
+
+# Treat strings that are only whitespace/punctuation as noise
+_ONLY_PUNCT_OR_SPACE = re.compile(r"^[\s\W_]+$", re.IGNORECASE)
+
+# Common filler words/interjections to ignore when very short/single-token
+_FILLERS = {
+    "äh", "ähm", "hm", "hmm", "hmmm", "öhm", "öh", "umm", "um", "uh", "er", "eh",
+    "ah", "oh", "ok", "okay", "yo", "yo.", "yo!", "yo?", "äh.", "äh?", "äh!",
+    "jo", "ne", "nee", "yoa", "oha"
+}
+
+def is_meaningful_text(text: str, min_chars: int = 0, min_words: int = 0) -> bool:
+    """
+    Returns True if 'text' looks meaningful enough to forward into the pipeline.
+    - Strips and lowercases.
+    - Rejects empty or punctuation-only strings.
+    - Applies minimal length/word-count thresholds if provided.
+    - Filters typical short fillers when they appear isolated.
+    """
+    if not text:
+        return False
+
+    t = text.strip()
+    if not t:
+        return False
+
+    # Reject if it's only spaces/punct
+    if _ONLY_PUNCT_OR_SPACE.match(t):
+        return False
+
+    # Minimal character threshold (after stripping)
+    if isinstance(min_chars, int) and min_chars > 0 and len(t) < min_chars:
+        # If it's very short, still accept if it's clearly a real word with letters and not a filler
+        letters = re.findall(r"[A-Za-zÄÖÜäöüßÀ-ÿ]", t)
+        if len(letters) < max(2, min_chars // 2):
+            # If it's a single short token and matches a known filler, drop it
+            if " " not in t and t.lower() in _FILLERS:
+                return False
+
+    # Minimal word threshold
+    if isinstance(min_words, int) and min_words > 0:
+        # Count tokens that have at least a letter or number
+        tokens = [w for w in re.split(r"\s+", t) if re.search(r"[A-Za-z0-9ÄÖÜäöüßÀ-ÿ]", w)]
+        if len(tokens) < min_words:
+            # If tokens < threshold and looks like a filler, reject
+            if len(tokens) == 1 and tokens[0].lower() in _FILLERS:
+                return False
+            # If it's just 1 tiny token of punct or digits, reject
+            if len(tokens) == 0:
+                return False
+
+    # Additional guard: must contain at least 2 letters overall OR at least one word-like token
+    if not re.search(r"[A-Za-zÄÖÜäöüßÀ-ÿ].*[A-Za-zÄÖÜäöüßÀ-ÿ]", t) and not re.search(r"\b\w+\b", t):
+        return False
+
+    return True
+
+# ---------- Audio transcription loop ----------
+
+async def audio_transcription_loop() -> None:
+    global _last_partial_text, _last_partial_ts
+    sr = int(SAMPLE_RATE)
+    frame_len = max(1, int(sr * (FRAME_MS / 1000.0)))
+    STATE.audio_stopped_broadcasted = False
+
+    try:
+        device_index = pick_input_device(AUDIO_DEVICE_PREF)
+        sd.default.device = (device_index, None)
+        device_name = sd.query_devices(device_index).get("name", f"dev{device_index}")
+        sd.default.samplerate = sr
+        sd.default.channels = 1
+    except Exception as e:
+        print(f"[AUDIO] device setup failed: {e}")
+        await broadcast("status", f"audio_error:{e}")
+        STATE.running = False
+        return
+
+    STATE.device_used_index = device_index
+    STATE.device_used_name = device_name
+    STATE.actual_sr = sr
+    await broadcast("status", f"audio_device:{device_name or device_index}")
+
+    buf = np.zeros(0, dtype=np.float32)
+    speaking = False
+    last_voice_ts = 0.0
+    first_snapshot_deadline = time.time() + float(FIRST_SNAPSHOT_DEADLINE_SEC)
+
+    q: asyncio.Queue[np.ndarray] = asyncio.Queue(maxsize=100)
+
+    def callback(indata, frames, time_info, status):
+        if not STATE.running:
+            return
+        mono = np.asarray(indata[:, 0], dtype=np.float32)
+        try:
+            q.put_nowait(mono.copy())
+        except asyncio.QueueFull:
+            with contextlib.suppress(Exception):
+                _ = q.get_nowait()
+            with contextlib.suppress(Exception):
+                q.put_nowait(mono.copy())
+
+    stream = sd.InputStream(
+        samplerate=sr,
+        channels=1,
+        dtype="float32",
+        blocksize=frame_len,
+        callback=callback,
+        latency=APP_STREAM_LATENCY_SEC,
+    )
+    STATE.audio_stream = stream
+
+    try:
+        stream.start()
+        print("[AUDIO] stream started")
+        await broadcast("status", "audio_stream_started")
+
+        while STATE.running and not STATE.shutting_down:
+            try:
+                frame = await asyncio.wait_for(q.get(), timeout=0.25)
+            except asyncio.TimeoutError:
+                continue
+
+            if not STATE.running:
+                break
+
+            RECORDING.append_safe(frame)
+    # Feed realtime transcriber with the current frame (non-blocking safety)
+            if RT.transcriber is not None:
+                try:
+                    await RT.transcriber.feed(frame)
+                except Exception as e:
+                    print(f"[RT] feed error: {e}")
+
+
+            buf = np.concatenate([buf, frame], axis=0)
+            now = time.time()
+
+
+            vad_ok = True
+            if not DISABLE_VAD:
+                vad_ok = rms_vad(frame, rms_threshold=RMS_VAD_THRESHOLD)
+
+            if vad_ok:
+                last_voice_ts = now
+                if not speaking:
+                    speaking = True
+
+            have_min_buf = buf.size >= int(SAMPLE_RATE * MIN_BUF_SEC)
+            silence_exceeded = (now - last_voice_ts) * 1000.0 >= MAX_SILENCE_MS
+            segment_too_long = buf.size >= int(SAMPLE_RATE * MAX_SEGMENT_SEC)
+            first_deadline_hit = now >= first_snapshot_deadline and have_min_buf
+            should_snapshot = have_min_buf and (silence_exceeded or segment_too_long or first_deadline_hit)
+
+            if should_snapshot:
+                snap = buf.copy()
+                buf = np.zeros(0, dtype=np.float32)
+                speaking = False
+                first_snapshot_deadline = now + float(SNAPSHOT_SEC)
+
+                if not STATE.running:
+                    break
+
+                def _do_transcribe(arr: np.ndarray, sample_rate: int) -> str:
+                    return transcribe_chunk(arr, sample_rate)
+
+                try:
+                    text = await asyncio.to_thread(_do_transcribe, snap, sr)
+                except Exception as e:
+                    print(f"[AUDIO] transcription exception: {e}")
+                    text = ""
+
+                text = (text or "").strip()
+                if text and STATE.running:
+                    # Apply meaningful-text guard before broadcasting finals
+                    if FORCE_MEANINGFUL_CHECK and not is_meaningful_text(text, TEXT_MIN_CHARS, TEXT_MIN_WORDS):
+                        # Ignore meaningless finals (e.g., tiny fillers/punct)
+                        pass
+                    else:
+                        # Only broadcast snapshot transcripts if direct-live is off
+                        direct_live = bool(int(os.getenv("APP_DIRECT_LIVE_ONLY", "0")))
+                        if not direct_live:
+                            await broadcast("transcript_final", text)
+                            await broadcast("transcript", text)
+
+                        # Reset partial memory upon finalization (stabilizes next partials)
+                        try:
+                            _last_partial_text = None
+                            _last_partial_ts = 0.0
+                        except Exception:
+                            pass
+
+                        ctx = update_context_buffer(text)
+                        # NEW: Direct-live path or existing Ollama path, respecting interval
+                        if (time.time() - STATE.last_llm_run_ts) >= float(LLM_INTERVAL_SEC):
+
+                            if not STATE.running:
+                                break
+                            STATE.last_llm_run_ts = time.time()
+                            if STATE.direct_live:
+                                # Direct-live: bypass Ollama. Use Whisper context directly as prompt.
+                                async def _direct_task(prompt_text: str):
+                                    try:
+                                        await broadcast("status", "direct_live:on")
+                                        used = prompt_text.strip()
+                                        if not used:
+                                            return
+                                        # Merge style + reference as in other code paths
+                                        eff_prompt = merge_style_prompt(used, getattr(STATE, "style_positive", None))
+                                        eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
+                                        STATE.last_prompt = eff_prompt
+                                        await broadcast("llm_prompt", eff_prompt)  # reuse event name for UI
+                                        # Generate image with negative/size handling
+                                        try:
+                                            if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
+                                                if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
+                                                    setattr(BACKEND.cfg, "negative", STATE.negative_prompt or "")
+                                            path = await _generate_with_negative_support(
+                                                prompt=eff_prompt,
+                                                width=STATE.image_width,
+                                                height=STATE.image_height,
+                                                negative=STATE.negative_prompt,
+                                            )
+                                            path = ensure_in_output_dir(path)
+                                            rel = rel_for_ui_path(path)
+                                            await broadcast("image", rel)
+                                            await broadcast("status", "direct_generate_ok")
+                                        except Exception as ge:
+                                            tb = traceback.format_exc()
+                                            print(f"[DIRECT] image generation error: {ge}\n{tb}")
+                                            await broadcast("status", f"direct_generate_error:{ge}")
+                                    except Exception as e:
+                                        tb = traceback.format_exc()
+                                        print(f"[DIRECT] pipeline error: {e}\n{tb}")
+                                        await broadcast("status", f"direct_pipeline_error:{e}")
+
+                                task = asyncio.create_task(_direct_task(ctx))
+                                STATE.bg_tasks.add(task)
+                                def _done_cb(t: asyncio.Task):
+                                    with contextlib.suppress(Exception):
+                                        STATE.bg_tasks.discard(t)
+                                task.add_done_callback(_done_cb)
+                            else:
+                                # Existing path: use Ollama optimization + image generation
+                                task = asyncio.create_task(run_llm_and_image(ctx))
+                                STATE.bg_tasks.add(task)
+                                def _done_cb2(t: asyncio.Task):
+                                    with contextlib.suppress(Exception):
+                                        STATE.bg_tasks.discard(t)
+                                task.add_done_callback(_done_cb2)
+
+            max_keep = int(SAMPLE_RATE * MAX_SEGMENT_SEC)
+            if buf.size > (max_keep * 2):
+                buf = buf[-max_keep:]
+
+        print("[AUDIO] loop exiting")
+    except asyncio.CancelledError:
+        print("[AUDIO] loop cancelled")
+    except Exception as e:
+        print(f"[AUDIO] loop crashed: {e}")
+        await broadcast("status", f"audio_loop_error:{e}")
+    finally:
+        await safe_stop_audio_stream()
+
+# ---------- Prompt post-processing helpers ----------
+
+def _append_reference_block(prompt: str, reference_text: Optional[str] = None) -> str:
+    p = (prompt or "").strip()
+    r = (reference_text or "").strip()
+    if not r:
+        return p
+    if " Ref:" in p or p.endswith("Ref:"):
+        return p
+    return f"{p} Ref: {r}"
+
+# ---------- LLM + Image ----------
+
+async def run_llm_and_image(text: str) -> None:
+    if await _ollama_available() is False:
+        await broadcast("status", "ollama_unavailable")
+        STATE.last_llm_error = "ollama_unavailable"
+        return
+    if BACKEND is None:
+        await broadcast("status", "image_backend_not_initialized")
+        STATE.last_llm_error = "image_backend_not_initialized"
+        return
+    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_normal()) as client:
+        try:
+            img_prompt = await ollama_generate_prompt(client, text)
+            if not img_prompt:
+                STATE.last_llm_error = "llm_empty_response"
+                await broadcast("status", "llm_empty_response")
+                return
+
+            eff_prompt = merge_style_prompt(img_prompt, getattr(STATE, "style_positive", None))
+            eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
+            print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
+
+            STATE.last_prompt = eff_prompt
+            await broadcast("llm_prompt", eff_prompt)
+            await broadcast("status", "llm_ok")
+            try:
+                if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
+                    if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
+                        setattr(BACKEND.cfg, "negative", STATE.negative_prompt or "")
+                path = await _generate_with_negative_support(
+                    prompt=eff_prompt,
+                    width=STATE.image_width,
+                    height=STATE.image_height,
+                    negative=STATE.negative_prompt,
+                )
+                path = ensure_in_output_dir(path)
+                rel = rel_for_ui_path(path)
+                await broadcast("image", rel)
+            except Exception as e:
+                tb = traceback.format_exc()
+                print(f"[IMAGE] generation error: {e}\n{tb}")
+                await broadcast("status", f"image_error:{e}")
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[PIPELINE] llm/image pipeline error: {e}\n{tb}")
+            STATE.last_llm_error = f"pipeline_error:{e}"
+            await broadcast("status", f"pipeline_error:{e}")
+
+# ---------- Helpers: negative prompt passing ----------
+
+def _merge_negative_into_prompt(prompt: str, negative: str) -> str:
+    p = (prompt or "").strip()
+    n = (negative or "").strip()
+    if not n:
+        return p
+    return f"{p}\n-- negative: {n}"
+
+def _inline_negative_phrases(positive: str, negative: str) -> str:
+    base = (positive or "").strip()
+    neg = (negative or "").strip()
+    if not base or not neg:
+        return base
+    parts_raw = re.split(r"[,\n;]+", neg)
+    items = []
+    for it in parts_raw:
+        t = it.strip()
+        if not t:
+            continue
+        t = re.sub(r"^(no|kein(?:e|en|er)?|keine|without|exclude|vermeide|ohne)\s+", "", t, flags=re.I).strip()
+        if t:
+            items.append(t)
+    seen: Set[str] = set()
+    uniq: List[str] = []
+    for it in items:
+        key = it.lower()
+        if key not in seen:
+            seen.add(key)
+            uniq.append(it)
+    if not uniq:
+        return base
+    en_parts = [f"without {it}" for it in uniq]
+    en_parts += [f"avoid {it}" for it in uniq[:2]]
+    en_parts += [f"no {it}" for it in uniq[:2]]
+    de_parts = [f"ohne {it}" for it in uniq[:2]]
+    inline_clause = "; ".join(en_parts + de_parts)
+    merged = f"{base}\nConstraints: {inline_clause}."
+    return merged
+
+POLLINATIONS_INLINE_NEG = _env_bool01("POLLINATIONS_INLINE_NEG", 1)
+
+async def _generate_with_negative_support(prompt: str, width: int, height: int, negative: str) -> Path:
+    if BACKEND is None:
+        raise RuntimeError("image_backend_not_initialized")
+    try:
+        _apply_active_workflow_if_local()
+    except Exception as e:
+        print(f"[WF] apply before generate failed: {e}")
+    kwargs: Dict[str, Any] = {"width": width, "height": height}
+    backend_cls = type(BACKEND).__name__
+    neg_txt = (negative or "").strip()
+    use_inline_for_poll = bool(POLLINATIONS_INLINE_NEG and neg_txt and ("pollinations" in backend_cls.lower()))
+    eff_prompt = prompt
+    if use_inline_for_poll:
+        eff_prompt = _inline_negative_phrases(prompt, neg_txt)
+    print(
+        f"[IMAGE REQ] backend={backend_cls} size={width}x{height} "
+        f"has_negative={(neg_txt != '')} inline_for_poll={use_inline_for_poll} "
+        f"neg_sample='{neg_txt[:64]}'"
+    )
+    try:
+        return await BACKEND.generate(eff_prompt, negative=(neg_txt or ""), **kwargs)  # type: ignore[arg-type]
+    except TypeError:
+        merged = _merge_negative_into_prompt(eff_prompt, neg_txt)
+        return await BACKEND.generate(merged, **kwargs)
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[IMAGE] backend.generate failed: {e}\n{tb}")
+        raise
+
+# ---------- FastAPI app & lifespan ----------
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print(f"[ENV] loaded from: {ENV_PATH or '(env vars only)'}")
+    _log_effective_config()
+    transcription_manager = init_transcription_backend()
+    print(
+        "[TRANSCRIBE] startup_status="
+        f"{json.dumps(transcription_manager.get_status(), ensure_ascii=False)}"
+    )
+
+    # Extra diagnostics for live stability
+    try:
+        st = transcription_manager.get_status()
+        print(
+            f"[TRANSCRIBE] Ready: backend={st.get('selected_backend')} "
+            f"device={st.get('selected_device')} compute_type={st.get('selected_compute_type')} "
+            f"model={st.get('model')} language={st.get('language')}"
+        )
+        # If your backend exposes these flags, this verifies .env took effect
+        print(
+            "[TRANSCRIBE]",
+            f"cond_prev={1 if os.getenv('APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT','0').strip().lower() in {'1','true','yes','on'} else 0} "
+            f"vad_filter={1 if os.getenv('APP_FASTER_WHISPER_VAD_FILTER','1').strip().lower() in {'1','true','yes','on'} else 0} "
+            f"beam_size={os.getenv('APP_FASTER_WHISPER_BEAM_SIZE','1')} "
+            f"no_speech_thr={os.getenv('APP_WHISPER_NO_SPEECH_THRESHOLD','')} "
+            f"logprob_thr={os.getenv('APP_WHISPER_LOGPROB_THRESHOLD','')}"
+        )
+    except Exception as e:
+        print(f"[TRANSCRIBE] diag-print failed: {e}")
+
+
+
+    # Verify REFS_DIR early
+    try:
+        REFS_DIR.mkdir(parents=True, exist_ok=True)
+        tfile = REFS_DIR / ".__writetest.tmp"
+        tfile.write_text("ok", encoding="utf-8")
+        tfile.unlink(missing_ok=True)
+        print(f"[STYLE] refs_dir ready: {REFS_DIR}")
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[STYLE] refs_dir not writable: {REFS_DIR}, err={e}\n{tb}")
+
+    global BACKEND
+    try:
+        _assert_image_backend_host()
+        BACKEND = build_image_backend_rt()
+        print(f"[BACKEND] initialized: {type(BACKEND).__name__}")
+    except Exception as e:
+        BACKEND = None
+        tb = traceback.format_exc()
+        print(f"[BACKEND] initialization failed: {e}\n{tb}")
+
+    try:
+        dw, dh = _backend_default_size(STATE.image_backend_name)
+        STATE.image_width = STATE.image_width or dw
+        STATE.image_height = STATE.image_height or dh
+    except Exception:
+        STATE.image_width = APP_IMAGE_WIDTH
+        STATE.image_height = APP_IMAGE_HEIGHT
+
+    STATE.ollama_ready_at = time.time() + (WARMUP_GRACE_SEC if WARMUP_ENABLE else 0.0)
+
+    if style_engine is not None:
+        try:
+            if hasattr(style_engine, "ensure_dirs"):
+                style_engine.ensure_dirs()
+                print("[STYLE] style_engine.ensure_dirs() ok")
+            else:
+                print("[STYLE] style_engine.ensure_dirs() not present; skipping")
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[STYLE] ensure_dirs failed: {e}\n{tb}")
+
+    warmup_task: Optional[asyncio.Task] = None
+    if WARMUP_ENABLE:
+        async def _silent_ollama_warmup():
+            try:
+                payload = {"model": OLLAMA_MODEL, "prompt": WARMUP_PROMPT, "stream": False, "options": {"temperature": 0.1, "num_predict": 32}}
+                async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short_http()) as c:
+                    with contextlib.suppress(Exception):
+                        await c.get(_ollama_url("/api/tags"))
+                async with httpx.AsyncClient(limits=_httpx_limits(), timeout=httpx.Timeout(WARMUP_TIMEOUT_SEC)) as client:
+                    await client.post(_ollama_url("/api/generate"), json=payload)
+                print("[WARMUP] Ollama warmup ok.")
+            except Exception as e:
+                print(f"[WARMUP] failed: {e}")
+        warmup_task = asyncio.create_task(_silent_ollama_warmup())
+    try:
+        yield
+    finally:
+        STATE.shutting_down = True
+        STATE.running = False
+        if STATE.task:
+            STATE.task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await STATE.task
+            STATE.task = None
+        for t in list(STATE.bg_tasks):
+            t.cancel()
+        with contextlib.suppress(Exception):
+            await asyncio.gather(*list(STATE.bg_tasks), return_exceptions=True)
+        STATE.bg_tasks.clear()
+        await _close_sse_listeners()
+        if warmup_task:
+            warmup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await warmup_task
+        print("[LIFESPAN] cleanup done")
+
+app = FastAPI(lifespan=lifespan)
+
+# Register comfyui_bridge router under /api if available
+if bridge_router is not None:
+    try:
+        app.include_router(bridge_router, prefix="/api")
+        print("[BRIDGE] comfyui_bridge router mounted at /api")
+    except Exception as e:
+        print(f"[BRIDGE] include_router failed: {e}")
+
+# Static mounts
+app.mount("/static", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="static")
+if not any(route for route in app.router.routes if getattr(route, "path", "") == "/workflows"):
+    app.mount("/workflows", StaticFiles(directory=str(WORKFLOWS_DIR), html=False), name="workflows")
+
+web_dir = Path("web").resolve()
+if web_dir.exists():
+    app.mount("/web", StaticFiles(directory=str(web_dir), html=True), name="web")
+
+# Bridge: route image_backend events into our SSE broadcaster
+async def sse_broadcast(event_name: str, payload: dict) -> None:
+    """
+    Accepts events from image_backend (e.g., 'gallery:updated') and forwards them
+    to existing SSE clients using the local 'broadcast' helper.
+    """
+    try:
+        data = payload if isinstance(payload, (str, bytes)) else json.dumps(payload, ensure_ascii=False)
+        await broadcast(event_name, data)
+    except Exception as e:
+        print(f"[SSE-BRIDGE] failed to forward event {event_name}: {e}")
+
+# Register once at server startup time
+register_event_listener(sse_broadcast)
+
+
+@app.get("/", include_in_schema=False)
+async def root_redirect():
+    if web_dir.exists():
+        return RedirectResponse(url="/web/index.html", status_code=307)
+    return JSONResponse({"ok": True, "msg": "Web UI not found, use /static for images or API endpoints."})
+
+# ---------- Status/Health ----------
+
+@app.get("/ping")
+async def ping():
+    return {"ok": True}
+
+@app.get("/status")
+async def status():
+    return {"ok": True, "running": STATE.running, "shutting_down": STATE.shutting_down}
+
+@app.get("/api/images", response_model=GalleryImageList)
+async def api_list_images(
+    limit: int = Query(
+        default=GALLERY_IMAGE_LIMIT,
+        ge=1,
+        le=100,
+        description="Maximum number of recent generated images to return.",
+    ),
+) -> GalleryImageList:
+    """
+    Return recent generated images for the browser thumbnail gallery.
+
+    The directory scan runs in a worker thread so the event loop remains
+    responsive while image generation, SSE, and audio transcription are active.
+    """
+    items = await asyncio.to_thread(_list_gallery_images, limit)
+    return GalleryImageList(items=items)
+
+@app.get("/transcription/status")
+async def transcription_status():
+    """
+    Return the selected transcription backend and device readiness details.
+    """
+    return get_transcription_status()
+
+
+@app.get("/health", response_model=HealthReport)
+async def health() -> HealthReport:
+    ollama_ok = await _ollama_available()
+    cfg = _gather_config_tier_state()
+    return HealthReport(
+        ollama_ok=ollama_ok,
+        image_backend=STATE.image_backend_name,
+        allow_cloud=STATE.allow_cloud,
+        output_dir=str(OUTPUT_DIR),
+        output_dir_exists=OUTPUT_DIR.exists(),
+        last_prompt=STATE.last_prompt,
+        last_llm_error=STATE.last_llm_error,
+        pollinations_key_present=bool(_env_str("POLLINATIONS_SECRET", "")),
+        docker=bool(cfg["assert_local"]["docker"]),
+        config_path=str(cfg["config_path"]),
+        tier=str(cfg["tier"]),
+        tier_source=str(cfg["tier_source"]),
+    )
+
+@app.get("/config")
+async def get_config():
+    wpath = WHISPER_MODEL_PATH
+    masked = (wpath[:3] + "..." + wpath[-10:]) if wpath and len(wpath) > 16 else wpath
+    try:
+        def_w, def_h = _backend_default_size(STATE.image_backend_name)
+    except Exception:
+        def_w, def_h = APP_IMAGE_WIDTH, APP_IMAGE_HEIGHT
+    backend_lower = (STATE.image_backend_name or "").strip().lower()
+    is_comfy = backend_lower == "comfyui"
+    app_disable_comfy_env = os.getenv("APP_DISABLE_COMFYUI", "1").strip().lower()
+    comfy_disabled = app_disable_comfy_env in {"1", "true", "yes", "on"}
+    show_workflow_selector = bool(is_comfy and not comfy_disabled)
+    comfy_mode = os.getenv("APP_COMFY_MODE", "auto")
+
+    # NEW: gather tier/config
+    cfg = _gather_config_tier_state()
+    gen_excerpt = _summarize_generated(cfg.get("generated"))
+
+    return {
+        "env_file": ENV_PATH or "(env vars only)",
+        "env": {  # NEW: compact env/state exposure
+            "docker": bool(cfg["assert_local"]["docker"]),
+            "config_path": str(cfg["config_path"]),
+            "tier": str(cfg["tier"]),
+            "tier_source": str(cfg["tier_source"]),
+        },
+        "audio": {"device_pref": AUDIO_DEVICE_PREF, "sample_rate": SAMPLE_RATE, "frame_ms": FRAME_MS, "stream_latency_sec": APP_STREAM_LATENCY_SEC},
+        "vad": {"disable_vad": DISABLE_VAD, "rms_threshold": RMS_VAD_THRESHOLD},
+        "snapshot": {"snapshot_sec": SNAPSHOT_SEC, "min_buf_sec": MIN_BUF_SEC, "max_silence_ms": MAX_SILENCE_MS, "max_segment_sec": MAX_SEGMENT_SEC, "first_snapshot_deadline_sec": FIRST_SNAPSHOT_DEADLINE_SEC},
+
+        "transcription": {
+            "requested_backend": WHISPER_BACKEND_REQUESTED,
+            "language": WHISPER_LANGUAGE,
+            "input_locale_hint": INPUT_LOCALE_HINT,
+            "threads": WHISPER_THREADS,
+            "temperature": WHISPER_TEMPERATURE,
+            "min_sec": WHISPER_MIN_SEC,
+            "min_peak": WHISPER_MIN_PEAK,
+            "lowend_mode": (os.getenv("APP_LOWEND_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}),
+            "pywhispercpp": {
+                "model_path": masked,
+            },
+            "faster_whisper": {
+                "model": FASTER_WHISPER_MODEL,
+                "device_requested": FASTER_WHISPER_DEVICE,
+                "compute_type_requested": FASTER_WHISPER_COMPUTE_TYPE,
+                "cpu_threads": FASTER_WHISPER_CPU_THREADS,
+                "num_workers": FASTER_WHISPER_NUM_WORKERS,
+                "beam_size": FASTER_WHISPER_BEAM_SIZE,
+                "vad_filter": FASTER_WHISPER_VAD_FILTER,
+                "download_root": FASTER_WHISPER_DOWNLOAD_ROOT or None,
+            },
+            "runtime": get_transcription_status(),
+        },
+
+        "text": {"min_chars": TEXT_MIN_CHARS, "min_words": TEXT_MIN_WORDS, "force_meaningful": FORCE_MEANINGFUL_CHECK},
+        "context": {"max_segments": CONTEXT_MAX_SEGMENTS, "max_chars": CONTEXT_MAX_CHARS},
+        "ollama": {"host": OLLAMA_HOST, "port": OLLAMA_PORT, "model": OLLAMA_MODEL, "temperature": OLLAMA_TEMPERATURE, "timeout_sec": OLLAMA_TIMEOUT_SEC, "interval_sec": LLM_INTERVAL_SEC, "disabled": OLLAMA_DISABLED},
+        "image": {
+            "backend": STATE.image_backend_name,
+            "allow_cloud": STATE.allow_cloud,
+            "output_dir": str(OUTPUT_DIR),
+            "width_default": def_w,
+            "height_default": def_h,
+            "current_width": STATE.image_width,
+            "current_height": STATE.image_height,
+            "negative_prompt": STATE.negative_prompt,
+            "style_positive": STATE.style_positive,
+            "active_workflow": STATE.active_workflow,
+            "show_workflow_selector": show_workflow_selector,
+            "comfy": {
+                "enabled": bool(is_comfy and not comfy_disabled),
+                "disabled_via_env": comfy_disabled,
+                "mode": comfy_mode,
+                "remote": {
+                    "scheme": os.getenv("APP_COMFY_REMOTE_SCHEME", "http"),
+                    "host": os.getenv("APP_COMFY_REMOTE_HOST", ""),
+                    "port": int(os.getenv("APP_COMFY_REMOTE_PORT", "8188") or "8188"),
+                }
+            }
+        },
+        "sse": {"tick_sec": APP_SSE_TICK_SEC},
+        "vision": {
+            "enabled": VISION.enabled,
+            "mode": VISION.mode,
+            "local_url": VISION.local_url,
+            "remote_url": VISION.remote_url,
+            "cloud_url": VISION.cloud_url,
+        },
+        "direct_live": {"enabled": STATE.direct_live},  # NEW: expose direct-live flag
+        # NEW: safe excerpt of generated.yaml (if any)
+        "generated_yaml_excerpt": gen_excerpt,
+        "hardware_present": bool(cfg.get("hardware") is not None),
+        "generated_present": bool(cfg.get("generated") is not None),
+        "assert_local": cfg.get("assert_local"),
+    }
+
+
+# ---------- Low-end mode settings endpoints ----------
+
+def _env_lowend_requested() -> bool:
+    return (os.getenv("APP_LOWEND_MODE", "0").strip().lower() in {"1", "true", "yes", "on"})
+
+@app.get("/api/settings/lowend_mode", response_model=LowEndSettings)
+async def get_lowend_mode():
+    """
+    Return the requested low-end flag (legacy shape). For full diagnostics use /config which
+    also includes runtime.get_transcription_status() under 'transcription.runtime'.
+    """
+    enabled = _env_lowend_requested()
+    return LowEndSettings(enabled=enabled)
+
+
+@app.post("/api/settings/lowend_mode", response_model=LowEndSettings)
+async def set_lowend_mode(cfg: LowEndSettings):
+    """
+    Toggle low-end mode. This function:
+      - Stops realtime transcriber (if running)
+      - Requests the transcription manager to atomically set/unset APP_LOWEND_MODE and reinitialize
+      - Restarts realtime transcriber if pipeline is running
+      - Broadcasts and returns the requested enabled flag (legacy response)
+    """
+    # Current state
+    cur_enabled = _env_lowend_requested()
+    new_enabled = bool(cfg.enabled)
+
+    if new_enabled == cur_enabled:
+        # No change, but still broadcast so UI syncs if needed
+        await broadcast("status", f"lowend_mode:{'on' if new_enabled else 'off'}")
+        return LowEndSettings(enabled=new_enabled)
+
+    # If recording is running, stop realtime transcriber gracefully to allow re-init parameters to take effect.
+    if RT.transcriber is not None:
+        try:
+            await RT.transcriber.stop()
+        except Exception as e:
+            print(f"[LOWEND] stopping realtime transcriber failed: {e}")
+        finally:
+            RT.transcriber = None
+
+    # --- Delegate flip+reinit to manager when possible; fall back to legacy path otherwise ---
+    tm = None
+    st: dict = {}
+    try:
+        tm = init_transcription_backend()
+        if tm is None:
+            if new_enabled:
+                os.environ["APP_LOWEND_MODE"] = "1"
+            else:
+                with contextlib.suppress(Exception):
+                    del os.environ["APP_LOWEND_MODE"]
+            try:
+                tm = init_transcription_backend()
+                st = tm.get_status() if tm is not None else {}
+                print("[LOWEND] fallback init_transcription_backend path used")
+            except Exception as e:
+                tb = traceback.format_exc()
+                print(f"[LOWEND] fallback reinit failed: {e}\n{tb}")
+                st = {}
+        else:
+            if hasattr(tm, "set_lowend_mode") and callable(getattr(tm, "set_lowend_mode")):
+                try:
+                    st_res = await asyncio.to_thread(tm.set_lowend_mode, bool(new_enabled))
+                    if isinstance(st_res, dict):
+                        st = st_res
+                    else:
+                        st = {"lowend_mode": bool(new_enabled)}
+                    print(f"[LOWEND] tm.set_lowend_mode completed; manager reported lowend_mode={st.get('lowend_mode')}")
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    print(f"[LOWEND] tm.set_lowend_mode failed: {e}\n{tb}")
+                    if new_enabled:
+                        os.environ["APP_LOWEND_MODE"] = "1"
+                    else:
+                        with contextlib.suppress(Exception):
+                            del os.environ["APP_LOWEND_MODE"]
+                    try:
+                        tm = init_transcription_backend()
+                        st = tm.get_status() if tm is not None else {}
+                        print("[LOWEND] fallback init_transcription_backend executed after set_lowend_mode failure")
+                    except Exception as e2:
+                        tb2 = traceback.format_exc()
+                        print(f"[LOWEND] fallback reinit also failed: {e2}\n{tb2}")
+                        st = {}
+            else:
+                if new_enabled:
+                    os.environ["APP_LOWEND_MODE"] = "1"
+                else:
+                    with contextlib.suppress(Exception):
+                        del os.environ["APP_LOWEND_MODE"]
+                try:
+                    tm.initialize()
+                    st = tm.get_status() or {}
+                    print("[LOWEND] tm.initialize() used as fallback (no set_lowend_mode available)")
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    print(f"[LOWEND] tm.initialize() fallback failed: {e}\n{tb}")
+                    st = {}
+    except Exception as outer_e:
+        tb = traceback.format_exc()
+        print(f"[LOWEND] unexpected error in set_lowend_mode flow: {outer_e}\n{tb}")
+        if new_enabled:
+            os.environ["APP_LOWEND_MODE"] = "1"
+        else:
+            with contextlib.suppress(Exception):
+                del os.environ["APP_LOWEND_MODE"]
+        st = {}
+
+    reported_after = None
+    if isinstance(st, dict):
+        reported_after = st.get("lowend_mode")
+    if reported_after is None:
+        reported_after = bool(new_enabled)
+    env_after = os.getenv("APP_LOWEND_MODE", "")
+    print(f"[LOWEND] final state: APP_LOWEND_MODE='{env_after}' manager_lowend={reported_after}")
+
+    if STATE.running and RT.transcriber is None:
+        try:
+            rt = RealtimeTranscriber(sample_rate=SAMPLE_RATE)
+            rt.subscribe(_on_realtime_event)
+            await rt.start()
+            RT.transcriber = rt
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[LOWEND] failed to restart realtime transcriber: {e}\n{tb}")
+
+    await broadcast("status", f"lowend_mode:{'on' if new_enabled else 'off'}")
+    return LowEndSettings(enabled=new_enabled)
+
+
+
+
+
+# ---------- Workflows API ----------
+
+@app.get("/api/workflows", response_model=WorkflowList)
+async def api_list_workflows() -> WorkflowList:
+    items = _list_workflow_files()
+    return WorkflowList(items=items)
+
+@app.post("/api/settings/workflow")
+async def api_select_workflow(payload: WorkflowSelect):
+    try:
+        _ensure_workflow_exists(payload.filename)
+    except FileNotFoundError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    STATE.active_workflow = payload.filename
+    try:
+        _apply_active_workflow_if_local()
+    except Exception as e:
+        print(f"[WF] hot-apply error: {e}")
+    await broadcast("status", f"workflow:{STATE.active_workflow}")
+    return {"ok": True, "active_workflow": STATE.active_workflow}
+
+# ---------- SSE: /events ----------
+
+@app.get("/events")
+async def events(request: Request):
+    async def gen():
+        q: asyncio.Queue[str] = asyncio.Queue()
+        STATE.listeners.append(q)
+        try:
+            await q.put(sse_format("status", "connected"))
+            hb = max(0.25, float(APP_SSE_TICK_SEC))
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=hb)
+                except asyncio.TimeoutError:
+                    yield sse_format("status", "hb").encode("utf-8")
+                    continue
+                if msg == "":
+                    break
+                yield msg.encode("utf-8")
+        except asyncio.CancelledError:
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                if q in STATE.listeners:
+                    STATE.listeners.remove(q)
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+# ---------- Audio/info routes ----------
+
+@app.get("/audio/devices")
+def audio_devices():
+    try:
+        devs = sd.query_devices()
+        ins = [
+            {"index": i, "name": d.get("name"), "max_input": d.get("max_input_channels", 0)}
+            for i, d in enumerate(devs)
+            if d.get("max_input_channels", 0) > 0
+        ]
+        return {"input_devices": ins}
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[AUDIO] devices error: {e}\n{tb}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/audio/probe")
+def audio_probe():
+    sr = SAMPLE_RATE
+    dur = 0.5
+    frames = int(sr * dur)
+    try:
+        idx = pick_input_device(AUDIO_DEVICE_PREF)
+        sd.default.device = (idx, None)
+        sd.default.samplerate = sr
+        sd.default.channels = 1
+        data = sd.rec(frames, samplerate=sr, channels=1, dtype="float32")
+        sd.wait()
+        mono = np.asarray(data[:, 0], dtype=np.float32)
+        peak = float(np.max(np.abs(mono))) if mono.size else 0.0
+        rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
+        return {"device_index": idx, "sample_rate": sr, "frames": int(mono.size), "peak": round(peak, 4), "rms": round(rms, 4)}
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[AUDIO] probe error: {e}\n{tb}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+
+import sys as _rec_sys
+# RECORDING_PATCH_V1: bounded, explicit-save PCM recording
+# RECORDING_REPAIR_V2
+import os as _rec_os
+import threading as _rec_threading
+import wave as _rec_wave
+import uuid as _rec_uuid
+import traceback as _rec_traceback
+from pathlib import Path as _rec_Path
+import numpy as _rec_np
+from fastapi.responses import JSONResponse as _rec_JSONResponse
+from starlette.concurrency import run_in_threadpool as _rec_run_in_threadpool
+
+class _SessionRecording:
+    """Bounded PCM16 recorder. All capture failures are intentionally contained."""
+    def __init__(self):
+        self.max_bytes=64*1024*1024
+        self._lock=_rec_threading.Lock(); self._data=bytearray(); self.sample_rate=0
+        self.saved=False; self.saving=False; self.capture_active=False; self.limit_reached=False
+        self.generation=0; self.filename=None; self.fault=None
+    def start(self, sample_rate):
+        try: sr=int(sample_rate)
+        except Exception: return False
+        if sr < 8000 or sr > 384000: return False
+        with self._lock:
+            if self.saving: return False
+            self._data=bytearray(); self.sample_rate=sr; self.saved=False; self.limit_reached=False
+            self.capture_active=True; self.generation+=1; self.filename=None; self.fault=None
+            return True
+    def stop(self):
+        with self._lock: self.capture_active=False
+    def append(self, frame):
+        with self._lock:
+            if not self.capture_active or self.saved or self.limit_reached: return
+            remaining=self.max_bytes-len(self._data)
+            if remaining<=0: self.limit_reached=True; return
+            a=_rec_np.asarray(frame)
+            if a.ndim>1: a=a[:,0]
+            a=_rec_np.nan_to_num(a,nan=0.0,posinf=1.0,neginf=-1.0)
+            pcm=_rec_np.rint(_rec_np.clip(a.astype(_rec_np.float32,copy=False),-1,1)*32767).astype('<i2',copy=False).tobytes()
+            take=min(len(pcm),remaining); take-=take%2; self._data.extend(pcm[:take])
+            if take<len(pcm) or len(self._data)>=self.max_bytes: self.limit_reached=True
+    def append_safe(self, frame):
+        try: self.append(frame)
+        except Exception:
+            # Capture must never take down realtime transcription.
+            with self._lock: self.fault='append_failed'
+            try: print('recording append failed:\n'+_rec_traceback.format_exc(), file=_rec_sys.stderr)
+            except Exception: pass
+    def status(self):
+        with self._lock:
+            # A stopped backend is authoritative; do not leave stale active state after stop.
+            if not STATE.running: self.capture_active=False
+            n=len(self._data); active=self.capture_active
+            return {'bytes':n,'seconds':n/(2*self.sample_rate) if self.sample_rate else 0,
+             'max_bytes':self.max_bytes,'limit_reached':self.limit_reached,'saved':self.saved,
+             'saving':self.saving,'capture_active':active,'available':bool(n and not self.saved and not self.saving and not STATE.running),
+             'generation':self.generation,'filename':self.filename,'fault':self.fault}
+    def save(self):
+        # Imports are local deliberately: no application startup behavior is changed.
+        import builtins
+        import os
+        import wave
+        import uuid
+        import logging
+        from pathlib import Path
+        request_id = uuid.uuid4().hex
+        path = None
+        file_created = False
+        claimed = False
+        logger = logging.getLogger(__name__)
+        try:
+            with self._lock:
+                if STATE.running:
+                    return {"success": False, "error": "recording_active", "request_id": request_id}, 409
+                if self.saving:
+                    return {"success": False, "error": "save_in_progress", "request_id": request_id}, 409
+                if self.saved:
+                    return {"success": True, "filename": getattr(self, "filename", None), "generation": getattr(self, "generation", None), "request_id": request_id}, 200
+                if not self._data or not self.sample_rate:
+                    return {"success": False, "error": "no_recording", "request_id": request_id}, 409
+                self.saving = True
+                claimed = True
+                data = bytes(self._data)
+                sample_rate = int(self.sample_rate)
+                generation = getattr(self, "generation", None)
+            if sample_rate < 8000 or sample_rate > 384000:
+                raise ValueError("invalid_sample_rate")
+            if len(data) % 2:
+                raise ValueError("odd_pcm16_bytes")
+            directory = Path(os.environ.get("APP_RECORDINGS_DIR", "recordings")).expanduser()
+            if not directory.is_absolute():
+                directory = Path(__file__).resolve().parent / directory
+            directory = directory.resolve()
+            directory.mkdir(parents=True, exist_ok=True)
+            name = "recording-" + uuid.uuid4().hex + ".wav"
+            path = directory / name
+            with builtins.open(path, "xb") as f:
+                file_created = True
+                with wave.open(f, "wb") as wf:
+                    wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sample_rate); wf.writeframes(data)
+            with self._lock:
+                self.saved = True; self.saving = False; self.filename = name; self.fault = None
+            logger.info("recording saved request_id=%s path=%s", request_id, str(path))
+            return {"success": True, "filename": name, "generation": generation, "request_id": request_id}, 200
+        except Exception as exc:
+            try:
+                logger.exception("recording save failed request_id=%s", request_id)
+            except Exception:
+                import traceback
+                import sys
+                try: traceback.print_exc(file=_rec_sys.stderr)
+                except Exception: pass
+            if file_created and path is not None:
+                try: path.unlink(missing_ok=True)
+                except Exception: pass
+            if claimed:
+                with self._lock:
+                    self.saving = False; self.fault = "save_failed"
+            return {"success": False, "error": "save_failed", "error_type": type(exc).__name__, "request_id": request_id}, 500
+RECORDING=_SessionRecording()
+@app.get('/api/recording/status')
+async def recording_status(): return _rec_JSONResponse(RECORDING.status())
+def _recording_save_sync(): return RECORDING.save()
+@app.post('/api/recording/save')
+async def recording_save():
+    payload,code=await _rec_run_in_threadpool(_recording_save_sync)
+    return _rec_JSONResponse(payload,status_code=code)
+
+
+# ---------- Control routes ----------
+
+@app.post("/start", response_class=PlainTextResponse)
+async def start_pipeline():
+    print("[HTTP] /start called")
+    if STATE.running:
+        print("[HTTP] /start ignored (already running)")
+        return PlainTextResponse("already running", status_code=200)
+    if STATE.shutting_down:
+        return PlainTextResponse("shutting_down", status_code=409)
+
+    if not RECORDING.start(SAMPLE_RATE):
+        return PlainTextResponse("recording_save_in_progress", status_code=409)
+
+    # NEW: start realtime transcriber for this session
+    try:
+        if RT.transcriber is None:
+            rt = RealtimeTranscriber(sample_rate=SAMPLE_RATE)
+            rt.subscribe(_on_realtime_event)
+            await rt.start()
+            RT.transcriber = rt
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[RT] failed to start realtime transcriber: {e}\n{tb}")
+
+    STATE.running = True
+    STATE.start_ts = time.time()
+    STATE.task = asyncio.create_task(audio_transcription_loop())
+    await broadcast("status", "server_start_recording")
+    return PlainTextResponse("started")
+
+
+@app.post("/stop", response_class=PlainTextResponse)
+async def stop_pipeline():
+    print("[HTTP] /stop called")
+    STATE.running = False
+
+    # Stop audio input stream gracefully
+    await safe_stop_audio_stream()
+
+    # Stop the main loop task
+    if STATE.task:
+        STATE.task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            try:
+                await asyncio.wait_for(STATE.task, timeout=1.5)
+            except asyncio.TimeoutError:
+                pass
+        STATE.task = None
+
+    # Stop realtime transcriber for this session
+    if RT.transcriber is not None:
+        try:
+            await RT.transcriber.stop()
+        except Exception as e:
+            print(f"[RT] stop error: {e}")
+        finally:
+            RT.transcriber = None
+
+    RECORDING.stop()
+    await broadcast("status", "audio_stopped")
+    print("[HTTP] /stop completed")
+    return PlainTextResponse("stopped")
+
+
+
+@app.post("/shutdown", response_class=PlainTextResponse)
+async def shutdown_server():
+    print("[HTTP] /shutdown called")
+    STATE.shutting_down = True
+    try:
+        await stop_pipeline()
+    except Exception:
+        pass
+    for t in list(STATE.bg_tasks):
+        t.cancel()
+    with contextlib.suppress(Exception):
+        await asyncio.gather(*list(STATE.bg_tasks), return_exceptions=True)
+    STATE.bg_tasks.clear()
+    await broadcast("status", "server_stopped")
+    await _close_sse_listeners()
+    asyncio.create_task(_exit_after_delay())
+    return PlainTextResponse("shutting down")
+
+async def _exit_after_delay():
+    await asyncio.sleep(0.2)
+    os._exit(0)
+
+# ---------- NEW: Direct-live settings endpoints ----------
+
+@app.get("/api/settings/direct_live", response_model=DirectLiveSettings)
+async def get_direct_live():
+    return DirectLiveSettings(enabled=bool(STATE.direct_live))
+
+@app.post("/api/settings/direct_live", response_model=DirectLiveSettings)
+async def set_direct_live(cfg: DirectLiveSettings):
+    STATE.direct_live = bool(cfg.enabled)
+    await broadcast("status", f"direct_live:{'on' if STATE.direct_live else 'off'}")
+    return DirectLiveSettings(enabled=STATE.direct_live)
+
+# ---------- Ollama APIs ----------
+
+@app.post("/api/ollama/generate")
+async def api_ollama_generate(req: OllamaGenerateRequest):
+    if await _ollama_available() is False:
+        return JSONResponse({"error": "ollama_unavailable"}, status_code=503)
+    body = {"model": req.model or OLLAMA_MODEL, "prompt": req.prompt, "stream": bool(req.stream), "options": req.options or {}}
+    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_normal()) as client:
+        try:
+            data = await _post_with_retries(client, _ollama_url("/api/generate"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
+            return {"response": data.get("response", "")}
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[OLLAMA] /generate error: {e}\n{tb}")
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.post("/api/ollama/chat")
+async def api_ollama_chat(req: OllamaChatRequest):
+    if await _ollama_available() is False:
+        return JSONResponse({"error": "ollama_unavailable"}, status_code=503)
+    body = {"model": req.model or OLLAMA_MODEL, "messages": [m.model_dump() for m in req.messages], "stream": bool(req.stream), "options": req.options or {}}
+    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_normal()) as client:
+        try:
+            data = await _post_with_retries(client, _ollama_url("/api/chat"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
+            msg = (data.get("message") or {}).get("content", "") if isinstance(data, dict) else ""
+            return {"response": msg}
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[OLLAMA] /chat error: {e}\n{tb}")
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+# ---------- Plan → Prompt ----------
+
+@app.post("/api/plan")
+async def api_plan(req: PlanRequest):
+    if await _ollama_available() is False:
+        return JSONResponse({"error": "ollama_unavailable"}, status_code=503)
+    sys = OLLAMA_SYS_PROMPT
+    payload = {
+        "user_text": (req.text or "").strip(),
+        "constraints": {"no_meta": True, "max_sentences": 2, "avoid_sensitive": True},
+        "output_hint": "One compact image prompt, no explanations.",
+    }
+    prompt_text = f"<<SYS>>{sys}<</SYS>>\n\nINPUT_JSON:\n{json.dumps(payload, ensure_ascii=False)}\n\nOUTPUT:\n"
+    body = {"model": OLLAMA_MODEL, "prompt": prompt_text, "stream": False, "options": _ollama_options_for_prompt()}
+    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_normal()) as client:
+        try:
+            data = await _post_with_retries(client, _ollama_url("/api/generate"), body, timeout=float(OLLAMA_TIMEOUT_SEC))
+            out = (data.get("response") or "").strip()
+            if out:
+                eff_prompt = merge_style_prompt(out, req.style_positive or getattr(STATE, "style_positive", None))
+                eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
+                print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
+                STATE.last_prompt = eff_prompt
+                await broadcast("llm_prompt", eff_prompt)
+                if BACKEND is not None:
+                    try:
+                        if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
+                            if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
+                                setattr(BACKEND.cfg, "negative", STATE.negative_prompt or "")
+                        w = req.width if (req.width and req.width > 0) else STATE.image_width
+                        h = req.height if (req.height and req.height > 0) else STATE.image_height
+                        path = await _generate_with_negative_support(eff_prompt, width=w, height=h, negative=STATE.negative_prompt)
+                        path = ensure_in_output_dir(path)
+                        rel = rel_for_ui_path(path)
+                        await broadcast("image", rel)
+                    except Exception as e:
+                        tb = traceback.format_exc()
+                        print(f"[IMAGE] /api/plan generation error: {e}\n{tb}")
+                        await broadcast("status", f"image_error:{e}")
+            return {"prompt": out}
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[OLLAMA] /api/plan error: {e}\n{tb}")
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+# ---------- Image: Direct (ComfyUI und Pollinations) ----------
+
+@app.post("/api/image/direct", response_model=ImageResponse)
+async def api_image_direct(req: DirectImageRequest):
+    if BACKEND is None:
+        return JSONResponse({"error": "image_backend_not_initialized"}, status_code=500)
+    try:
+        neg = (req.negative_prompt or STATE.negative_prompt or "").strip()
+        if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
+            if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
+                setattr(BACKEND.cfg, "negative", neg)
+        style_src = req.style_positive if (req.style_positive and req.style_positive.strip()) else getattr(STATE, "style_positive", None)
+        base_prompt = req.prompt.strip()
+        eff_prompt = merge_style_prompt(base_prompt, style_src)
+        eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
+        print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
+        w = req.width if (req.width and req.width > 0) else STATE.image_width
+        h = req.height if (req.height and req.height > 0) else STATE.image_height
+        path = await _generate_with_negative_support(
+            prompt=eff_prompt,
+            width=w,
+            height=h,
+            negative=neg,
+        )
+        path = ensure_in_output_dir(path)
+        rel = rel_for_ui_path(path)
+        await broadcast("image", rel)
+        return ImageResponse(filename=path.name, relpath=rel, rel=rel, width=w, height=h)
+    except PermissionError as e:
+        return JSONResponse({"error": f"{e}"}, status_code=403)
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[IMAGE] /api/image/direct error: {e}\n{tb}")
+        return JSONResponse({"error": f"{e}"}, status_code=502)
+
+# ---------- Image test endpoint ----------
+
+@app.post("/api/image/test", response_model=ImageResponse)
+async def api_image_test(req: ImageRequest):
+    if BACKEND is None:
+        return JSONResponse({"error": "image_backend_not_initialized"}, status_code=500)
+    prompt = (req.prompt or "A colorful low-poly fox head, studio lighting, high detail, 3D render").strip()
+    try:
+        neg = (req.negative_prompt or STATE.negative_prompt or "").strip()
+        if LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
+            if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
+                setattr(BACKEND.cfg, "negative", neg)
+        style_src = req.style_positive if (req.style_positive and req.style_positive.strip()) else getattr(STATE, "style_positive", None)
+        eff_prompt = merge_style_prompt(prompt, style_src)
+        eff_prompt = _append_reference_block(eff_prompt, getattr(STATE, "reference_text", None))
+        print(f"[PROMPT DEBUG] used_prompt={eff_prompt}")
+        w = req.width if (req.width and req.width > 0) else STATE.image_width
+        h = req.height if (req.height and req.height > 0) else STATE.image_height
+        path = await _generate_with_negative_support(eff_prompt, width=w, height=h, negative=neg)
+        path = ensure_in_output_dir(path)
+        rel = rel_for_ui_path(path)
+        await broadcast("image", rel)
+        return ImageResponse(filename=path.name, relpath=rel, rel=rel, width=w, height=h)
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[IMAGE] /api/image/test error: {e}\n{tb}")
+        return JSONResponse({"error": f"{e}"}, status_code=502)
+
+# ---------- Image backend switching & cloud toggle ----------
+
+def _rebuild_backend(force_name: Optional[str] = None) -> ImageBackend:
+    global BACKEND
+    if force_name:
+        STATE.image_backend_name = force_name.lower()
+    new_backend = build_image_backend_rt(backend_name=STATE.image_backend_name, allow_cloud=STATE.allow_cloud)
+    BACKEND = new_backend
+    return new_backend
+
+class ImageAllowCloudReq(BaseModel):
+    allow: Optional[bool] = None
+    allow_cloud: Optional[bool] = None
+
+@app.post("/api/settings/image_allow_cloud")
+async def api_image_allow_cloud(req: ImageAllowCloudReq):
+    val = req.allow if req.allow is not None else req.allow_cloud
+    if val is None:
+        return JSONResponse({"ok": False, "error": "missing_field_allow"}, status_code=400)
+    STATE.allow_cloud = bool(val)
+    if STATE.image_backend_name == "pollinations" and not STATE.allow_cloud:
+        STATE.image_backend_name = "comfyui"
+    try:
+        _rebuild_backend()
+        try:
+            _apply_active_workflow_if_local()
+        except Exception as e:
+            print(f"[WF] apply after allow_cloud switch failed: {e}")
+        return {"ok": True, "allow_cloud": STATE.allow_cloud, "backend": STATE.image_backend_name}
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[BACKEND] allow_cloud switch error: {e}\n{tb}")
+        return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
+
+@app.post("/api/settings/image_backend")
+async def api_switch_image_backend(req: ImageBackendSwitch):
+    target = req.backend.lower()
+    if target not in {"comfyui", "pollinations"}:
+        return JSONResponse({"ok": False, "error": "invalid_backend"}, status_code=400)
+    if target == "pollinations" and not STATE.allow_cloud:
+        return JSONResponse({"ok": False, "error": "not_allowed", "reason": "cloud_blocked"}, status_code=403)
+    if target == "pollinations":
+        secret = _env_str("POLLINATIONS_SECRET", "")
+        if not secret:
+            return JSONResponse({"ok": False, "error": "missing_secret", "reason": "missing_secret"}, status_code=400)
+    try:
+        cur_w, cur_h = STATE.image_width, STATE.image_height
+        _rebuild_backend(force_name=target)
+        if req.reset:
+            def_w, def_h = _backend_default_size(target)
+            STATE.image_width = def_w
+            STATE.image_height = def_h
+        else:
+            STATE.image_width = cur_w
+            STATE.image_height = cur_h
+        try:
+            _apply_active_workflow_if_local()
+        except Exception as e:
+            print(f"[WF] apply after backend switch failed: {e}")
+        await broadcast("status", f"image_backend:{target}")
+        return {"ok": True, "backend": target, "width": STATE.image_width, "height": STATE.image_height, "reset": bool(req.reset)}
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[BACKEND] switch error: {e}\n{tb}")
+        return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
+
+# ---------- NEW: Comfy mode switching, remote target, and debug ----------
+
+def _set_env(k: str, v: Optional[str]) -> None:
+    if v is None:
+        with contextlib.suppress(Exception):
+            del os.environ[k]
+        return
+    os.environ[k] = str(v)
+
+def _describe_backend_target() -> DebugImageTarget:
+    backend_type = type(BACKEND).__name__ if BACKEND is not None else "None"
+    active_backend = STATE.image_backend_name
+    comfy_mode = os.getenv("APP_COMFY_MODE", "auto")
+    target: Dict[str, Any] = {}
+    try:
+        if BACKEND is not None and hasattr(BACKEND, "target_info"):
+            info = BACKEND.target_info()  # type: ignore[attr-defined]
+            if isinstance(info, dict):
+                target = info
+    except Exception as e:
+        print(f"[DEBUG] target_info() failed: {e}")
+    if active_backend == "comfyui" and not target:
+        target = {
+            "mode_env": comfy_mode,
+            "local": {
+                "scheme": os.getenv("APP_COMFY_LOCAL_SCHEME", "http"),
+                "host": os.getenv("APP_COMFY_LOCAL_HOST", "127.0.0.1"),
+                "port": int(os.getenv("APP_COMFY_LOCAL_PORT", "8188") or "8188"),
+            },
+            "remote": {
+                "scheme": os.getenv("APP_COMFY_REMOTE_SCHEME", "http"),
+                "host": os.getenv("APP_COMFY_REMOTE_HOST", ""),
+                "port": int(os.getenv("APP_COMFY_REMOTE_PORT", "8188") or "8188"),
+            }
+        }
+    return DebugImageTarget(
+        backend_type=backend_type,
+        active_backend=active_backend,
+        comfy_mode=comfy_mode if active_backend == "comfyui" else None,
+        target=target,
+    )
+
+@app.post("/api/settings/comfy_mode")
+async def api_set_comfy_mode(req: ComfyModeRequest):
+    _set_env("APP_COMFY_MODE", req.mode)
+    STATE.image_backend_name = "comfyui"
+    try:
+        _rebuild_backend(force_name="comfyui")
+        try:
+            _apply_active_workflow_if_local()
+        except Exception as e:
+            print(f"[WF] apply after comfy_mode switch failed: {e}")
+        desc = _describe_backend_target()
+        await broadcast("status", f"comfy_mode:{req.mode}")
+        return {"ok": True, "debug": desc.model_dump()}
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[BACKEND] comfy_mode switch error: {e}\n{tb}")
+        return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
+
+@app.post("/api/settings/comfy_remote")
+async def api_set_comfy_remote(req: ComfyRemoteRequest):
+    _set_env("APP_COMFY_REMOTE_SCHEME", req.scheme)
+    _set_env("APP_COMFY_REMOTE_HOST", req.host)
+    _set_env("APP_COMFY_REMOTE_PORT", str(req.port))
+    _set_env("APP_COMFY_SCHEME", req.scheme)
+    if STATE.image_backend_name == "comfyui":
+        try:
+            _rebuild_backend()
+            try:
+                _apply_active_workflow_if_local()
+            except Exception as e:
+                print(f"[WF] apply after comfy_remote set failed: {e}")
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[BACKEND] comfy_remote update error: {e}\n{tb}")
+            return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
+    desc = _describe_backend_target()
+    await broadcast("status", "comfy_remote:updated")
+    return {"ok": True, "debug": desc.model_dump()}
+
+@app.get("/api/debug/image_target", response_model=DebugImageTarget)
+async def api_debug_image_target():
+    return _describe_backend_target()
+
+# ---------- NEW: Comfy remote reachability probe ----------
+
+def _is_valid_hostname(host: str) -> bool:
+    if not host or len(host) > 255:
+        return False
+    if host.startswith("[") and host.endswith("]"):
+        inside = host[1:-1]
+        return 0 < len(inside) <= 253
+    ipv4_pattern = r"^\d{1,3}(\.\d{1,3}){3}$"
+    if re.match(iv4 := ipv4_pattern, host):
+        try:
+            parts = [int(p) for p in host.split(".")]
+            return all(0 <= p <= 255 for p in parts)
+        except Exception:
+            return False
+    label = r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)"
+    return re.compile(rf"^{label}(\.{label})*$").match(host) is not None
+
+def _build_base_url(scheme: str, host: str, port: int) -> str:
+    if host.startswith("[") and host.endswith("]"):
+        return f"{scheme}://{host}:{port}"
+    return f"{scheme}://{host}:{port}"
+
+@app.get("/api/settings/comfy_remote_probe")
+async def comfy_remote_probe(
+    scheme: str = Query(..., description="http or https"),
+    host: str = Query(..., description="Hostname, IPv4, or IPv6 in [brackets]"),
+    port: int = Query(..., ge=1, le=65535, description="TCP port number"),
+):
+    scheme_l = (scheme or "").strip().lower()
+    if scheme_l not in {"http", "https"}:
+        return JSONResponse(
+            {"ok": False, "error": "invalid_scheme", "detail": "scheme must be http or https", "target": {"scheme": scheme, "host": host, "port": port}},
+            status_code=400,
+        )
+    if not _is_valid_hostname(host or ""):
+        return JSONResponse(
+            {"ok": False, "error": "invalid_host", "detail": "invalid host format", "target": {"scheme": scheme_l, "host": host, "port": port}},
+            status_code=400,
+        )
+    base = _build_base_url(scheme_l, host, int(port))
+    candidates = ["/history", "/"]
+    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short_http(), follow_redirects=True) as client:
+        last_error: Optional[str] = None
+        last_status: Optional[int] = None
+        for path in candidates:
+            url = f"{base}{path}"
+            try:
+                resp = await client.get(url)
+                last_status = resp.status_code
+                if 200 <= resp.status_code < 300:
+                    return {"ok": True, "target": {"scheme": scheme_l, "host": host, "port": port}, "endpoint": path, "status": resp.status_code}
+                else:
+                    last_error = f"non_2xx:{resp.status_code} at {path}"
+            except httpx.ConnectTimeout as e:
+                last_error = f"connect_timeout:{e}"
+            except httpx.ReadTimeout as e:
+                last_error = f"read_timeout:{e}"
+            except httpx.ConnectError as e:
+                last_error = f"connect_error:{e}"
+            except httpx.HTTPError as e:
+                last_error = f"http_error:{e}"
+            except Exception as e:
+                last_error = f"unexpected:{e}"
+    return {"ok": False, "target": {"scheme": scheme_l, "host": host, "port": port}, "error": last_error or "probe_failed", "status": last_status}
+
+# ---------- NEW: Bridge Sync (tunnel_url.json/txt from remote ComfyUI) ----------
+
+class BridgeSyncRequest(BaseModel):
+    scheme: Optional[Literal["http", "https"]] = None
+    host: Optional[str] = None
+    port: Optional[int] = Field(default=None, ge=1, le=65535)
+    filenames: List[str] = Field(default_factory=lambda: ["tunnel_url.json", "tunnel_url.txt"])
+    view_mode_priority: List[Literal["query", "path"]] = Field(default_factory=lambda: ["query", "path"])
+    path_hints: List[str] = Field(
+        default_factory=lambda: [
+            "ComfyUI/output",
+            "output",
+            "temp",
+            "ComfyUI/temp",
+            "ComfyUI",
+        ]
+    )
+    timeout_s: float = Field(default=4.5, ge=0.5, le=30.0)
+    retries: int = Field(default=2, ge=0, le=6)
+    retry_backoff_s: float = Field(default=0.6, ge=0.1, le=5.0)
+
+class AttemptEntry(BaseModel):
+    url: str
+    mode: Literal["query", "path"]
+    filename: str
+    ok: bool
+    status: Optional[int] = None
+    error: Optional[str] = None
+
+class BridgeSyncResponse(BaseModel):
+    ok: bool
+    saved: List[str]
+    tried: List[AttemptEntry]
+    errors: List[str]
+
+def _bridge_dir() -> Path:
+    return (OUTPUT_DIR / "bridge").resolve()
+
+def _ensure_bridge_dir() -> Path:
+    b = _bridge_dir()
+    b.mkdir(parents=True, exist_ok=True)
+    return b
+
+def _atomic_write(target: Path, data: bytes) -> None:
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(target)
+
+def _remote_base_url2(scheme: str, host: str, port: int) -> str:
+    if host.startswith("[") and host.endswith("]"):
+        return f"{scheme}://{host}:{port}"
+    return f"{scheme}://{host}:{port}"
+
+async def _retry_get_bytes(
+    client: httpx.AsyncClient,
+    url: str,
+    retries: int,
+    base_delay: float,
+    timeout_s: float,
+) -> tuple[Optional[bytes], Optional[int], Optional[str]]:
+    delay = float(base_delay)
+    last_status: Optional[int] = None
+    last_err: Optional[str] = None
+    for attempt in range(0, max(1, int(retries) + 1)):
+        try:
+            r = await client.get(url, timeout=httpx.Timeout(timeout_s))
+            last_status = r.status_code
+            if r.status_code == 200:
+                return r.content, r.status_code, None
+            last_err = f"non_200:{r.status_code}"
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
+            last_err = f"net:{e}"
+        except Exception as e:
+            last_err = f"err:{e}"
+        if attempt < retries:
+            jitter = (0.2 * delay) * (0.5 - os.urandom(1)[0] / 255.0)
+            await asyncio.sleep(max(0.05, delay + jitter))
+            delay *= 2.0
+    return None, last_status, last_err
+
+async def _fetch_query_view(
+    client: httpx.AsyncClient,
+    base: str,
+    filename: str,
+    timeout_s: float,
+    retries: int,
+    backoff: float,
+) -> tuple[Optional[bytes], AttemptEntry]:
+    url = f"{base}/api/view?filename={httpx.QueryParams({'filename': filename})['filename']}"
+    data, status, err = await _retry_get_bytes(client, url, retries, backoff, timeout_s)
+    return data, AttemptEntry(url=url, mode="query", filename=filename, ok=bool(data), status=status, error=err)
+
+async def _fetch_path_view(
+    client: httpx.AsyncClient,
+    base: str,
+    path_hint: str,
+    filename: str,
+    timeout_s: float,
+    retries: int,
+    backoff: float,
+) -> tuple[Optional[bytes], AttemptEntry]:
+    path_hint = (path_hint or "").strip().strip("/")
+    if not path_hint:
+        return None, AttemptEntry(url=f"{base}/api/view?path=", mode="path", filename=filename, ok=False, status=None, error="empty_path_hint_skipped")
+    qp = httpx.QueryParams({"path": path_hint, "filename": filename})
+    url = f"{base}/api/view?{str(qp)}"
+    data, status, err = await _retry_get_bytes(client, url, retries, backoff, timeout_s)
+    return data, AttemptEntry(url=url, mode="path", filename=filename, ok=bool(data), status=status, error=err)
+
+def _pick_remote_from_env_or_req(req: BridgeSyncRequest) -> tuple[str, str, int]:
+    scheme = (req.scheme or os.getenv("APP_COMFY_REMOTE_SCHEME", "http")).strip().lower() or "http"
+    host = (req.host or os.getenv("APP_COMFY_REMOTE_HOST", "")).strip()
+    port = int(req.port or int(os.getenv("APP_COMFY_REMOTE_PORT", "8188") or "8188"))
+    if scheme not in {"http", "https"}:
+        scheme = "http"
+    return scheme, host, port
+
+# Early-exit helper for tunnel sync in this module (used by /api/bridge/sync_tunnel callers)
+def _is_remote_mode() -> bool:
+    return (os.getenv("APP_COMFY_MODE") or "auto").strip().lower() == "remote"
+
+@app.post("/api/bridge/sync_tunnel", response_model=BridgeSyncResponse)
+async def api_bridge_sync_tunnel(payload: BridgeSyncRequest = Body(default_factory=BridgeSyncRequest)):
+    # Early-exit: only perform tunnel sync in remote mode
+    if not _is_remote_mode():
+        return BridgeSyncResponse(ok=False, saved=[], tried=[], errors=["mode_not_remote"])
+    try:
+        scheme, host, port = _pick_remote_from_env_or_req(payload)
+        if not host:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "saved": [],
+                    "tried": [],
+                    "errors": ["missing_remote_host: Set APP_COMFY_REMOTE_HOST or pass host in request."],
+                },
+                status_code=400,
+            )
+        base = _remote_base_url2(scheme, host, port)
+        tried: List[AttemptEntry] = []
+        saved: List[str] = []
+        errors: List[str] = []
+        _ensure_bridge_dir()
+        async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short_http(), follow_redirects=True) as client:
+            for fname in payload.filenames:
+                fname = (fname or "").strip()
+                if not fname:
+                    continue
+                content: Optional[bytes] = None
+                for mode in payload.view_mode_priority or ["query", "path"]:
+                    if mode == "query":
+                        data, att = await _fetch_query_view(client=client, base=base, filename=fname, timeout_s=float(payload.timeout_s), retries=int(payload.retries), backoff=float(payload.retry_backoff_s))
+                        tried.append(att)
+                        if data:
+                            content = data
+                            break
+                    elif mode == "path":
+                        for hint in (payload.path_hints or []):
+                            data, att = await _fetch_path_view(client=client, base=base, path_hint=hint, filename=fname, timeout_s=float(payload.timeout_s), retries=int(payload.retries), backoff=float(payload.retry_backoff_s))
+                            tried.append(att)
+                            if data:
+                                content = data
+                                break
+                        if content:
+                            break
+                    else:
+                        continue
+                if content:
+                    out_path = _bridge_dir() / Path(fname).name
+                    try:
+                        _atomic_write(out_path, content)
+                        saved.append(out_path.name)
+                    except Exception as e:
+                        err = f"write_failed:{e}"
+                        errors.append(err)
+                        print(f"[BRIDGE] save failed for {out_path}: {e}")
+                else:
+                    errors.append(f"not_found:{fname}")
+        ok = len(saved) > 0
+        return BridgeSyncResponse(ok=ok, saved=saved, tried=tried, errors=errors)
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[BRIDGE] sync_tunnel crashed: {e}\n{tb}")
+        return JSONResponse({"ok": False, "saved": [], "tried": [], "errors": [str(e)]}, status_code=500)
+
+# ---------- Image size, negative prompt & style prompt settings ----------
+
+@app.get("/api/settings/image_size")
+async def get_image_size():
+    return {"width": STATE.image_width, "height": STATE.image_height}
+
+class ImageSizeSettingsIn(BaseModel):
+    width: int = Field(ge=_MIN_SIZE, le=_MAX_SIZE)
+    height: int = Field(ge=_MIN_SIZE, le=_MAX_SIZE)
+
+@app.post("/api/settings/image_size")
+async def set_image_size(s: ImageSizeSettingsIn):
+    STATE.image_width = int(s.width)
+    STATE.image_height = int(s.height)
+    await broadcast("status", f"image_size:{STATE.image_width}x{STATE.image_height}")
+    return {"ok": True, "width": STATE.image_width, "height": STATE.image_height}
+
+@app.get("/api/settings/negative_prompt")
+async def get_negative_prompt():
+    return {"negative_prompt": STATE.negative_prompt}
+
+@app.post("/api/settings/negative_prompt")
+async def set_negative_prompt(s: NegativePromptSettings):
+    txt = (s.negative_prompt or "").strip()
+    STATE.negative_prompt = txt
+    if BACKEND is not None and LocalComfyBackend is not None and isinstance(BACKEND, LocalComfyBackend):
+        if hasattr(BACKEND, "cfg") and hasattr(BACKEND.cfg, "negative"):
+            with contextlib.suppress(Exception):
+                setattr(BACKEND.cfg, "negative", txt)
+    await broadcast("status", "negative_prompt:updated")
+    return {"ok": True, "negative_prompt": STATE.negative_prompt}
+
+@app.get("/api/settings/style_positive")
+async def get_style_positive():
+    return {"style_positive": STATE.style_positive or ""}
+
+@app.post("/api/settings/style_positive")
+async def set_style_positive(s: StylePromptSettings):
+    txt = (s.style_positive or "").strip()
+    STATE.style_positive = txt or None
+    await broadcast("status", "style_positive:updated")
+    return {"ok": True, "style_positive": STATE.style_positive or ""}
+
+# ---------- Ollama Vision settings routes ----------
+
+@app.get("/api/settings/ollama_vision", response_model=OllamaVisionSettings)
+async def get_ollama_vision():
+    return OllamaVisionSettings(
+        enabled=VISION.enabled,
+        mode=VISION.mode if VISION.mode in {"local", "remote", "cloud"} else "local",
+        local_url=VISION.local_url,
+        remote_url=VISION.remote_url,
+        cloud_url=VISION.cloud_url,
+    )
+
+
+
+
+class TranscriptionHintPayload(BaseModel):
+    hint: Optional[str] = Field(default=None, description="Language hint like 'de', 'en', 'fr'. Empty or null clears the hint.")
+
+@app.post("/api/settings/transcription_hint")
+async def set_transcription_hint(payload: TranscriptionHintPayload):
+    global INPUT_LOCALE_HINT
+    val = (payload.hint or "").strip().lower()
+    os.environ["APP_INPUT_LOCALE_HINT"] = val  # runtime-aware for Faster-Whisper
+    INPUT_LOCALE_HINT = val or None
+    # Optional: Status-Broadcast, damit UI sofort aktualisieren kann
+    await broadcast("status", f"transcription_hint:{INPUT_LOCALE_HINT or ''}")
+    return {"ok": True, "input_locale_hint": INPUT_LOCALE_HINT}
+
+@app.get("/api/settings/transcription_hint")
+async def get_transcription_hint():
+    return {"input_locale_hint": (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip() or None}
+
+print(f"[TRANSCRIBE] runtime_hint={os.getenv('APP_INPUT_LOCALE_HINT', '')}")
+
+@app.post("/api/settings/ollama_vision", response_model=OllamaVisionSettings)
+async def set_ollama_vision(cfg: OllamaVisionSettings):
+    VISION.enabled = bool(cfg.enabled)
+    VISION.mode = cfg.mode if cfg.mode in {"local", "remote", "cloud"} else "local"
+    VISION.local_url = (cfg.local_url or "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434"
+    VISION.remote_url = (cfg.remote_url or "").strip()
+    VISION.cloud_url = (cfg.cloud_url or "").strip()
+    await broadcast("status", "ollama_vision:updated")
+    return await get_ollama_vision()
+
+
+# ---------- Style API (upload/save_url/build/reset) with no fallback ----------
+
+def detect_image_format(data: bytes) -> Optional[str]:
+    if not data or len(data) < 4:
+        return None
+    try:
+        from PIL import Image
+        from io import BytesIO
+        with Image.open(BytesIO(data)) as im:
+            fmt = (im.format or "").lower()
+            if fmt in {"jpeg", "png", "webp", "bmp"}:
+                return fmt
+            if fmt == "jpg":
+                return "jpeg"
+    except Exception:
+        pass
+    b = data
+    if len(b) >= 2 and b[0:2] == b"\xFF\xD8":
+        return "jpeg"
+    if len(b) >= 8 and b[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if len(b) >= 12 and b[:4] == b"RIFF" and b[8:12] == b"WEBP":
+        return "webp"
+    if len(b) >= 2 and b[:2] == b"BM":
+        return "bmp"
+    return None
+
+REFS_DIR = Path("outputs/images/refs").resolve()
+REFS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _sanitize_filename(name: str) -> str:
+    name = (name or "").strip()
+    base = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.path.splitext(name)[0]).strip("_") or f"ref_{int(time.time()*1000)}"
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+        ext = ".png"
+    return base + ext
+
+async def _maybe_await(fn, *args, **kwargs):
+    if asyncio.iscoroutinefunction(fn):
+        return await fn(*args, **kwargs)
+    res = fn(*args, **kwargs)
+    if asyncio.iscoroutine(res):
+        return await res
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: res)
+
+class SaveUrlRequest(BaseModel):
+    url: HttpUrl
+    filename_hint: Optional[str] = None
+
+class UploadResponse(BaseModel):
+    reference_id: str
+    path: str
+    url_path: str
+
+class SaveUrlResponse(UploadResponse):
+    pass
+
+class StyleBuildRequest(BaseModel):
+    content_positive: Optional[str] = None
+    style_text_prompt: Optional[str] = None
+    reference_source: Optional[str] = Field(default=None, description="local_file|url_file|none|url")
+    reference_id: Optional[str] = None
+    use_local_style_features: bool = True
+    use_ollama_vision: bool = False
+    deactivate_all_styles: bool = False
+    target_backend_name: Optional[str] = Field(default=None, description="comfy_local|comfy_remote|comfy_cloud|pollinations")
+    ollama_vision_mode: Optional[str] = Field(default="local", description="local|remote|cloud")
+    ollama_vision_local_url: Optional[str] = None
+    ollama_vision_remote_url: Optional[str] = None
+    ollama_vision_cloud_url: Optional[str] = None
+    reference_url: Optional[str] = None
+
+class StyleBuildResponse(BaseModel):
+    style_positive: str
+    style_components: Dict[str, Any] = Field(default_factory=dict)
+    merged_prompt_preview: Optional[str] = None
+    reference_used: Optional[str] = None
+    info: Optional[Dict[str, Any]] = None
+
+def _log_style_engine_fn(fn_name: str) -> None:
+    try:
+        if style_engine is None:
+            print(f"[STYLE] style_engine is None (fn={fn_name})")
+            return
+        fn = getattr(style_engine, fn_name, None)
+        if fn is None:
+            print(f"[STYLE] style_engine.{fn_name} not present")
+            return
+        sig = None
+        try:
+            sig = inspect.signature(fn)
+        except Exception:
+            pass
+        print(f"[STYLE] found style_engine.{fn_name} sig={sig!s}")
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[STYLE] inspection error for {fn_name}: {e}\n{tb}")
+
+def _local_save_reference(safe_name: str, raw: bytes) -> UploadResponse:
+    REFS_DIR.mkdir(parents=True, exist_ok=True)
+    out = REFS_DIR / safe_name
+    out.write_bytes(raw)
+    return UploadResponse(
+        reference_id=safe_name,
+        path=str(out),
+        url_path=f"/static/{Path(out).name}",
+    )
+
+@app.post("/api/style/upload", response_model=UploadResponse)
+async def api_style_upload(file: UploadFile = File(...)):
+    if not file:
+        return JSONResponse({"error": "no_file"}, status_code=400)
+    try:
+        raw = await file.read()
+        print(f"[STYLE] upload received: name={file.filename!r} size={len(raw)}B")
+        if len(raw) > 25 * 1024 * 1024:
+            return JSONResponse({"error": "file_too_large"}, status_code=413)
+        fmt = detect_image_format(raw)
+        print(f"[STYLE] detect_image_format={fmt}")
+        if fmt not in {"jpeg", "png", "webp", "bmp"}:
+            return JSONResponse({"error": "not_an_image"}, status_code=400)
+        safe_name = _sanitize_filename(file.filename or f"ref_{int(time.time()*1000)}.png")
+        print(f"[STYLE] saving reference: safe_name={safe_name} refs_dir={REFS_DIR}")
+        if style_engine is not None and hasattr(style_engine, "save_reference_from_bytes"):
+            _log_style_engine_fn("save_reference_from_bytes")
+            try:
+                saved = await _maybe_await(style_engine.save_reference_from_bytes, safe_name, raw)
+                if isinstance(saved, dict) and {"reference_id", "path", "url_path"} <= set(saved.keys()):
+                    print(f"[STYLE] saved via engine: {saved}")
+                    return UploadResponse(**saved)
+                else:
+                    print(f"[STYLE] engine returned unexpected structure; falling back to local save. got={saved}")
+            except Exception as e:
+                tb = traceback.format_exc()
+                print(f"[STYLE] save_reference_from_bytes failed: {e}\n{tb}")
+        saved_local = _local_save_reference(safe_name, raw)
+        print(f"[STYLE] saved locally: {saved_local}")
+        return saved_local
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[STYLE] upload route exception: {e}\n{tb}")
+        return JSONResponse({"error": "internal_error", "reason": f"{e}"}, status_code=500)
+
+@app.post("/api/style/save_url", response_model=SaveUrlResponse)
+async def api_style_save_url(req: SaveUrlRequest):
+    if style_engine is None or not hasattr(style_engine, "save_reference_from_url"):
+        return JSONResponse({"error": "style_engine_unavailable_or_missing_save_url"}, status_code=500)
+    try:
+        hint = _sanitize_filename(req.filename_hint) if req.filename_hint else None
+        print(f"[STYLE] save_url: url={req.url} hint={hint} refs_dir={REFS_DIR}")
+        _log_style_engine_fn("save_reference_from_url")
+        saved = await _maybe_await(style_engine.save_reference_from_url, str(req.url), hint)
+        print(f"[STYLE] saved (url): {saved}")
+        if not isinstance(saved, dict) or not {"reference_id", "path", "url_path"} <= set(saved.keys()):
+            print(f"[STYLE] unexpected return from save_reference_from_url: {saved}")
+        return SaveUrlResponse(**saved)
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[STYLE] save_url exception: {e}\n{tb}")
+        return JSONResponse({"error": "download_or_save_failed", "reason": f"{e}"}, status_code=502)
+
+def _infer_target_backend_name() -> str:
+    b = (STATE.image_backend_name or "").strip().lower()
+    if b == "pollinations":
+        return "pollinations"
+    return "comfy_local"
+
+def _sanitize_for_style_engine(payload: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(payload)
+    tbn = payload.get("target_backend_name")
+    if not isinstance(tbn, str) or not tbn.strip():
+        payload["target_backend_name"] = _infer_target_backend_name()
+    model = getattr(style_engine, "StyleEngineRequest", None) if style_engine else None
+    if model is None:
+        return payload
+    valid_keys = set(getattr(model, "model_fields", {}).keys()) if hasattr(model, "model_fields") else None
+    if valid_keys:
+        for k in list(payload.keys()):
+            if k not in valid_keys:
+                payload.pop(k, None)
+        if "target_backend_name" not in payload or not payload["target_backend_name"]:
+            payload["target_backend_name"] = _infer_target_backend_name()
+    try:
+        model(**payload)
+    except Exception as e:
+        print(f"[STYLE] StyleEngineRequest validation failed (dict fallback): {e}")
+    return payload
+
+def _to_engine_req(req: StyleBuildRequest) -> Any:
+    raw = {
+        "content_positive": req.content_positive,
+        "style_text_prompt": req.style_text_prompt,
+        "reference_source": req.reference_source,
+        "reference_id": req.reference_id,
+        "use_local_style_features": req.use_local_style_features,
+        "use_ollama_vision": req.use_ollama_vision and VISION.enabled,
+        "deactivate_all_styles": req.deactivate_all_styles,
+        "target_backend_name": req.target_backend_name or _infer_target_backend_name(),
+        "ollama_vision_mode": (req.ollama_vision_mode or VISION.mode or "local"),
+        "ollama_vision_local_url": (req.ollama_vision_local_url or VISION.local_url),
+        "ollama_vision_remote_url": (req.ollama_vision_remote_url or VISION.remote_url),
+        "ollama_vision_cloud_url": (req.ollama_vision_cloud_url or VISION.cloud_url),
+        "reference_url": getattr(req, "reference_url", None),
+    }
+    payload = _sanitize_for_style_engine(raw)
+    model = getattr(style_engine, "StyleEngineRequest", None) if style_engine else None
+    if style_engine is None or model is None:
+        return payload
+    try:
+        return model(**payload)
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[STYLE] StyleEngineRequest init failed, using dict. err={e}\n{tb}")
+        return payload
+
+def _from_engine_result(res: Any) -> StyleBuildResponse:
+    try:
+        d = res.dict() if hasattr(res, "dict") else dict(res)
+    except Exception:
+        d = {}
+    try:
+        style_positive = d.get("style_positive") or ""
+        reference_used = d.get("reference_id") or d.get("reference_used") or d.get("ref_used")
+        style_components = {
+            "notes": d.get("notes") or [],
+            "warnings": d.get("warnings") or [],
+            "vision_text_used": d.get("vision_text_used") or "",
+            "descriptors_used": d.get("descriptors_used") or [],
+            "reference_file_saved": d.get("reference_file_saved"),
+            "content_positive": d.get("content_positive") or "",
+            "style_text_prompt_raw": d.get("style_text_prompt_raw") or "",
+        }
+        return StyleBuildResponse(
+            style_positive=(style_positive or "").strip(),
+            style_components=style_components,
+            merged_prompt_preview=None,
+            reference_used=reference_used,
+            info=None,
+        )
+    except Exception:
+        return StyleBuildResponse(
+            style_positive=d.get("style_positive") or "",
+            style_components=d.get("style_components") or {},
+            merged_prompt_preview=d.get("merged_prompt_preview"),
+            reference_used=d.get("reference_used") or d.get("ref_used"),
+            info=d.get("info"),
+        )
+
+def _extract_reference_text_from_engine_result(res: Any) -> Optional[str]:
+    try:
+        for attr in ("vision_text_used", "reference_text"):
+            if hasattr(res, attr):
+                val = getattr(res, attr)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+        if isinstance(res, dict):
+            for k in ("vision_text_used", "reference_text"):
+                val = res.get(k)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            for k in ("descriptors_used", "descriptors", "keywords"):
+                arr = res.get(k)
+                if isinstance(arr, (list, tuple)):
+                    txt = ", ".join(str(x).strip() for x in arr if str(x).strip())
+                    if txt:
+                        return txt
+        if hasattr(res, "model_dump"):
+            d = res.model_dump()
+            for k in ("vision_text_used", "reference_text"):
+                val = d.get(k)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            for k in ("descriptors_used", "descriptors", "keywords"):
+                arr = d.get(k)
+                if isinstance(arr, (list, tuple)):
+                    txt = ", ".join(str(x).strip() for x in arr if str(x).strip())
+                    if txt:
+                        return txt
+    except Exception:
+        pass
+    return None
+
+def _call_build_styles_compat(req_obj: Any) -> Any:
+    if style_engine is None or not hasattr(style_engine, "build_styles"):
+        raise RuntimeError("style_engine.build_styles not available")
+    fn = style_engine.build_styles
+    try:
+        sig = inspect.signature(fn)
+        params = list(sig.parameters.values())
+    except Exception:
+        params = []
+    async def _call():
+        try:
+            if len(params) >= 2:
+                print(f"[STYLE] calling build_styles(req, refs_dir)")
+                return await fn(req_obj, REFS_DIR)  # type: ignore[misc]
+            else:
+                print(f"[STYLE] calling build_styles(req)")
+                return await fn(req_obj)  # type: ignore[misc]
+        except TypeError as e:
+            print(f"[STYLE] build_styles signature TypeError: {e}. Retrying with req only.")
+            return await fn(req_obj)  # type: ignore[misc]
+    return _call()
+
+@app.post("/api/style/build", response_model=StyleBuildResponse)
+async def api_style_build(req: StyleBuildRequest = Body(...)):
+    if style_engine is None:
+        return JSONResponse({"error": "style_engine_unavailable"}, status_code=500)
+    try:
+        req_dict = req.model_dump()
+        print(f"[STYLE] build request (raw): {req_dict}")
+        has_new_style = bool((req.style_text_prompt or "").strip())
+        has_new_reference = (
+            (req.reference_source in {"local_file", "url", "url_file"}) and
+            (bool(req.reference_id) or bool(getattr(req, "reference_url", None)))
+        )
+        effective_deactivate = bool(req.deactivate_all_styles)
+        if effective_deactivate and (has_new_style or has_new_reference):
+            req.deactivate_all_styles = False
+            effective_deactivate = False
+        info_note: Dict[str, Any] = {}
+        if bool(req_dict.get("deactivate_all_styles")) and not effective_deactivate and (has_new_style or has_new_reference):
+            info_note["auto_reactivated"] = True
+            info_note["reason"] = "New style inputs detected while deactivate_all_styles=True; using inputs and enabling styles for this request."
+        eng_req = _to_engine_req(req)
+        _log_style_engine_fn("build_styles")
+        try:
+            res = await _maybe_await(_call_build_styles_compat, eng_req)
+        except Exception as e:
+            tb = traceback.format_exc()
+            return JSONResponse({"error": "style_build_failed", "reason": f"{e}"}, status_code=502)
+        api_res = _from_engine_result(res)
+        normalized = (api_res.style_positive or "").strip()
+        api_res.style_positive = normalized
+        STATE.style_positive = normalized or None
+        try:
+            ref_text = _extract_reference_text_from_engine_result(res)
+            if ref_text:
+                STATE.reference_text = ref_text
+            else:
+                if effective_deactivate or not has_new_reference:
+                    STATE.reference_text = None
+        except Exception:
+            pass
+        if info_note:
+            if api_res.info and isinstance(api_res.info, dict):
+                api_res.info.update(info_note)
+            else:
+                api_res.info = info_note
+        await broadcast("status", "style_positive:updated")
+        return api_res
+    except Exception as e:
+        tb = traceback.format_exc()
+        return JSONResponse({"error": "internal_error", "reason": f"{e}"}, status_code=500)
+
+@app.post("/api/style/reset")
+async def api_style_reset():
+    STATE.style_positive = None
+    STATE.reference_text = None
+    await broadcast("status", "style_positive:updated")
+    return {"ok": True, "style_positive": ""}
+
+# ---------- Utility: Open-dir hint ----------
+
+@app.get("/open_dir_hint")
+async def open_dir_hint():
+    return {"static_url": "/static/", "path": str(OUTPUT_DIR)}
+
+@app.get("/open_dir")
+async def open_dir():
+    """
+    Open OUTPUT_DIR in the native file manager.
+    Returns 200 OK with empty body and explicit Content-Length: 0 to avoid
+    middleware/body mismatches. On failure, returns 409 with JSON details.
+    """
+    try:
+        open_folder_os(OUTPUT_DIR)
+        # 200 OK, no body; make it explicit for all middlewares
+        return Response(status_code=200, content=b"", headers={"Content-Length": "0"})
+    except OpenDirError as e:
+        detail = {
+            "error": "open_dir_failed",
+            "reason": str(e),
+            "fallback": "/static/",
+            "path": str(OUTPUT_DIR),
+        }
+        from fastapi.responses import JSONResponse
+        return JSONResponse(detail, status_code=409)
+    except Exception as e:
+        detail = {
+            "error": "unexpected_error",
+            "reason": str(e),
+            "fallback": "/static/",
+            "path": str(OUTPUT_DIR),
+        }
+        from fastapi.responses import JSONResponse
+        return JSONResponse(detail, status_code=409)
+
+# ---------- App entry ----------
+
+if __name__ == "__main__":
+    import uvicorn
+    host = os.getenv("APP_BIND_HOST", "127.0.0.1")
+    port = int(os.getenv("APP_BIND_PORT", "8080"))
+    uvicorn.run("app:app", host=host, port=port, reload=False)
+# RECORDING_SAVE_REPAIR_V3
+```
+
+---
+
+### comfyui.service
+
+```service
+# /etc/systemd/system/comfyui.service
+[Unit]
+Description=ComfyUI (local)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cm
+Group=cm
+WorkingDirectory=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI
+# Absolute Python aus venv
+ExecStart=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/.venv/bin/python main.py --listen 127.0.0.1 --port 8188 --cpu
+# Optional: PATH setzen (nicht zwingend nötig, da ExecStart absolut ist)
+Environment="PATH=/home/cm/Dokumente/Arbeiten/0000_DEV/ComfyUI/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+# Dateien/Logs: Limit erhöhen, sauberer Kill
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+# Journald-Log-Limits (optional, je nach Bedarf)
+# StandardOutput=journal
+# StandardError=journal
+# Nice=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+---
+
+### comfyui_bridge.py
+
+```py
+# comfyui_bridge.py
+
+from __future__ import annotations
+
+import asyncio
+import ipaddress
+import json
+import os
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Iterable
+from urllib.parse import urlencode, quote, urlparse
+
+import httpx
+from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Body
+from fastapi.responses import JSONResponse
+
+# -----------------------------
+# Env helpers & host policy
+# -----------------------------
+def _is_private_or_local_host(host: str) -> bool:
+    h = (host or "").strip().lower()
+    if h in {"127.0.0.1", "localhost", "::1"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+        return ip.is_private or ip.is_loopback or ip.is_link_local
+    except ValueError:
+        return False
+
+def _env_str(k: str, d: str = "") -> str:
+    return (os.getenv(k, d) or "").strip()
+
+def _env_bool01(k: str, d: int = 0) -> bool:
+    v = (os.getenv(k, str(d)) or "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+def _env_int(k: str, d: int) -> int:
+    try:
+        return int((os.getenv(k, str(d)) or "").strip())
+    except Exception:
+        return d
+
+def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
+    try:
+        ip_addr = ipaddress.ip_address(ip)
+    except Exception:
+        return False
+    parts = [p.strip() for p in (subnets_str or "").replace(",", " ").split() if p.strip()]
+    for cidr in parts:
+        try:
+            net = ipaddress.ip_network(cidr, strict=False)
+            if ip_addr in net:
+                return True
+        except Exception:
+            continue
+    return False
+
+def _assert_image_backend_host_policy(host: str) -> None:
+    """
+    Privacy/safety policy:
+    - Always allow loopback.
+    - Remote only if APP_ALLOW_REMOTE_BACKENDS=1 and, if provided, APP_ALLOWED_SUBNETS allows the IP.
+      Hostnames (e.g., Cloudflared hosts) bypass subnet check because we cannot pre-resolve safely here.
+    """
+    if host in {"127.0.0.1", "localhost"}:
+        return
+    allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
+    if not allow_remote:
+        raise AssertionError(f"Only localhost allowed, got {host}")
+    subnets = _env_str("APP_ALLOWED_SUBNETS", "")
+    if not subnets:
+        return
+    # If host is an IP, enforce subnet allowlist; if hostname, skip (cannot reliably map CNAMEs here).
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if not _is_in_allowed_subnets(host, subnets):
+        raise AssertionError(f"Remote host {host} not in allowed subnets ({subnets})")
+
+# Optional filesystem fallback when /view is unavailable or unsuitable (mounted output dir).
+_COMFY_OUTPUT_DIR: Optional[Path] = Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).resolve() if _env_str("APP_COMFY_OUTPUT_DIR", "") else None
+
+# Local bridge dir for discovery artifacts exposed under /static/bridge/ by the server
+_LOCAL_BRIDGE_DIR: Path = Path("outputs/images/bridge").resolve()
+
+# Internal API base (self calls to apply settings)
+_INTERNAL_API_BASE: str = _env_str("APP_INTERNAL_API_BASE", "http://127.0.0.1:8080").rstrip("/")
+
+# -----------------------------
+# Connection / helpers
+# -----------------------------
+
+class ComfyConnection(BaseModel):
+    host: str = Field(default="127.0.0.1")
+    port: int = Field(default=8188)
+    scheme: Optional[str] = Field(default=None)  # 'http' or 'https'; if None, auto by port or env
+
+    @property
+    def base(self) -> str:
+        """
+        Build base URL with proper scheme.
+        - Prefer explicit APP_COMFY_SCHEME if provided.
+        - Else use provided scheme.
+        - Else auto-select https when port == 443, otherwise http.
+        """
+        _assert_image_backend_host_policy(self.host)
+        env_scheme = (_env_str("APP_COMFY_SCHEME") or "").lower()
+        scheme = (self.scheme or env_scheme or "").strip()
+        if scheme not in {"http", "https"}:
+            scheme = "https" if int(self.port) == 443 else "http"
+        base = f"{scheme}://{self.host}:{self.port}"
+        print(f"[COMFY BASE] {base}")
+        return base
+
+def _limits() -> httpx.Limits:
+    # Keep connections warm but conservative
+    return httpx.Limits(max_keepalive_connections=8, max_connections=16, keepalive_expiry=30.0)
+
+def _timeout(total: float = 150.0) -> httpx.Timeout:
+    # Boundaries to prevent runaway timeouts; adds headroom for long generations
+    total = max(30.0, min(total, 300.0))
+    connect = float(_env_str("APP_COMFY_CONNECT_TIMEOUT_SEC", "5") or "5")
+    connect = max(2.0, min(connect, 30.0))
+    return httpx.Timeout(connect=connect, read=total, write=12.0, pool=8.0)
+
+def _clamp_dim(v: Optional[int]) -> Optional[int]:
+    if v is None:
+        return None
+    x = int(v)
+    x = max(64, min(2048, x))
+    return x - (x % 8)
+
+def _select_view_mode(host: str) -> str:
+    override = _env_str("APP_COMFY_FORCE_VIEW_MODE", "auto").lower()
+    if override in {"path", "query"}:
+        return override
+    return "path" if _is_private_or_local_host(host) else "query"
+
+def _classify_base_url(base_url: str) -> Tuple[bool, str]:
+    """
+    Returns (host_is_private, scheme) for base_url.
+    """
+    try:
+        parsed = httpx.URL(base_url)
+        return _is_private_or_local_host(parsed.host or ""), (parsed.scheme or "").lower()
+    except Exception:
+        return False, ""
+
+# -----------------------------
+# Prompt manipulation
+# -----------------------------
+
+def _ensure_api_prompt_dict(body: Dict[str, Any]) -> Dict[str, Any]:
+    if isinstance(body, dict) and "prompt" in body and isinstance(body["prompt"], dict):
+        return body
+    if isinstance(body, dict) and body:
+        if all(isinstance(k, str) and isinstance(v, dict) and "class_type" in v for k, v in body.items()):
+            return {"prompt": body}
+    raise RuntimeError("invalid_prompt_format: expected a 'prompt' dict or a node mapping")
+
+def _get_node(prompt: Dict[str, Any], node_id: str) -> Optional[Dict[str, Any]]:
+    n = prompt.get(node_id)
+    return n if isinstance(n, dict) else None
+
+def _set_input_if_present(node: Dict[str, Any], key: str, value: Any) -> None:
+    ins = node.get("inputs")
+    if isinstance(ins, dict) and key in ins:
+        ins[key] = value
+
+def override_prompt_inplace(
+    body: Dict[str, Any],
+    *,
+    positive_text: Optional[str] = None,
+    negative_text: Optional[str] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    steps: Optional[int] = None,
+    cfg: Optional[float] = None,
+    sampler_name: Optional[str] = None,
+    scheduler: Optional[str] = None,
+    denoise: Optional[float] = None,
+    seed: Optional[int] = None,
+    node_id_positive: str = "2",
+    node_id_negative: str = "3",
+    node_id_latent: str = "4",
+    node_id_ksampler: str = "5",
+) -> Dict[str, Any]:
+    payload = _ensure_api_prompt_dict(body)
+    prompt: Dict[str, Any] = payload["prompt"]
+
+    if positive_text is not None:
+        n2 = _get_node(prompt, node_id_positive)
+        if n2:
+            _set_input_if_present(n2, "text", positive_text)
+    if negative_text is not None:
+        n3 = _get_node(prompt, node_id_negative)
+        if n3:
+            _set_input_if_present(n3, "text", negative_text)
+
+    w = _clamp_dim(width) if width is not None else None
+    h = _clamp_dim(height) if height is not None else None
+    if w is not None or h is not None:
+        n4 = _get_node(prompt, node_id_latent)
+        if n4:
+            if w is not None:
+                _set_input_if_present(n4, "width", int(w))
+            if h is not None:
+                _set_input_if_present(n4, "height", int(h))
+
+    n5 = _get_node(prompt, node_id_ksampler)
+    if n5:
+        if steps is not None:
+            _set_input_if_present(n5, "steps", int(steps))
+        if cfg is not None:
+            _set_input_if_present(n5, "cfg", float(cfg))
+        if sampler_name is not None:
+            _set_input_if_present(n5, "sampler_name", sampler_name)
+        if scheduler is not None:
+            _set_input_if_present(n5, "scheduler", scheduler)
+        if denoise is not None:
+            _set_input_if_present(n5, "denoise", float(denoise))
+        if seed is not None:
+            _set_input_if_present(n5, "seed", int(seed))
+
+    return payload
+
+# -----------------------------
+# HTTP calls to ComfyUI
+# -----------------------------
+
+async def _post_prompt(
+    client: httpx.AsyncClient,
+    base_url: str,
+    body: Dict[str, Any],
+) -> str:
+    """
+    POST /prompt with retries. Classify HTTP 400 as prompt/workflow error (reachable),
+    not as 'unavailable'. Includes HTTPS→HTTP fallback for LAN/private hosts when TLS is wrong.
+    """
+    delay = 0.8
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, 5):
+        try:
+            url = f"{base_url}/prompt"
+            print(f"DEBUG comfy POST {url} attempt#{attempt}")
+            r = await client.post(url, json=body)
+            if r.status_code == 400:
+                text = r.text[:500].replace("\n", " ")
+                print(f"DEBUG comfy POST /prompt 400 body: {text}")
+                raise RuntimeError(f"comfy_prompt_invalid_400: {text}")
+            r.raise_for_status()
+            j = r.json()
+            if not isinstance(j, dict):
+                raise RuntimeError(f"comfy_prompt_non_object: {type(j)}")
+            pid = j.get("prompt_id") or j.get("promptId") or j.get("id")
+            if not pid:
+                raise RuntimeError("comfy_no_prompt_id")
+            print(f"DEBUG comfy prompt_id: {pid}")
+            return str(pid)
+        except Exception as e:
+            last_exc = e
+            msg = str(e)
+            print(f"DEBUG comfy POST /prompt attempt#{attempt} failed: {repr(e)}")
+            # HTTPS→HTTP fallback for private/LAN hosts if TLS is wrong
+            host_is_private, scheme = _classify_base_url(base_url)
+            if host_is_private and scheme == "https" and "WRONG_VERSION_NUMBER" in msg:
+                http_base = "http://" + base_url.split("://", 1)[1]
+                try:
+                    print(f"DEBUG comfy POST /prompt HTTPS→HTTP fallback: retrying with {http_base}")
+                    r2 = await client.post(f"{http_base}/prompt", json=body)
+                    if r2.status_code == 400:
+                        text = r2.text[:500].replace("\n", " ")
+                        print(f"DEBUG comfy POST /prompt 400 body (fallback): {text}")
+                        raise RuntimeError(f"comfy_prompt_invalid_400: {text}")
+                    r2.raise_for_status()
+                    j = r2.json()
+                    if not isinstance(j, dict):
+                        raise RuntimeError(f"comfy_prompt_non_object: {type(j)}")
+                    pid = j.get("prompt_id") or j.get("promptId") or j.get("id")
+                    if not pid:
+                        raise RuntimeError("comfy_no_prompt_id")
+                    print(f"DEBUG comfy prompt_id (fallback): {pid}")
+                    return str(pid)
+                except Exception as e2:
+                    print(f"DEBUG comfy POST /prompt fallback failed: {repr(e2)}")
+            # Normal retry backoff
+            if attempt < 4:
+                await asyncio.sleep(delay)
+                delay *= 1.7
+                continue
+            break
+    raise RuntimeError(f"comfy_post_prompt_failed: {last_exc}")
+
+def _node_maps_from_history_obj(history_json: Dict[str, Any], prompt_id: str) -> List[Dict[str, Any]]:
+    node_maps: List[Dict[str, Any]] = []
+    if isinstance(history_json, dict) and all(isinstance(v, dict) for v in history_json.values()):
+        node_maps.append(history_json)
+    entry = history_json.get(prompt_id)
+    if isinstance(entry, dict) and all(isinstance(v, dict) for v in entry.values()):
+        node_maps.append(entry)
+    if isinstance(entry, dict):
+        outputs = entry.get("outputs")
+        if isinstance(outputs, dict) and all(isinstance(v, dict) for v in outputs.values()):
+            node_maps.append(outputs)
+    seen_ids = set()
+    deduped: List[Dict[str, Any]] = []
+    for m in node_maps:
+        if id(m) in seen_ids:
+            continue
+        seen_ids.add(id(m))
+        deduped.append(m)
+    return deduped
+
+def _any_images_in_node_maps(node_maps: Iterable[Dict[str, Any]]) -> bool:
+    for node_map in node_maps:
+        for _, node in node_map.items():
+            if not isinstance(node, dict):
+                continue
+            outs = node.get("outputs")
+            if not isinstance(outs, dict):
+                continue
+            for outv in outs.values():
+                if isinstance(outv, dict) and isinstance(outv.get("images"), list) and outv["images"]:
+                    return True
+    return False
+
+async def _poll_history_ready(
+    client: httpx.AsyncClient,
+    base_url: str,
+    prompt_id: str,
+    max_wait_sec: float = 150.0,
+    poll_interval: float = 1.0,
+) -> Dict[str, Any]:
+    deadline = time.time() + max_wait_sec
+    last_payload: Optional[Dict[str, Any]] = None
+    while time.time() < deadline:
+        url = f"{base_url}/history/{prompt_id}"
+        try:
+            r = await client.get(url)
+            if r.status_code == 404:
+                await asyncio.sleep(poll_interval)
+                continue
+            r.raise_for_status()
+        except Exception as e:
+            msg = str(e)
+            print(f"DEBUG comfy GET /history error: {repr(e)} url={url}")
+            host_is_private, scheme = _classify_base_url(base_url)
+            if host_is_private and scheme == "https" and "WRONG_VERSION_NUMBER" in msg:
+                http_base = "http://" + base_url.split("://", 1)[1]
+                try:
+                    print(f"DEBUG comfy GET /history HTTPS→HTTP fallback: retrying with {http_base}")
+                    r = await client.get(f"{http_base}/history/{prompt_id}")
+                    if r.status_code == 404:
+                        await asyncio.sleep(poll_interval)
+                        continue
+                    r.raise_for_status()
+                except Exception as e2:
+                    print(f"DEBUG comfy GET /history fallback failed: {repr(e2)}")
+                    await asyncio.sleep(poll_interval)
+                    continue
+            else:
+                await asyncio.sleep(poll_interval)
+                continue
+
+        j = r.json()
+        if not isinstance(j, dict):
+            await asyncio.sleep(poll_interval)
+            continue
+        last_payload = j
+        maps = _node_maps_from_history_obj(j, prompt_id)
+        if maps and _any_images_in_node_maps(maps):
+            return j
+        await asyncio.sleep(poll_interval)
+    try:
+        keys = list(last_payload.keys()) if isinstance(last_payload, dict) else "n/a"
+        print("DEBUG comfy history keys:", keys)
+        sample = json.dumps(last_payload or {}, ensure_ascii=False)[:2000]
+        print("DEBUG comfy history sample:", sample)
+    except Exception:
+        pass
+    raise TimeoutError(f"comfy_history_timeout (last_payload_keys={keys if isinstance(keys, list) else keys})")
+
+def _iter_image_descriptors_from_history(history_obj: Dict[str, Any], prompt_id: str) -> Iterable[Dict[str, Any]]:
+    maps = _node_maps_from_history_obj(history_obj, prompt_id)
+    for node_map in maps:
+        for _, node in node_map.items():
+            if not isinstance(node, dict):
+                continue
+            outs = node.get("outputs")
+            if not isinstance(outs, dict):
+                continue
+            for _, outv in outs.items():
+                if isinstance(outv, dict) and isinstance(outv.get("images"), list):
+                    yield outv
+
+def _build_view_candidates(folder_type: str, subfolder: str, filename: str) -> List[Tuple[str, str, str]]:
+    """
+    Build alternative (type, subfolder, filename) triples to try.
+    Used by both path and query modes.
+    """
+    sub = (subfolder or "").strip().strip("/")
+    candidates: List[Tuple[str, str, str]] = []
+    candidates.append((folder_type or "output", sub, filename))
+    if sub:
+        candidates.append((folder_type or "output", "", filename))
+    candidates.append(("temp", sub, filename))
+    if sub:
+        candidates.append(("temp", "", filename))
+    candidates.append(("output", "", filename))
+    seen = set()
+    uniq: List[Tuple[str, str, str]] = []
+    for t, s, f in candidates:
+        key = (t, s, f)
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(key)
+    return uniq
+
+async def _download_via_view_path(
+    client: httpx.AsyncClient,
+    base_url: str,
+    folder_type: str,
+    subfolder: str,
+    filename: str,
+) -> bytes:
+    """
+    Download via legacy path style: /view/{type}/{subfolder}/{filename}
+    Tries multiple candidates; URL-encodes each segment.
+    """
+    filename = filename.strip().lstrip("/")
+    candidates = _build_view_candidates(folder_type, subfolder, filename)
+    last_exc: Optional[Exception] = None
+    for idx, (t, s, f) in enumerate(candidates, start=1):
+        seg_t = quote((t or "").strip(), safe="")
+        seg_s = quote((s or "").strip(), safe="") if s else ""
+        seg_f = quote((f or "").strip(), safe="")
+        path = f"/view/{seg_t}"
+        if seg_s:
+            path += f"/{seg_s}"
+        path += f"/{seg_f}"
+        url = f"{base_url}{path}"
+        delay = 0.2
+        for attempt in range(1, 3):
+            try:
+                print(f"DEBUG comfy GET[path] try#{attempt} cand#{idx}: {url}")
+                r = await client.get(url)
+                print(f"DEBUG comfy GET[path] status={r.status_code} bytes={len(r.content) if r.content else 0}")
+                r.raise_for_status()
+                data = r.content
+                if not data or len(data) < 64:
+                    raise RuntimeError("download_too_small")
+                return data
+            except Exception as e:
+                last_exc = e
+                if attempt < 2:
+                    await asyncio.sleep(delay)
+                    delay *= 2.0
+                else:
+                    break
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("download_failed_unknown_path")
+
+async def _download_via_view_query(
+    client: httpx.AsyncClient,
+    base_url: str,
+    folder_type: str,
+    subfolder: str,
+    filename: str,
+) -> bytes:
+    """
+    Download via query style: /api/view?filename=...&type=...&subfolder=...
+    Tries multiple (type, subfolder, filename) candidates.
+    IMPORTANT: Do NOT include 'subfolder' when it is empty, as some tunnels/proxies mishandle empty params.
+    """
+    filename = (filename or "").strip().lstrip("/")
+    candidates = _build_view_candidates(folder_type, subfolder, filename)
+    last_exc: Optional[Exception] = None
+
+    headers = {
+        "Accept": "*/*",
+        "Cache-Control": "no-cache",
+        "Connection": "close",
+        "Accept-Encoding": "identity",
+    }
+
+    # Classify host once for HTTPS→HTTP fallback decision
+    try:
+        parsed = httpx.URL(base_url)
+        host_is_private = _is_private_or_local_host(parsed.host or "")
+    except Exception:
+        host_is_private = False
+
+    for idx, (t, s, f) in enumerate(candidates, start=1):
+        params = {"filename": f, "type": (t or "output")}
+        s_clean = (s or "").strip().strip("/")
+        if s_clean:
+            params["subfolder"] = s_clean
+
+        qs = urlencode(params, quote_via=quote, safe="")
+        url = f"{base_url}/api/view?{qs}"
+
+        delays = [0.2, 0.4, 0.8, 1.2]
+        for attempt, delay in enumerate(delays, start=1):
+            try:
+                print(f"DEBUG comfy GET[query] try#{attempt} cand#{idx}: {url}")
+                r = await client.get(url, headers=headers)
+                print(f"DEBUG comfy GET[query] status={r.status_code} bytes={len(r.content) if r.content else 0}")
+                r.raise_for_status()
+                data = r.content
+                if not data or len(data) < 64:
+                    raise RuntimeError(f"download_too_small (url={url})")
+                return data
+            except Exception as e:
+                last_exc = e
+                print(f"DEBUG comfy GET[query] error: {repr(e)} (url={url})")
+                # One-shot fallback: WRONG_VERSION_NUMBER when using https against HTTP-only ComfyUI on private/LAN hosts
+                msg = str(e)
+                if host_is_private and base_url.startswith("https://") and "WRONG_VERSION_NUMBER" in msg:
+                    http_base = "http://" + base_url.split("://", 1)[1]
+                    try:
+                        print(f"DEBUG comfy GET[query] HTTPS→HTTP fallback: retrying with {http_base}")
+                        r2 = await client.get(f"{http_base}/api/view?{qs}", headers=headers)
+                        print(f"DEBUG comfy GET[query] fallback status={r2.status_code} bytes={len(r2.content) if r2.content else 0}")
+                        r2.raise_for_status()
+                        data = r2.content
+                        if data and len(data) >= 64:
+                            return data
+                    except Exception as e2:
+                        print(f"DEBUG comfy GET[query] fallback failed: {repr(e2)}")
+                if attempt < len(delays):
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    break
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("download_failed_unknown_query")
+
+def _fs_fallback_read(folder_type: str, subfolder: str, filename: str) -> Optional[bytes]:
+    if _COMFY_OUTPUT_DIR is None:
+        return None
+    base = _COMFY_OUTPUT_DIR
+    sub = (subfolder or "").strip().strip("/")
+    if sub:
+        base = base / sub
+    f = base / filename
+    try:
+        if f.is_file():
+            return f.read_bytes()
+    except Exception:
+        return None
+    return None
+
+# -----------------------------
+# Artifact copy (bridge) — JSON-only
+# -----------------------------
+
+async def _copy_bridge_artifacts(
+    client: httpx.AsyncClient,
+    base_url: str,
+    view_mode: str,
+    out_dir_bridge: Path,
+) -> Dict[str, int]:
+
+    try:
+        parsed = httpx.URL(base_url)
+        host_is_local = (parsed.host in {"127.0.0.1", "localhost"})
+        host_is_private = _is_private_or_local_host(parsed.host or "")
+    except Exception:
+        host_is_local = False
+        host_is_private = False
+
+    if view_mode != "query" or host_is_local or host_is_private:
+        print(f"[BRIDGE] skip tunnel artifact copy (view_mode={view_mode}, private={host_is_private}, host_is_local={host_is_local})")
+        return {"saved": 0, "errors": 0}
+
+    out_dir_bridge.mkdir(parents=True, exist_ok=True)
+
+    async def _try_fetch_json(filename: str) -> Optional[bytes]:
+        # Try candidates across folder types and common subfolders
+        subfolders = ["", "tunnels", "bridge"]
+        for folder_type in ("output", "temp"):
+            for sub in subfolders:
+                try:
+                    if view_mode == "query":
+                        return await _download_via_view_query(client, base_url, folder_type, sub, filename)
+                    else:
+                        return await _download_via_view_path(client, base_url, folder_type, sub, filename)
+                except Exception as e:
+                    print(f"DEBUG bridge artifact fetch failed for {filename} type={folder_type} sub='{sub}': {repr(e)}")
+                    continue
+        # FS fallback attempts with same subfolders
+        for sub in ["", "tunnels", "bridge"]:
+            data = _fs_fallback_read("output", sub, filename) or _fs_fallback_read("temp", sub, filename)
+            if data:
+                return data
+        return None
+
+    saved = 0
+    errors = 0
+
+    # JSON-only handling
+    fname = "tunnel_url.json"
+    try:
+        data = await _try_fetch_json(fname)
+        if data and len(data) >= 3:
+            target = out_dir_bridge / fname
+            target.write_bytes(data)
+            saved += 1
+            print(f"[BRIDGE] saved {fname} bytes={len(data)} -> {target}")
+        else:
+            print(f"[BRIDGE] not found or too small: {fname}")
+            errors += 1
+    except Exception as e:
+        errors += 1
+        print(f"[BRIDGE] error saving {fname}: {repr(e)}")
+
+    return {"saved": saved, "errors": errors}
+
+# -----------------------------
+# Image downloads
+# -----------------------------
+
+async def _download_images(
+    client: httpx.AsyncClient,
+    base_url: str,
+    history_obj: Dict[str, Any],
+    prompt_id: str,
+    out_dir: Path,
+    view_mode: str,
+) -> List[Path]:
+    """
+    Download images from history using either 'path' or 'query' mode.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    saved: List[Path] = []
+    found_any = False
+
+    for outv in _iter_image_descriptors_from_history(history_obj, prompt_id):
+        images = outv.get("images", [])
+        if not isinstance(images, list) or not images:
+            continue
+        found_any = True
+        for item in images:
+            if not isinstance(item, dict):
+                continue
+            filename = (item.get("filename") or "").strip()
+            subfolder = item.get("subfolder", "")
+            folder_type = item.get("type", "output")
+            if not filename:
+                continue
+
+            print(f"[HISTORY] chosen file='{filename}' type='{folder_type}' subfolder='{subfolder if subfolder else '(empty)'}'")
+
+            delay = 0.8
+            data: Optional[bytes] = None
+            for attempt in range(1, 3):
+                try:
+                    if view_mode == "query":
+                        data = await _download_via_view_query(client, base_url, folder_type, subfolder, filename)
+                    else:
+                        data = await _download_via_view_path(client, base_url, folder_type, subfolder, filename)
+                    break
+                except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
+                    print(f"DEBUG comfy download attempt#{attempt} failed: {repr(e)}")
+                    if attempt < 2:
+                        await asyncio.sleep(delay)
+                        delay *= 1.7
+                        continue
+                except Exception as e:
+                    print(f"DEBUG comfy download unexpected error (will try FS fallback): {repr(e)}")
+
+            if data is None:
+                data = _fs_fallback_read(folder_type, subfolder, filename)
+
+            if data is None:
+                print(f"DEBUG comfy: skip missing image filename='{filename}' type='{folder_type}' subfolder='{subfolder}'")
+                continue
+
+            suffix = Path(filename).suffix or ".png"
+            target = out_dir / f"img_{uuid.uuid4().hex}{suffix}"
+            target.write_bytes(data)
+            print(f"DEBUG comfy saved image: {target.name} bytes={len(data)}")
+            saved.append(target)
+
+    if not found_any:
+        print("DEBUG comfy: no images found in history object (iter yielded none).")
+
+    return saved
+
+# -----------------------------
+# Public entry points (Comfy job)
+# -----------------------------
+
+async def generate_from_prompt_dict(
+    prompt_dict: Dict[str, Any],
+    out_dir: Path,
+    *,
+    positive_text: Optional[str] = None,
+    negative_text: Optional[str] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    steps: Optional[int] = None,
+    cfg: Optional[float] = None,
+    sampler_name: Optional[str] = None,
+    scheduler: Optional[str] = None,
+    denoise: Optional[float] = None,
+    seed: Optional[int] = None,
+    host: str = "127.0.0.1",
+    port: int = 8188,
+    max_wait_sec: float = 150.0,
+    poll_interval: float = 1.0,
+    copy_bridge_artifacts: bool = True,
+) -> List[Path]:
+    """
+    Submit a ComfyUI API prompt dict, poll history, and download images to out_dir.
+    Additionally (when copy_bridge_artifacts=True), copy discovery artifacts
+    (tunnel_url.json) from the remote into outputs/images/bridge/ for the Web UI.
+
+    Selects view mode automatically (path for local, query for remote) or via env override.
+
+    Caller responsibilities:
+    - Local/LAN: host=127.0.0.1 oder LAN-IP, Port 8188; APP_COMFY_SCHEME unset oder 'http'; APP_COMFY_FORCE_VIEW_MODE auto/path.
+    - Remote (Cloudflared): host=<tunnel-host>, Port 443; setze APP_COMFY_SCHEME=https und APP_COMFY_FORCE_VIEW_MODE=query.
+    """
+    payload = override_prompt_inplace(
+        body=prompt_dict,
+        positive_text=positive_text,
+        negative_text=negative_text,
+        width=width,
+        height=height,
+        steps=steps,
+        cfg=cfg,
+        sampler_name=sampler_name,
+        scheduler=scheduler,
+        denoise=denoise,
+        seed=seed,
+    )
+
+    conn = ComfyConnection(
+        host=host,
+        port=port,
+        scheme=(_env_str("APP_COMFY_SCHEME") or None)
+    )
+    base = conn.base
+    view_mode = _select_view_mode(conn.host)
+    print(f"[COMFY VIEW MODE] {view_mode} (host={conn.host})")
+    print(f"[COMFY ENDPOINTS] prompt={base}/prompt history={base}/history/{{prompt_id}} view={'/api/view?...' if view_mode=='query' else '/view/...'}")
+
+    async with httpx.AsyncClient(limits=_limits(), timeout=_timeout(max_wait_sec + 30)) as client:
+        # Best-effort: copy bridge artifacts up-front — only in remote/query mode and for non-private hosts (true tunnels)
+        try:
+            parsed = httpx.URL(base)
+            host_is_private = _is_private_or_local_host(parsed.host or "")
+        except Exception:
+            host_is_private = False
+
+        if copy_bridge_artifacts and view_mode == "query" and not host_is_private:
+            try:
+                await _copy_bridge_artifacts(client, base, view_mode, _LOCAL_BRIDGE_DIR)
+            except Exception as e:
+                print(f"[BRIDGE] pre-copy error (ignored): {repr(e)}")
+
+        prompt_id = await _post_prompt(client, base, payload)
+        history_obj = await _poll_history_ready(client, base, prompt_id, max_wait_sec=max_wait_sec, poll_interval=poll_interval)
+
+        # Try again after generation (common case: artifacts appear during/after runs)
+        if copy_bridge_artifacts and view_mode == "query" and not host_is_private:
+            try:
+                await _copy_bridge_artifacts(client, base, view_mode, _LOCAL_BRIDGE_DIR)
+            except Exception as e:
+                print(f"[BRIDGE] post-copy error (ignored): {repr(e)}")
+
+        images = await _download_images(client, base, history_obj, prompt_id, out_dir=Path(out_dir), view_mode=view_mode)
+    return images
+
+async def sync_bridge_artifacts(
+    *,
+    host: str,
+    port: int,
+    view_mode: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Explicitly fetch tunnel_url.json from the active ComfyUI host and
+    save it into outputs/images/bridge/, so the Web UI (/static/bridge/...) can read it.
+
+    Usage:
+      - Call right after switching to remote mode in the UI, on app start, and on reload.
+      - Returns a JSON summary: {"saved": N, "errors": M, "host": "...", "base": "...", "view_mode": "query|path"}.
+
+    Notes:
+      - Enforces host policy (APP_ALLOW_REMOTE_BACKENDS=1 for non-local).
+      - Uses APP_COMFY_SCHEME and APP_COMFY_FORCE_VIEW_MODE to determine base URL and view mode when not provided.
+    """
+    conn = ComfyConnection(
+        host=host,
+        port=port,
+        scheme=(_env_str("APP_COMFY_SCHEME") or None),
+    )
+    base = conn.base
+    vm = view_mode or _select_view_mode(conn.host)
+    print(f"[BRIDGE SYNC] view_mode={vm} host={conn.host} base={base}")
+
+    async with httpx.AsyncClient(limits=_limits(), timeout=_timeout(30.0)) as client:
+        result = await _copy_bridge_artifacts(client, base, vm, _LOCAL_BRIDGE_DIR)
+        result.update({"host": host, "base": base, "view_mode": vm})
+        return result
+
+# -----------------------------
+# PULL_URL router (GET pull_url, POST apply_from_pull)
+# -----------------------------
+
+bridge_router = APIRouter()
+
+class ApplyFromPullIn(BaseModel):
+    pull_url: Optional[str] = None  # overrides env PULL_URL if provided
+
+class ApplyFromPullOut(BaseModel):
+    applied: bool
+    url: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    scheme: Optional[str] = None
+    error: Optional[str] = None
+    detail: Optional[str] = None
+
+def _short_timeout() -> httpx.Timeout:
+    # Short pulls to keep UI snappy; configurable via env
+    t = float(_env_int("APP_PULL_TIMEOUT_SEC", 3))
+    t = max(1.0, min(t, 15.0))
+    return httpx.Timeout(connect=2.0, read=t, write=2.0, pool=2.0)
+
+async def _pull_json_with_retries(url: str) -> Dict[str, Any]:
+    """
+    Fetch JSON from 'url' with retries and a cache-busting query param.
+    Expected structure: {"url": "https://<tunnel-host>[:port]"} or {"public_url": "..."} or {"comfy_url": "..."}.
+    """
+    retries = int(_env_int("APP_PULL_RETRIES", 3))
+    base_delay = 0.5
+    # add cachebuster
+    sep = "&" if "?" in url else "?"
+    url_cb = f"{url}{sep}t={int(time.time()*1000)}"
+    last_exc: Optional[Exception] = None
+    async with httpx.AsyncClient(limits=_limits(), timeout=_short_timeout(), follow_redirects=True) as client:
+        for attempt in range(1, retries + 1):
+            try:
+                r = await client.get(url_cb)
+                r.raise_for_status()
+                j = r.json()
+                if not isinstance(j, dict):
+                    raise ValueError("pull_json_not_object")
+                return j
+            except Exception as e:
+                last_exc = e
+                if attempt >= retries:
+                    break
+                await asyncio.sleep(base_delay)
+                base_delay *= 1.7
+    raise RuntimeError(f"pull_failed: {last_exc}")
+
+def _extract_url_field(j: Dict[str, Any]) -> Optional[str]:
+    """
+    Accept multiple possible keys to be tolerant: 'url', 'public_url', 'comfy_url'.
+    """
+    for k in ("url", "public_url", "comfy_url"):
+        val = j.get(k)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+def _parse_url_host_port_scheme(u: str) -> Tuple[str, int, str]:
+    """
+    Parse a URL into (host, port, scheme) with defaults (https→443, http→80).
+    """
+    up = urlparse(u)
+    scheme = (up.scheme or "https").lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError("unsupported_scheme")
+    host = (up.hostname or up.netloc or "").strip()
+    if not host:
+        raise ValueError("missing_host")
+    if up.port:
+        port = int(up.port)
+    else:
+        port = 443 if scheme == "https" else 80
+    if port < 1 or port > 65535:
+        raise ValueError("invalid_port")
+    return host, port, scheme
+
+async def _apply_remote_settings(host: str, port: int, scheme: str) -> None:
+    """
+    Apply settings by calling the local FastAPI endpoints in-order.
+    - image_allow_cloud -> true
+    - image_backend -> comfyui
+    - comfy_remote -> host/port/scheme
+    - comfy_mode -> remote
+    """
+    base = _INTERNAL_API_BASE
+    async with httpx.AsyncClient(limits=_limits(), timeout=_short_timeout()) as client:
+        # 1) allow cloud
+        r1 = await client.post(f"{base}/api/settings/image_allow_cloud", json={"allow": True})
+        if r1.status_code >= 300:
+            raise RuntimeError(f"image_allow_cloud_failed:{r1.status_code}")
+        # 2) switch backend
+        r2 = await client.post(f"{base}/api/settings/image_backend", json={"backend": "comfyui"})
+        if r2.status_code >= 300:
+            raise RuntimeError(f"image_backend_failed:{r2.status_code} {r2.text[:200]}")
+        # 3) set remote target
+        r3 = await client.post(f"{base}/api/settings/comfy_remote", json={"host": host, "port": port, "scheme": scheme})
+        if r3.status_code >= 300:
+            raise RuntimeError(f"comfy_remote_failed:{r3.status_code} {r3.text[:200]}")
+        # 4) set mode
+        r4 = await client.post(f"{base}/api/settings/comfy_mode", json={"mode": "remote"})
+        if r4.status_code >= 300:
+            raise RuntimeError(f"comfy_mode_failed:{r4.status_code} {r4.text[:200]}")
+
+@bridge_router.get("/settings/pull_url")
+async def get_pull_url():
+    """
+    Return the configured PULL_URL for UI diagnostics.
+    """
+    pull = _env_str("PULL_URL", "")
+    return {"pull_url": pull or ""}
+
+@bridge_router.post("/bridge/apply_from_pull", response_model=ApplyFromPullOut)
+async def apply_from_pull(payload: ApplyFromPullIn = Body(default_factory=ApplyFromPullIn)):
+    """
+    Server-side "one-click" apply:
+    - Determine pull_url (body.pull_url or env PULL_URL)
+    - Fetch JSON with timeout/retries (expects a field 'url' or compatible)
+    - Parse host/port/scheme
+    - Apply via local settings endpoints (idempotent)
+    - Return applied parameters for UI to display
+    """
+    pull_url = (payload.pull_url or _env_str("PULL_URL", "")).strip()
+    if not pull_url:
+        return JSONResponse(
+            status_code=400,
+            content=ApplyFromPullOut(applied=False, error="missing_pull_url", detail="Configure PULL_URL in .env or pass in body").model_dump()
+        )
+
+    try:
+        doc = await _pull_json_with_retries(pull_url)
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content=ApplyFromPullOut(applied=False, error="pull_fetch_failed", detail=str(e)).model_dump()
+        )
+
+    url_val = _extract_url_field(doc)
+    if not url_val or not (url_val.startswith("http://") or url_val.startswith("https://")):
+        return JSONResponse(
+            status_code=400,
+            content=ApplyFromPullOut(applied=False, error="invalid_pull_payload", detail="Missing or invalid 'url' field").model_dump()
+        )
+
+    try:
+        host, port, scheme = _parse_url_host_port_scheme(url_val)
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content=ApplyFromPullOut(applied=False, error="parse_error", detail=str(e)).model_dump()
+        )
+
+    # Policy check (warn but do not block here; settings endpoint may enforce further)
+    try:
+        _assert_image_backend_host_policy(host)
+    except AssertionError as e:
+        # Continue to apply; policy for image backend selection is enforced elsewhere as well.
+        print(f"[PULL][policy] warning: {e}")
+
+    try:
+        await _apply_remote_settings(host, port, scheme)
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content=ApplyFromPullOut(applied=False, url=url_val, host=host, port=port, scheme=scheme, error="apply_failed", detail=str(e)).model_dump()
+        )
+
+    return ApplyFromPullOut(applied=True, url=url_val, host=host, port=port, scheme=scheme)
+
+# End router
+```
+
+---
+
+### config_generator.py
+
+```py
+# config_generator.py
+#
+# Generate local NVIDIA configuration from hardware.json with tier-specific
+# STT/LLM/Image settings and scheduler mode. Writes a single YAML file.
+# No runtime validation, no model downloads, no network calls.
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Dict
+
+import yaml
+
+GIB = 1024**3
+SCHEMA_VERSION = 1
+
+# Tier thresholds (non-aggregated, single GPU)
+TIER_MINIMUMS: dict[str, int] = {
+    "6gb": 6 * GIB,
+    "8gb": 8 * GIB,
+    "16gb": 16 * GIB,
+    "24gb": 24 * GIB,
+}
+
+DEFAULT_HARDWARE_PATH = Path("/app/config/hardware.json")
+DEFAULT_CONFIG_PATH = Path("/app/config/generated.yaml")
+
+
+class ConfigurationError(ValueError):
+    """Report invalid input or unsuccessful configuration generation."""
+
+
+def _integer(data: dict[str, Any], key: str, minimum: int = 0) -> int:
+    """Get an integer >= minimum from a dict, otherwise raise."""
+    value = data.get(key)
+    if type(value) is not int or value < minimum:
+        raise ConfigurationError(
+            f"Hardware field '{key}' must be an integer >= {minimum}."
+        )
+    return value
+
+
+def validate_hardware(data: object) -> dict[str, Any]:
+    """Validate and normalize the report without replacing its metadata."""
+    if not isinstance(data, dict):
+        raise ConfigurationError("Hardware file must contain a JSON object.")
+
+    version = data.get("schema_version")
+    if type(version) is not int or version != SCHEMA_VERSION:
+        raise ConfigurationError("Hardware schema version missing or unsupported.")
+    if data.get("memory_unit") != "GiB":
+        raise ConfigurationError("Hardware field 'memory_unit' must be 'GiB'.")
+
+    apple_silicon = data.get("is_apple_silicon")
+    if type(apple_silicon) is not bool:
+        raise ConfigurationError("Hardware field 'is_apple_silicon' must be boolean.")
+    if apple_silicon:
+        raise ConfigurationError("Apple Silicon is not supported for this local profile.")
+
+    index = _integer(data, "gpu_index")
+    count = _integer(data, "gpu_count", 1)
+    if index >= count:
+        raise ConfigurationError("GPU index is out of bounds for detected GPUs.")
+
+    identity: dict[str, str] = {}
+    for key in ("gpu_uuid", "gpu_name"):
+        value = data.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigurationError(f"Hardware field '{key}' must be a non-empty string.")
+        identity[key] = value.strip()
+
+    total = _integer(data, "vram_total_bytes", 1)
+    free = _integer(data, "vram_free_bytes")
+    used = _integer(data, "vram_used_bytes")
+    if free > total or used > total or free + used > total:
+        raise ConfigurationError("Hardware file contains inconsistent VRAM values.")
+
+    return {
+        "schema_version": version,
+        "memory_unit": "GiB",
+        "is_apple_silicon": apple_silicon,
+        "gpu_index": index,
+        "gpu_count": count,
+        **identity,
+        "vram_total_bytes": total,
+        "vram_free_bytes": free,
+        "vram_used_bytes": used,
+    }
+
+
+def select_tier(total_bytes: int, override: str | None = None) -> str:
+    """Select by single-device capacity; allow smaller or equal profile overrides."""
+    if type(total_bytes) is not int or total_bytes < TIER_MINIMUMS["6gb"]:
+        raise ConfigurationError(
+            "Local GPU image profiles require at least 6 GiB VRAM on one NVIDIA GPU; "
+            "configure CPU/remote separately."
+        )
+
+    detected = "6gb"
+    for name, minimum in TIER_MINIMUMS.items():
+        if total_bytes >= minimum:
+            detected = name
+
+    if override is None or override == "":
+        return detected
+    if not isinstance(override, str) or override not in TIER_MINIMUMS:
+        raise ConfigurationError("SLAIDSHOW_TIER must be 6gb, 8gb, 16gb or 24gb.")
+    if TIER_MINIMUMS[override] > total_bytes:
+        raise ConfigurationError(
+            f"Profile '{override}' exceeds the capacity of the selected GPU; "
+            f"auto-detected: '{detected}'."
+        )
+    # Allow smaller profile overrides.
+    return override
+
+
+def _tier_presets(tier: str) -> Dict[str, Any]:
+    """
+    Return tier-specific runtime presets without performing any validation
+    or downloads. These are conservative but usable defaults aligned to
+    the VRAM tiers in the project brief.
+    """
+    # Common image backend base URL (local ComfyUI service by default)
+    image_base_url = "http://127.0.0.1:8188"
+    ollama_base_url = "http://127.0.0.1:11434"
+
+    if tier == "6gb":
+        # 6–8 GiB: CPU STT, small quant LLM, SD1.5 + LCM @512, sequential
+        return {
+            "stt": {
+                "backend": "faster-whisper",
+                "device": "cpu",
+                "compute_type": "int8",
+                "model": "small-int8",  # symbolic; app may map to local cache
+                "model_selection_required": False,
+            },
+            "llm": {
+                "backend": "ollama",
+                "base_url": ollama_base_url,
+                "model": "qwen3:1.7b-q4",
+                "selection_status": "selected_by_tier",
+                "license_verified": False,
+                "artifact_verified": False,
+            },
+            "image": {
+                "backend": "comfyui",
+                "base_url": image_base_url,
+                "intended_model_family": "sd1.5",
+                "intended_acceleration": "lcm",
+                "width": 512,
+                "height": 512,
+                "steps": 4,
+                "workflow_path": None,
+                "checkpoint_path": None,
+                "lcm_artifact_path": None,
+                "validated": False,
+            },
+            "scheduler": {
+                "enabled": True,
+                "mode": "sequential",
+                "parallel_allowed": False,
+            },
+        }
+
+    if tier == "8gb":
+        # 8–12 GiB: GPU STT (cuda), SD1.5+LCM @768, sequential
+        return {
+            "stt": {
+                "backend": "faster-whisper",
+                "device": "cuda",
+                "compute_type": "float16",  # explicit fp16 for stability
+                "model": "medium-fp16",     # symbolic
+                "model_selection_required": False,
+            },
+            "llm": {
+                "backend": "ollama",
+                "base_url": ollama_base_url,
+                "model": "qwen3:4b-q4",
+                "selection_status": "selected_by_tier",
+                "license_verified": False,
+                "artifact_verified": False,
+            },
+            "image": {
+                "backend": "comfyui",
+                "base_url": image_base_url,
+                "intended_model_family": "sd1.5",
+                "intended_acceleration": "lcm",
+                "width": 768,
+                "height": 768,
+                "steps": 4,
+                "workflow_path": None,
+                "checkpoint_path": None,
+                "lcm_artifact_path": None,
+                "validated": False,
+            },
+            "scheduler": {
+                "enabled": True,
+                "mode": "sequential",
+                "parallel_allowed": False,  # <12 GiB stays sequential
+            },
+        }
+
+    if tier == "16gb":
+        # 12–16 GiB effective: allow parallel; FLUX.2 small 4B FP8; larger LLM
+        return {
+            "stt": {
+                "backend": "faster-whisper",
+                "device": "cuda",
+                "compute_type": "float16",
+                "model": "medium-fp16",
+                "model_selection_required": False,
+            },
+            "llm": {
+                "backend": "ollama",
+                "base_url": ollama_base_url,
+                "model": "gemma4:26b-a4b-q4",
+                "selection_status": "selected_by_tier",
+                "license_verified": False,
+                "artifact_verified": False,
+            },
+            "image": {
+                "backend": "comfyui",
+                "base_url": image_base_url,
+                "intended_model_family": "flux.2-small",
+                "intended_acceleration": "fp8",
+                "width": 1024,
+                "height": 1024,
+                "steps": 6,
+                "workflow_path": None,
+                "checkpoint_path": None,
+                "lcm_artifact_path": None,
+                "validated": False,
+            },
+            "scheduler": {
+                "enabled": True,
+                "mode": "parallel",
+                "parallel_allowed": True,  # ≥12 GiB per spec
+            },
+        }
+
+    if tier == "24gb":
+        # 16+ GiB: FLUX.2 small 4B + optional Qwen-Image 2.1; biggest LLM
+        return {
+            "stt": {
+                "backend": "faster-whisper",
+                "device": "cuda",
+                "compute_type": "float16",
+                "model": "large-v2-fp16",  # symbolic
+                "model_selection_required": False,
+            },
+            "llm": {
+                "backend": "ollama",
+                "base_url": ollama_base_url,
+                "model": "qwen3.8:27b-q4",
+                "selection_status": "selected_by_tier",
+                "license_verified": False,
+                "artifact_verified": False,
+            },
+            "image": {
+                "backend": "comfyui",
+                "base_url": image_base_url,
+                "intended_model_family": "flux.2-small+qwenimage2.1",
+                "intended_acceleration": "fp8",
+                "width": 1024,
+                "height": 1024,
+                "steps": 6,
+                "workflow_path": None,
+                "checkpoint_path": None,
+                "lcm_artifact_path": None,
+                "validated": False,
+            },
+            "scheduler": {
+                "enabled": True,
+                "mode": "parallel",
+                "parallel_allowed": True,
+            },
+        }
+
+    # Fallback (should not occur): use safest 6gb
+    return _tier_presets("6gb")
+
+
+def build_config(hardware: dict[str, Any], tier: str) -> dict[str, Any]:
+    """Compose a tier-specific configuration without contacting services."""
+    validated = validate_hardware(hardware)
+    selected = select_tier(validated["vram_total_bytes"], tier)
+    hardware_snapshot = {
+        key: value
+        for key, value in validated.items()
+        if key not in {"schema_version", "memory_unit"}
+    }
+
+    presets = _tier_presets(selected)
+    # Conservative scheduler reserve
+    reserve_bytes = 512 * 1024**2
+    parallel_allowed = bool(presets["scheduler"]["parallel_allowed"])
+    mode = "parallel" if parallel_allowed else "sequential"
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "tier": selected,
+        "hardware": {
+            **hardware_snapshot,
+            "memory_unit": "bytes",
+            "memory_values_are_snapshot": True,
+            "gpu_index_scope": "hardware_detection_environment",
+            "runtime_gpu_uuid_verification_required": True,
+        },
+        "readiness": {
+            "runtime_integration_required": True,
+            "model_validation_required": True,
+            "workflow_validation_required": True,
+            "gpu_acceptance_test_required": True,
+        },
+        "runtime": {
+            "offline": True,
+            "cloud_enabled": False,
+            "remote_backends_enabled": False,
+            "frontend_assets": "local",
+            "event_transport": "sse",
+        },
+        "stt": presets["stt"],
+        "llm": presets["llm"],
+        "image": presets["image"],
+        "scheduler": {
+            "enabled": True,
+            "mode": mode,
+            "parallel_allowed": parallel_allowed,
+            "require_confirmed_unload": not parallel_allowed,
+            "on_unload_failure": "block_next_gpu_phase",
+            "transition_timeout_seconds": 60,
+            "vram_reserve_bytes": reserve_bytes,
+            "reserve_requires_hardware_validation": True,
+            "measure_free_vram_before_each_phase": not parallel_allowed,
+            "phase_budget_validation_required": not parallel_allowed,
+        },
+        "downloads": {
+            # Downloads remain disabled until artifact/license verification exists.
+            "enabled": False,
+            "reason": "model_artifacts_and_licenses_require_validation",
+            "artifacts": [],
+        },
+        "paths": {
+            "models": "/app/models",
+            "outputs": "/app/outputs",
+            "recordings": "/app/recordings",
+        },
+    }
+
+
+def _path(
+    explicit: str | Path | None,
+    environment_key: str,
+    default: Path,
+) -> Path:
+    """Reject empty paths instead of interpreting them as the current directory."""
+    raw = (
+        explicit
+        if explicit is not None
+        else os.environ.get(environment_key, str(default))
+    )
+    if not isinstance(raw, (str, Path)):
+        raise ConfigurationError(f"{environment_key}: invalid file path.")
+    if isinstance(raw, str) and not raw.strip():
+        raise ConfigurationError(f"{environment_key} must not be empty.")
+    try:
+        return Path(raw).expanduser()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{environment_key}: failed to resolve path: {exc}"
+        ) from exc
+
+
+def _validate_paths(source: Path, target: Path) -> None:
+    """Protect the hardware report; ensure distinct files and no symlinks."""
+    try:
+        identical = source.resolve() == target.resolve()
+        if not identical and source.exists() and target.exists():
+            identical = source.samefile(target)
+        if identical:
+            raise ConfigurationError("Hardware file and config file must not be identical.")
+        if target.is_symlink():
+            raise ConfigurationError("Config file must not be a symbolic link.")
+    except (OSError, RuntimeError, ValueError) as exc:
+        if isinstance(exc, ConfigurationError):
+            raise
+        raise ConfigurationError(f"Failed to check file paths: {exc}") from exc
+
+
+def _write_yaml_atomic(
+    config: dict[str, Any],
+    target: Path,
+    *,
+    overwrite: bool = False,
+) -> None:
+    """Write YAML atomically; preserve an existing file unless overwrite=True."""
+    temporary: str | None = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_symlink():
+            raise ConfigurationError("Config file must not be a symbolic link.")
+        if target.exists() and not overwrite:
+            raise ConfigurationError(
+                f"Config already exists: {target}; use --force to replace."
+            )
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = handle.name
+            yaml.safe_dump(config, handle, allow_unicode=True, sort_keys=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        if overwrite:
+            os.replace(temporary, target)
+            temporary = None
+        else:
+            # Atomic publish using a hard link; fail closed if not supported.
+            try:
+                os.link(temporary, target)
+            except FileExistsError as exc:
+                raise ConfigurationError(
+                    f"Config already exists: {target}; use --force to replace."
+                ) from exc
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        if isinstance(exc, ConfigurationError):
+            raise
+        raise ConfigurationError(
+            f"Failed to persist configuration safely: {target}: {exc}"
+        ) from exc
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def generate(
+    hardware_path: str | Path | None = None,
+    output_path: str | Path | None = None,
+    tier: str | None = None,
+    *,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Read hardware and persist configuration without contacting services."""
+    if type(overwrite) is not bool:
+        raise ConfigurationError("overwrite must be boolean.")
+
+    source = _path(hardware_path, "HARDWARE_PATH", DEFAULT_HARDWARE_PATH)
+    target = _path(output_path, "CONFIG_PATH", DEFAULT_CONFIG_PATH)
+    _validate_paths(source, target)
+
+    try:
+        with source.open(encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ConfigurationError(f"Failed to read hardware file: {source}: {exc}") from exc
+
+    hardware = validate_hardware(raw)
+    override = tier if tier is not None else os.environ.get("SLAIDSHOW_TIER")
+    selected = select_tier(hardware["vram_total_bytes"], override)
+    config = build_config(hardware, selected)
+    _write_yaml_atomic(config, target, overwrite=overwrite)
+    return config
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: generate tier-specific config; replace only with --force."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Generate a tier-specific local NVIDIA configuration; "
+            "existing files are only replaced with --force."
+        )
+    )
+    parser.add_argument("--hardware", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--tier",
+        choices=tuple(TIER_MINIMUMS),
+        help="Takes precedence over SLAIDSHOW_TIER when provided.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing configuration file atomically.",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        target = _path(args.output, "CONFIG_PATH", DEFAULT_CONFIG_PATH)
+        config = generate(
+            args.hardware,
+            target,
+            args.tier,
+            overwrite=args.force,
+        )
+    except ConfigurationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"Config written: {target} "
+        f"(tier {config['tier']}, STT={config['stt']['backend']}:{config['stt']['device']}, "
+        f"scheduler={config['scheduler']['mode']}).",
+        file=sys.stderr,
+    )
+    print(
+        "Note: Models/workflows are not downloaded; Ollama and ComfyUI must be provided separately. "
+        "The application should load and apply this YAML at startup.",
+        file=sys.stderr,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+---
+
+### docker-compose.yml
+
+```yml
+# Docker Compose file for slAIdshow (complete, English comments)
+
+version: "3.9"
+
+name: slaidshow
+
+# Common defaults for environment variables
+x-app-env: &app_env
+  # FastAPI app bind/ports
+  APP_BIND_HOST: 0.0.0.0
+  APP_BIND_PORT: "8080"
+
+  # Standard in-container paths
+  CONFIG_PATH: /app/config/generated.yaml
+  CONFIG_DIR: /app/config
+  MODELS_DIR: /app/models
+  OUTPUTS_DIR: /app/outputs
+  RECORDINGS_DIR: /app/recordings
+
+  # Hardware/Tier files
+  HARDWARE_JSON: /app/config/hardware.json
+  GENERATED_YAML: /app/config/generated.yaml
+
+  # Orchestration endpoints (app reaches services by hostname)
+  APP_OLLAMA_HOST: ollama
+  APP_OLLAMA_PORT: "11434"
+  IMAGE_BACKEND: comfyui
+  APP_COMFY_MODE: auto          # auto | local | remote (app logic from .env.example)
+  APP_COMFY_HOST: comfyui
+  APP_COMFY_PORT: "8188"
+  APP_DISABLE_COMFYUI: "0"
+
+  # Cloud backends explicitly disabled until approved
+  ALLOW_CLOUD_IMAGE_BACKEND: "0"
+  APP_ALLOW_REMOTE_BACKENDS: "0"
+  APP_OLLAMA_DISABLE: "0"
+  APP_OLLAMA_WARMUP_ENABLE: "1"
+
+  # VRAM auto-detection override (empty = auto)
+  # Valid per project: 6gb / 8gb / 16gb / 24gb
+  SLAIDSHOW_TIER:
+
+  # 6‑GB default model (effectively set via config_generator.py)
+  APP_OLLAMA_MODEL: qwen3:1.7b-q4
+
+  # Default image size (may be overridden by generated.yaml/ENV)
+  APP_IMAGE_WIDTH: "1280"
+  APP_IMAGE_HEIGHT: "720"
+  APP_COMFY_WORKFLOW: /app/workflows/text2img_SD15-FP16.json
+
+services:
+  # One-shot initialization: Hardware → Config → Validate → Download-policy
+  init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: slaidshow_init
+    restart: "no"
+    env_file:
+      - ./.env
+      - ./.env.example
+    environment:
+      <<: *app_env
+    volumes:
+      - ./config:/app/config
+      - ./models:/app/models
+      - ./outputs:/app/outputs
+      - ./recordings:/app/recordings
+      - ./workflows:/app/workflows:ro
+      - ./models/faster-whisper-cache:/app/models/faster-whisper-cache
+    # Runs the four init steps sequentially; failures are non-fatal for Compose,
+    # acceptance is performed separately (Makefile "install"/"validate").
+    command: >
+      bash -lc "
+        set -e;
+        echo '==> Step 1/4: hardware_detect.py';
+        python /app/hardware_detect.py --out ${HARDWARE_JSON:-/app/config/hardware.json} || true;
+        echo '==> Step 2/4: config_generator.py';
+        python /app/config_generator.py
+          --hardware ${HARDWARE_JSON:-/app/config/hardware.json}
+          --output ${GENERATED_YAML:-/app/config/generated.yaml}
+          ${SLAIDSHOW_TIER:+--tier ${SLAIDSHOW_TIER}} || true;
+        echo '==> Step 3/4: runtime_config.py (validate)';
+        python /app/runtime_config.py --config ${GENERATED_YAML:-/app/config/generated.yaml} || true;
+        echo '==> Step 4/4: model_downloader.py (policy only)';
+        python /app/model_downloader.py --config ${GENERATED_YAML:-/app/config/generated.yaml} --policy-only || true;
+        echo '==> Init complete (policy check done, no downloads performed).'
+      "
+
+  # Ollama (LLM) – GPU optional; falls back to CPU when unavailable
+  ollama:
+    image: ollama/ollama:latest
+    container_name: slaidshow_ollama
+    restart: unless-stopped
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+              count: "all"
+              driver: nvidia
+        limits:
+          cpus: "4.0"
+          memory: 8g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+
+  # ComfyUI – local image backend, GPU-accelerated; keep autoload small
+  comfyui:
+    image: ghcr.io/comfyanonymous/comfyui:latest
+    container_name: slaidshow_comfyui
+    restart: unless-stopped
+    environment:
+      - CLI_ARGS=--listen 0.0.0.0 --port 8188 --quick-test-start
+    volumes:
+      - comfyui-models:/root/ComfyUI/models
+      - comfyui-output:/root/ComfyUI/output
+      - ./workflows:/app/workflows:ro
+    ports:
+      - "127.0.0.1:8188:8188"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+              count: "all"
+              driver: nvidia
+        limits:
+          cpus: "6.0"
+          memory: 12g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8188/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 25s
+
+  # Backend (FastAPI app) – uses generated.yaml, scheduler, bridges
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: slaidshow_backend
+    depends_on:
+      ollama:
+        condition: service_healthy
+      comfyui:
+        condition: service_started
+    restart: unless-stopped
+    env_file:
+      - ./.env
+      - ./.env.example
+    environment:
+      <<: *app_env
+      # Default: CPU for STT; VRAM-budget scheduler coordinates GPU workloads
+      APP_FASTER_WHISPER_DEVICE: "cpu"
+      APP_FASTER_WHISPER_COMPUTE_TYPE: "int8"
+    volumes:
+      - ./config:/app/config
+      - ./models:/app/models
+      - ./outputs:/app/outputs
+      - ./recordings:/app/recordings
+      - ./workflows:/app/workflows:ro
+      - ./models/faster-whisper-cache:/app/models/faster-whisper-cache
+    ports:
+      - "127.0.0.1:8080:8080"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+              count: "all"
+              driver: nvidia
+        limits:
+          cpus: "8.0"
+          memory: 8g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 35s
+    command: >
+      bash -lc "
+        set -euo pipefail;
+        # Runtime validation of existing configuration (no downloads)
+        python /app/runtime_config.py --config ${GENERATED_YAML:-/app/config/generated.yaml} || true;
+        # Start the app; use uvicorn directly on app.py
+        exec python -m uvicorn app:app --host ${APP_BIND_HOST:-0.0.0.0} --port ${APP_BIND_PORT:-8080} --workers 1 --timeout-graceful-shutdown 30
+      "
+
+volumes:
+  ollama:
+  comfyui-models:
+  comfyui-output:
+```
+
+---
+
+### hardware_detect.py
+
+```py
+# hardware_detect.py
+#
+# Discover one NVIDIA GPU via NVML and atomically persist its hardware profile
+# to JSON. No model downloads, no network calls, no runtime validation.
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import importlib
+import json
+import logging
+import os
+import platform
+import re
+import sys
+import tempfile
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+OUTPUT_PATH = Path("/app/config/hardware.json")
+_GIB = 1024**3
+LOGGER = logging.getLogger(__name__)
+
+
+class HardwareDetectionError(RuntimeError):
+    """Report unavailable hardware or unsuccessful persistence."""
+
+
+@dataclass(frozen=True)
+class HardwareProfile:
+    """Describe one GPU without aggregating memory across devices."""
+
+    vram_gb: float
+    gpu_name: str
+    gpu_count: int
+    cpu_ram_gb: float
+    os: str
+    is_apple_silicon: bool
+    gpu_index: int
+    gpu_uuid: str
+    vram_total_bytes: int
+    vram_free_bytes: int
+    vram_used_bytes: int
+
+
+def detect_cpu_ram() -> float:
+    """Return physical RAM in GiB, or zero when unavailable."""
+    try:
+        with open("/proc/meminfo", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024 / _GIB
+    except (OSError, ValueError, IndexError):
+        pass
+
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / _GIB
+    except (AttributeError, OSError, ValueError):
+        pass
+
+    if platform.system() == "Windows":
+
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("length", ctypes.c_uint32),
+                ("load", ctypes.c_uint32),
+                ("total_physical", ctypes.c_uint64),
+                ("available_physical", ctypes.c_uint64),
+                ("total_page_file", ctypes.c_uint64),
+                ("available_page_file", ctypes.c_uint64),
+                ("total_virtual", ctypes.c_uint64),
+                ("available_virtual", ctypes.c_uint64),
+                ("available_extended_virtual", ctypes.c_uint64),
+            ]
+
+        try:
+            state = MemoryStatus()
+            state.length = ctypes.sizeof(state)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(state)):
+                return state.total_physical / _GIB
+        except (AttributeError, OSError):
+            pass
+
+    return 0.0
+
+
+def detect_apple_silicon() -> bool:
+    """Identify Apple Silicon without treating unified memory as VRAM."""
+    return platform.system() == "Darwin" and platform.machine().lower() in {
+        "arm64",
+        "aarch64",
+    }
+
+
+def _text(value: object) -> str:
+    """Normalize NVML versions returning either bytes or text."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def detect_nvidia() -> list[HardwareProfile]:
+    """Read GPU counters and close successfully initialized NVML."""
+    try:
+        nvml = importlib.import_module("pynvml")
+    except ImportError as exc:
+        raise HardwareDetectionError(
+            "NVIDIA detection not available: install package 'pynvml'."
+        ) from exc
+
+    initialized = False
+    try:
+        try:
+            nvml.nvmlInit()
+            initialized = True
+        except Exception as exc:
+            raise HardwareDetectionError(
+                "Failed to initialize NVML. Check NVIDIA drivers and container GPU access."
+            ) from exc
+
+        count = nvml.nvmlDeviceGetCount()
+        ram = detect_cpu_ram()
+        profiles: list[HardwareProfile] = []
+
+        for index in range(count):
+            handle = nvml.nvmlDeviceGetHandleByIndex(index)
+            memory = nvml.nvmlDeviceGetMemoryInfo(handle)
+            total = int(memory.total)
+            free = int(memory.free)
+            used = int(memory.used)
+
+            if total <= 0 or min(free, used) < 0:
+                raise HardwareDetectionError(f"GPU {index} reports invalid VRAM values.")
+            if free > total or used > total or free + used > total:
+                raise HardwareDetectionError(f"GPU {index} reports inconsistent VRAM values.")
+
+            profiles.append(
+                HardwareProfile(
+                    vram_gb=total / _GIB,
+                    gpu_name=_text(nvml.nvmlDeviceGetName(handle)),
+                    gpu_count=count,
+                    cpu_ram_gb=ram,
+                    os=platform.system(),
+                    is_apple_silicon=False,
+                    gpu_index=index,
+                    gpu_uuid=_text(nvml.nvmlDeviceGetUUID(handle)),
+                    vram_total_bytes=total,
+                    vram_free_bytes=free,
+                    vram_used_bytes=used,
+                )
+            )
+
+        return profiles
+    except HardwareDetectionError:
+        raise
+    except Exception as exc:
+        raise HardwareDetectionError("Failed to read NVML data.") from exc
+    finally:
+        if initialized:
+            try:
+                nvml.nvmlShutdown()
+            except Exception as exc:  # noqa: BLE001
+                # NVML cleanup must not discard a successful snapshot.
+                LOGGER.warning("NVML shutdown failed: %s", exc)
+
+
+def _requested_index(gpu_index: int | None) -> int | None:
+    """Validate explicit selection before touching GPU hardware."""
+    if gpu_index is not None:
+        if type(gpu_index) is not int or gpu_index < 0:
+            raise HardwareDetectionError("GPU index must be a non-negative integer.")
+        return gpu_index
+
+    raw = os.environ.get("GPU_INDEX")
+    if raw is None:
+        return None
+    if not re.fullmatch(r"(?:0|[1-9][0-9]*)", raw):
+        raise HardwareDetectionError("GPU_INDEX must be a non-negative integer.")
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise HardwareDetectionError("GPU_INDEX is too large.") from exc
+
+
+def _write_json_atomic(data: dict[str, Any], path: Path) -> None:
+    """Write JSON atomically; replace target only after a durable temp write."""
+    temporary: str | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = handle.name
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temporary, path)
+        temporary = None
+    except (OSError, ValueError, TypeError) as exc:
+        raise HardwareDetectionError(
+            f"Failed to safely write hardware file: {path}"
+        ) from exc
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def detect(
+    gpu_index: int | None = None,
+    output_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Select one GPU and persist exact byte counters."""
+    requested = _requested_index(gpu_index)
+
+    if platform.system() == "Darwin":
+        label = "Apple Silicon" if detect_apple_silicon() else "macOS"
+        raise HardwareDetectionError(
+            f"{label} is not supported; NVIDIA NVML is required."
+        )
+
+    profiles = detect_nvidia()
+    if not profiles:
+        raise HardwareDetectionError(
+            "No NVIDIA GPU found. Check driver installation and NVML access."
+        )
+    if requested is None and len(profiles) > 1:
+        raise HardwareDetectionError(
+            "Multiple NVIDIA GPUs found: set GPU_INDEX or use --gpu-index."
+        )
+
+    selected = (
+        profiles[0]
+        if requested is None
+        else next(
+            (profile for profile in profiles if profile.gpu_index == requested),
+            None,
+        )
+    )
+    if selected is None:
+        raise HardwareDetectionError(f"GPU index {requested} is not available.")
+
+    if selected.vram_total_bytes < 6 * _GIB:
+        print(
+            f"Warning: GPU {selected.gpu_index} has less than 6 GiB VRAM.",
+            file=sys.stderr,
+        )
+
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "memory_unit": "GiB",
+        **asdict(selected),
+    }
+    target = Path(
+        output_path
+        if output_path is not None
+        else os.environ.get("HARDWARE_PATH", str(OUTPUT_PATH))
+    )
+    _write_json_atomic(result, target)
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run NVIDIA discovery without downloading or loading models."""
+    parser = argparse.ArgumentParser(
+        description="Discover NVIDIA hardware for slAIdshow."
+    )
+    parser.add_argument("--gpu-index", type=int)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args(argv)
+
+    try:
+        profile = detect(args.gpu_index, args.output)
+    except HardwareDetectionError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    target = args.output or Path(os.environ.get("HARDWARE_PATH", str(OUTPUT_PATH)))
+    print(
+        f"Hardware file written: {target} "
+        f"(GPU {profile['gpu_index']}: {profile['gpu_name']})",
+        file=sys.stderr,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+---
+
+### image_backend.py
+
+```py
+# image_backend.py
+# Production-ready image backend layer for slAIdshow.
+# - ComfyUI local (same host or LAN with discovery)
+# - ComfyUI remote (cloudflared or any reachable host)
+# - Pollinations cloud (v1 or GET)
+# Adds SSE "gallery:updated" broadcasting after each saved image.
+
+from __future__ import annotations
+
+import asyncio
+import ipaddress
+import json
+import os
+import re
+import shutil
+import time
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Optional, Set, Tuple, List, Dict, Callable, Awaitable
+
+import httpx
+from pydantic import BaseModel, Field, ValidationError
+
+from comfyui_bridge import generate_from_prompt_dict
+
+
+# ===========================
+# Event Broadcasting (SSE hook)
+# ===========================
+
+# Simple in-process async broadcaster. The FastAPI app should register exactly one
+# callback that knows how to deliver SSE events to connected clients.
+# This module does NOT import FastAPI objects directly to avoid cycles.
+
+_EventCallback = Callable[[str, dict], Awaitable[None]]
+_EVENT_LISTENERS: List[_EventCallback] = []
+
+
+def register_event_listener(cb: _EventCallback) -> None:
+    """
+    Register an async callback to deliver events.
+    Expected signature: async def cb(event_name: str, payload: dict) -> None
+    """
+    if cb not in _EVENT_LISTENERS:
+        _EVENT_LISTENERS.append(cb)
+
+
+def unregister_event_listener(cb: _EventCallback) -> None:
+    try:
+        _EVENT_LISTENERS.remove(cb)
+    except ValueError:
+        pass
+
+
+async def _send_event(name: str, payload: dict) -> None:
+    if not _EVENT_LISTENERS:
+        # No listeners registered (server not ready or running in offline tools)
+        return
+    # Deliver in parallel, but isolate failures.
+    tasks = []
+    for cb in list(_EVENT_LISTENERS):
+        try:
+            tasks.append(asyncio.create_task(cb(name, payload)))
+        except Exception as e:
+            print(f"[EVENT] scheduling error for {cb}: {e}")
+    if not tasks:
+        return
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
+    for d in done:
+        try:
+            _ = d.result()
+        except Exception as e:
+            print(f"[EVENT] listener failed: {type(e).__name__}: {e}")
+
+
+async def broadcast_gallery_updated(path: Path) -> None:
+    """
+    Broadcast 'gallery:updated' event after a new image is saved into outputs/images.
+    The frontend listens and reloads the gallery list via /api/images.
+    """
+    try:
+        stat = path.stat()
+        payload = {
+            "filename": path.name,
+            "rel": f"/static/{path.name}",
+            "size": stat.st_size,
+            "ts": int(stat.st_mtime),
+        }
+    except Exception:
+        # If stat fails (odd FS timing), send minimal payload
+        payload = {
+            "filename": path.name,
+            "rel": f"/static/{path.name}",
+            "ts": int(time.time()),
+        }
+    await _send_event("gallery:updated", payload)
+
+
+# ---------------------------
+# Env helpers & HTTP config
+# ---------------------------
+
+def _env_str(k: str, d: str) -> str:
+    return (os.getenv(k, d) or "").strip()
+
+
+def _env_int(k: str, d: int) -> int:
+    try:
+        return int(os.getenv(k, str(d)))
+    except Exception:
+        return d
+
+
+def _env_float(k: str, d: float) -> float:
+    try:
+        return float(os.getenv(k, str(d)))
+    except Exception:
+        return d
+
+
+def _env_bool01(k: str, d: int = 0) -> bool:
+    v = (os.getenv(k, str(d)) or "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+
+def _httpx_limits() -> httpx.Limits:
+    return httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=30.0)
+
+
+def _timeout_short() -> httpx.Timeout:
+    # General quick calls (health/object_info)
+    return httpx.Timeout(connect=2.5, read=5.0, write=4.0, pool=4.0)
+
+
+def _timeout_probe() -> httpx.Timeout:
+    # Very short probes for discovery/health
+    return httpx.Timeout(connect=1.2, read=2.0, write=1.5, pool=1.5)
+
+
+def _timeout_long(total: float) -> httpx.Timeout:
+    total = max(10.0, min(total, 240.0))
+    return httpx.Timeout(connect=8.0, read=total, write=8.0, pool=8.0)
+
+
+def _clamp_dim(v: Optional[int]) -> Optional[int]:
+    if v is None:
+        return None
+    x = max(64, min(2048, int(v)))
+    return x - (x % 8)
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _is_loopback(host: str) -> bool:
+    return host in {"127.0.0.1", "localhost"}
+
+
+def _is_in_allowed_subnets(ip: str, subnets_str: str) -> bool:
+    try:
+        ip_addr = ipaddress.ip_address(ip)
+    except Exception:
+        return False
+    parts = [p.strip() for p in (subnets_str or "").replace(",", " ").split() if p.strip()]
+    for cidr in parts:
+        try:
+            net = ipaddress.ip_network(cidr, strict=False)
+            if ip_addr in net:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _assert_image_backend_host_policy(host: str) -> None:
+    """
+    Image backend host policy:
+    - Always allow loopback.
+    - Remote only if APP_ALLOW_REMOTE_BACKENDS=1.
+    - If APP_ALLOWED_SUBNETS is set and host is an IP, it must match.
+    Hostnames (remote tunnels) may skip subnet check; global remote allow is sufficient.
+    """
+    if _is_loopback(host):
+        return
+    allow_remote = (
+        _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
+        or _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0)
+    )
+    if not allow_remote:
+        raise AssertionError(f"Only localhost allowed, got {host}")
+    subnets = _env_str("APP_ALLOWED_SUBNETS", "")
+    if not subnets:
+        return
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        # Hostname (e.g., Cloudflare) – skip subnet check
+        return
+    if not _is_in_allowed_subnets(host, subnets):
+        raise AssertionError(f"Remote host {host} not in allowed subnets ({subnets})")
+
+
+# ---------------------------
+# Unified size resolution
+# ---------------------------
+
+def _clamp8(v: int) -> int:
+    v = max(64, min(4096, int(v)))
+    return v - (v % 8)
+
+
+def _env_opt_int(name: str) -> Optional[int]:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _resolve_size_for_backend(backend_name: str, req_w: Optional[int], req_h: Optional[int]) -> tuple[Optional[int], Optional[int]]:
+    # 1) Request overrides
+    if isinstance(req_w, int) and req_w > 0 and isinstance(req_h, int) and req_h > 0:
+        return _clamp8(req_w), _clamp8(req_h)
+
+    # 2) Global
+    gw = _env_opt_int("APP_IMAGE_WIDTH")
+    gh = _env_opt_int("APP_IMAGE_HEIGHT")
+    if gw and gh:
+        return _clamp8(gw), _clamp8(gh)
+
+    # 3) Backend-specific
+    b = (backend_name or "").strip().lower()
+    if b == "comfyui":
+        cw = _env_opt_int("APP_COMFY_WIDTH")
+        ch = _env_opt_int("APP_COMFY_HEIGHT")
+        if cw and ch:
+            return _clamp8(cw), _clamp8(ch)
+    elif b == "pollinations":
+        pw = _env_opt_int("POLLINATIONS_WIDTH")
+        ph = _env_opt_int("POLLINATIONS_HEIGHT")
+        if pw and ph:
+            return _clamp8(pw), _clamp8(ph)
+
+    return None, None
+
+
+# ---------------------------
+# Abstract Interface
+# ---------------------------
+
+class ImageBackend:
+    async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative: str | None = None) -> Path:
+        raise NotImplementedError
+
+
+# ============================================================
+# Pollinations (Cloud) with Keyword-Style Negative Injection
+# ============================================================
+
+INJECTION_MODE = "append"  # 'append' or 'prepend'
+INJECTION_SEPARATOR = " "
+MAX_NEG_TERMS = 24
+MAX_CONSTRAINT_CHARS = 240
+DEFAULT_COLOR_BIAS = True
+
+
+def _is_german_text(text: str) -> bool:
+    if not text:
+        return False
+    lower = text.lower()
+    if any(ch in lower for ch in ("ä", "ö", "ü", "ß")):
+        return True
+    german_markers = {
+        " der ", " die ", " das ", " und ", " mit ", " ohne ", " kein ", " keine ", " einem ",
+        " einer ", " im ", " am ", " zum ", " zur ", " vom ", " für ", " nicht ", " auch ",
+        " wie ", " aber ", " weil ", " wenn ", " dann ", " dort ", " hier ", " auf ", " aus ",
+        " über ", " unter ", " hinter ", " vor ", " zwischen ", " werden ", " wurde ",
+    }
+    padded = f" {lower} "
+    matches = sum(1 for token in german_markers if token in padded)
+    return matches >= 2
+
+
+def _normalize_negative_terms(neg_text: str) -> List[str]:
+    if not neg_text:
+        return []
+    parts = re.split(r"[,\n;]+", neg_text)
+    cleaned: List[str] = []
+    seen = set()
+    for p in parts:
+        term = p.strip().strip('"').strip("'")
+        if not term:
+            continue
+        key = term.lower()
+        if key not in seen:
+            cleaned.append(term)
+            seen.add(key)
+        if len(cleaned) > MAX_NEG_TERMS:
+            cleaned = cleaned[:MAX_NEG_TERMS]
+    return cleaned
+
+
+def _term_in_prompt(term: str, prompt: str) -> bool:
+    t = term.lower().strip()
+    if not t:
+        return False
+    p = prompt.lower()
+    if " " in t:
+        return t in p
+    return re.search(rf"(^|[^a-z0-9]){re.escape(t)}([^a-z0-9]|$)", p) is not None
+
+
+RED_PRODUCE_EN = [
+    "red vegetables", "red fruits",
+    "tomatoes", "tomato",
+    "strawberries", "strawberry",
+    "red peppers", "bell peppers", "pepper", "chili peppers", "chili",
+    "red apples", "cherries", "pomegranates", "watermelon",
+    "raspberries", "red currants",
+]
+RED_COLOR_TOKENS_EN = [
+    "warm red tones", "high saturation reds", "crimson", "scarlet", "vermilion",
+]
+
+
+def _expand_semantic_negatives(neg_terms: List[str]) -> List[str]:
+    if not neg_terms:
+        return []
+    base = [t.strip().lower() for t in neg_terms if t.strip()]
+    out: List[str] = []
+
+    text_blob = " ".join(base)
+    de_rot = any(w in text_blob for w in ["rot", "rotes", "rote", "roten"])
+    de_gemuese = "gemüse" in text_blob or "gemuese" in text_blob
+    de_obst = "obst" in text_blob
+
+    en_red = "red" in text_blob
+    en_veg = "vegetable" in text_blob or "vegetables" in text_blob
+    en_fruits = "fruit" in text_blob or "fruits" in text_blob
+
+    if (de_rot and (de_gemuese or de_obst)) or (en_red and (en_veg or en_fruits)):
+        out.extend(RED_PRODUCE_EN)
+
+    for t in base:
+        if t not in out:
+            out.append(t)
+
+    seen = set()
+    compact: List[str] = []
+    for t in out:
+        key = t.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        compact.append(t.strip())
+
+    if len(compact) > MAX_NEG_TERMS:
+        compact = compact[:MAX_NEG_TERMS]
+    return compact
+
+
+def _build_keyword_constraints(neg_terms: List[str], add_cool_bias: bool = DEFAULT_COLOR_BIAS) -> str:
+    if not neg_terms:
+        return ""
+    parts: List[str] = []
+    neg_kw = ", ".join(neg_terms)
+    if neg_kw:
+        parts.append(f"negative: {neg_kw}")
+    if add_cool_bias:
+        parts.append("cool color palette")
+        parts.append("avoid warm reds")
+        parts.append("blue/green accents")
+        parts.append("low saturation")
+    sentence = "; ".join(parts) + ";"
+    if len(sentence) > MAX_CONSTRAINT_CHARS:
+        while len(sentence) > MAX_CONSTRAINT_CHARS and parts:
+            parts.pop()
+            sentence = "; ".join(parts) + (";" if parts else "")
+    return sentence
+
+
+def _inject_negatives_into_prompt_keyword(prompt: str, negative_prompt: str) -> tuple[str, str]:
+    raw_terms = _normalize_negative_terms(negative_prompt)
+    if not raw_terms:
+        return prompt, ""
+    expanded = _expand_semantic_negatives(raw_terms)
+    filtered = [t for t in expanded if not _term_in_prompt(t, prompt)]
+    if not filtered:
+        return prompt, ""
+    constraints = _build_keyword_constraints(filtered, add_cool_bias=DEFAULT_COLOR_BIAS)
+    if not constraints:
+        return prompt, ""
+    sep = "" if prompt.endswith((" ", "\n")) else INJECTION_SEPARATOR
+    # Always append mode for Pollinations
+    return (prompt + sep + constraints).strip(), constraints
+
+
+class _PollinationsV1Datum(BaseModel):
+    b64_json: str
+    revised_prompt: Optional[str] = None
+
+
+class _PollinationsV1Response(BaseModel):
+    created: int
+    data: list[_PollinationsV1Datum]
+
+
+class PollinationsConfig(BaseModel):
+    api_base: str = Field(default_factory=lambda: _env_str("POLLINATIONS_API_BASE", "https://gen.pollinations.ai").rstrip("/"))
+    secret: str = Field(default_factory=lambda: _env_str("POLLINATIONS_SECRET", ""))
+    model: Optional[str] = Field(default_factory=lambda: _env_str("POLLINATIONS_MODEL", "") or None)
+    width: int = Field(default_factory=lambda: _env_int("POLLINATIONS_WIDTH", 1440))
+    height: int = Field(default_factory=lambda: _env_int("POLLINATIONS_HEIGHT", 900))
+    nologo: bool = Field(default_factory=lambda: _env_bool01("POLLINATIONS_NOLOGO", 1))
+    seed_raw: Optional[str] = Field(default_factory=lambda: os.getenv("POLLINATIONS_SEED"))
+    use_v1: bool = Field(default_factory=lambda: _env_bool01("POLLINATIONS_USE_V1", 1))
+    size_override: str = Field(default_factory=lambda: _env_str("POLLINATIONS_SIZE", ""))
+    allow_cloud: bool = Field(default_factory=lambda: _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0))
+
+    @property
+    def seed(self) -> Optional[int]:
+        if self.seed_raw is None:
+            return None
+        try:
+            return int(self.seed_raw)
+        except Exception:
+            return None
+
+    def require_cloud_enabled(self) -> None:
+        if not self.allow_cloud:
+            raise RuntimeError("Cloud image backend not allowed (set ALLOW_CLOUD_IMAGE_BACKEND=1 to enable)")
+        if not self.secret and self.use_v1:
+            raise RuntimeError("POLLINATIONS_SECRET missing in environment for v1 API")
+
+
+def _size_from_wh(width: int, height: int) -> str:
+    if width > 0 and height > 0:
+        return f"{width}x{height}"
+    return "1024x1024"
+
+
+def _build_pollinations_image_url(
+    api_base: str,
+    prompt: str,
+    model: Optional[str],
+    width: Optional[int],
+    height: Optional[int],
+    nologo: bool,
+    seed: Optional[int],
+) -> str:
+    from urllib.parse import quote, urlencode
+    base = (api_base or "").rstrip("/")
+    encoded_prompt = quote(prompt, safe="")
+    url = f"{base}/image/{encoded_prompt}"
+    params: dict[str, str] = {}
+    if model:
+        params["model"] = model
+    if width and width > 0:
+        params["width"] = str(width)
+    if height and height > 0:
+        params["height"] = str(height)
+    if nologo:
+        params["nologo"] = "true"
+    if seed is not None:
+        params["seed"] = str(seed)
+    if params:
+        url = f"{url}?{urlencode(params)}"
+    return url
+
+
+class PollinationsBackend(ImageBackend):
+    def __init__(self, out_dir: Path, cfg: Optional[PollinationsConfig] = None) -> None:
+        self.out_dir = Path(out_dir).resolve()
+        self.cfg = cfg or PollinationsConfig()
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _resolve_negative(self, negative: Optional[str]) -> str:
+        if negative and negative.strip():
+            return negative.strip()
+        env_pol = _env_str("POLLINATIONS_NEGATIVE", "")
+        if env_pol:
+            return env_pol
+        env_global = _env_str("APP_GLOBAL_NEGATIVE", "")
+        return env_global
+
+    def _finalize_prompt_for_pollinations(self, base_prompt: str, request_negative: Optional[str]) -> tuple[str, str, str]:
+        neg_combined = self._resolve_negative(request_negative).strip()
+        constraints_preview = ""
+        final_prompt = base_prompt
+
+        if neg_combined:
+            final_prompt, constraints_preview = _inject_negatives_into_prompt_keyword(base_prompt, neg_combined)
+
+        neg_field = ""
+        if constraints_preview:
+            m = re.search(r"negative:\s*([^;]+)", constraints_preview, flags=re.IGNORECASE)
+            if m:
+                neg_field = m.group(1).strip()
+
+        try:
+            lang = "de" if _is_german_text(base_prompt) or _is_german_text(neg_combined) else "en"
+            print(f"[POLL PREP] lang={lang} style=keywords_en force_inline=False constraints='{(constraints_preview or '')[:140]}'")
+            print(f"[POLL PROMPT] used_prompt='{final_prompt[:220]}'")
+        except Exception:
+            pass
+
+        return final_prompt, neg_field, constraints_preview
+
+    async def _fetch_v1(self, prompt: str, negative: str | None, width: int | None, height: int | None) -> Path:
+        self.cfg.require_cloud_enabled()
+        url = f"{self.cfg.api_base}/v1/images/generations"
+        headers = {
+            "Authorization": f"Bearer {self.cfg.secret}",
+            "Content-Type": "application/json",
+        }
+        w = width if (width and width > 0) else self.cfg.width
+        h = height if (height and height > 0) else self.cfg.height
+
+        injected_prompt, neg_field, _constraints = self._finalize_prompt_for_pollinations(prompt, negative)
+
+        payload: Dict[str, object] = {
+            "model": self.cfg.model or "flux",
+            "prompt": injected_prompt,
+            "size": (self.cfg.size_override or _size_from_wh(w, h)),
+        }
+        if neg_field:
+            payload["negative_prompt"] = neg_field
+
+        print(
+            f"[POLLINATIONS V1] url={url} model={payload.get('model')} size={payload.get('size')} "
+            f"has_negative_field={'negative_prompt' in payload} inline_neg=1"
+        )
+        timeout = _timeout_long(120.0)
+        delay = 1.0
+        last_exc: Optional[Exception] = None
+        async with httpx.AsyncClient(timeout=timeout, limits=_httpx_limits()) as client:
+            for attempt in range(1, 6):
+                try:
+                    r = await client.post(url, headers=headers, json=payload)
+                    r.raise_for_status()
+                    parsed = _PollinationsV1Response.model_validate(r.json())
+                    if not parsed.data:
+                        raise RuntimeError("pollinations_v1_empty_data")
+                    from base64 import b64decode
+                    raw = b64decode(parsed.data[0].b64_json, validate=True)
+                    target = self.out_dir / f"img_{uuid.uuid4().hex}.jpg"
+                    target.write_bytes(raw)
+                    if target.stat().st_size < 1024:
+                        raise RuntimeError("pollinations_v1_too_small")
+                    # Broadcast update
+                    await broadcast_gallery_updated(target)
+                    return target
+                except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError, ValidationError) as e:
+                    last_exc = e
+                    print(f"[POLLINATIONS V1] attempt={attempt} error={type(e).__name__}: {e}")
+                    if attempt < 5:
+                        await asyncio.sleep(delay)
+                        delay *= 1.7
+                    continue
+        raise RuntimeError(f"pollinations_v1_all_attempts_failed: {last_exc}")
+
+    async def _fetch_get(self, prompt: str, negative: str | None, width: int | None, height: int | None) -> Path:
+        self.cfg.require_cloud_enabled()
+        w = width if (width and width > 0) else self.cfg.width
+        h = height if (height and height > 0) else self.cfg.height
+
+        injected_prompt, _neg_field, _constraints = self._finalize_prompt_for_pollinations(prompt, negative)
+
+        url = _build_pollinations_image_url(
+            self.cfg.api_base, injected_prompt, self.cfg.model, w, h, self.cfg.nologo, self.cfg.seed
+        )
+        params: dict[str, str] = {}
+        if self.cfg.secret:
+            params["key"] = self.cfg.secret
+
+        print(
+            f"[POLLINATIONS GET] url_base={self.cfg.api_base} model={self.cfg.model or 'flux'} "
+            f"size={w}x{h} inline_neg=1 nologo={self.cfg.nologo}"
+        )
+        timeout = _timeout_long(120.0)
+        delay = 1.0
+        last_exc: Optional[Exception] = None
+        async with httpx.AsyncClient(timeout=timeout, limits=_httpx_limits(), follow_redirects=True) as client:
+            for attempt in range(1, 5):
+                try:
+                    r = await client.get(url, params=params)
+                    r.raise_for_status()
+                    content = r.content
+                    if not content or len(content) < 1024:
+                        raise RuntimeError("pollinations_get_too_small")
+                    target = self.out_dir / f"img_{uuid.uuid4().hex}.jpg"
+                    target.write_bytes(content)
+                    # Broadcast update
+                    await broadcast_gallery_updated(target)
+                    return target
+                except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
+                    last_exc = e
+                    print(f"[POLLINATIONS GET] attempt={attempt} error={type(e).__name__}: {e}")
+                    if attempt < 4:
+                        await asyncio.sleep(delay)
+                        delay *= 1.7
+                    continue
+        raise RuntimeError(f"pollinations_get_all_attempts_failed: {last_exc}")
+
+    async def generate(self, prompt: str, width: int | None = None, height: int | None = None, negative: str | None = None) -> Path:
+        if not self.cfg.allow_cloud:
+            raise RuntimeError("Cloud image backend disabled (ALLOW_CLOUD_IMAGE_BACKEND=0)")
+
+        rw, rh = _resolve_size_for_backend("pollinations", width, height)
+        eff_w = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
+        eff_h = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
+
+        if self.cfg.use_v1:
+            try:
+                return await self._fetch_v1(prompt, negative, eff_w, eff_h)
+            except Exception:
+                return await self._fetch_get(prompt, negative, eff_w, eff_h)
+        else:
+            return await self._fetch_get(prompt, negative, eff_w, eff_h)
+
+
+# ============================================================
+# ComfyUI (Local/LAN) with optional Auto-Discovery + Style Mapping
+# ============================================================
+
+class ComfyConfig(BaseModel):
+    host: str = Field(default_factory=lambda: _env_str("APP_COMFY_HOST", "127.0.0.1"))
+    port: int = Field(default_factory=lambda: _env_int("APP_COMFY_PORT", 8188))
+    workflow_path: Path = Field(default_factory=lambda: Path(_env_str("APP_COMFY_WORKFLOW", "./workflows/text2img_SD15-FP16.json")).resolve())
+    width: int = Field(default_factory=lambda: _env_int("APP_COMFY_WIDTH", int(_env_str("APP_IMAGE_WIDTH", "512") or "512")))
+    height: int = Field(default_factory=lambda: _env_int("APP_COMFY_HEIGHT", int(_env_str("APP_IMAGE_HEIGHT", "512") or "512")))
+    steps: int = Field(default_factory=lambda: _env_int("APP_COMFY_STEPS", 20))
+    cfg: float = Field(default_factory=lambda: _env_float("APP_COMFY_CFG", 6.5))
+    sampler: str = Field(default_factory=lambda: _env_str("APP_COMFY_SAMPLER", "euler"))
+    timeout_sec: float = Field(default_factory=lambda: _env_float("APP_COMFY_TIMEOUT_SEC", 180.0))
+    disabled: bool = Field(default_factory=lambda: _env_bool01("APP_DISABLE_COMFYUI", 1))
+    comfy_output_dir: Optional[Path] = Field(default_factory=lambda: (Path(_env_str("APP_COMFY_OUTPUT_DIR", "")).resolve() if _env_str("APP_COMFY_OUTPUT_DIR", "") else None))
+    negative: str = Field(default_factory=lambda: _env_str("APP_COMFY_NEGATIVE", "text, watermark, logo, low quality, blurry, bad anatomy"))
+
+    # Node IDs for default single-encode workflows
+    node_id_positive: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_POS", "2"))
+    node_id_negative: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_NEG", "3"))
+    node_id_latent: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_LATENT", "4"))
+    node_id_ksampler: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_KSAMPLER", "5"))
+
+    # Optional style-aware workflow IDs
+    node_id_style_positive: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_STYLE_POS", "8"))  # CLIPTextEncode (Style)
+    node_id_conditioning_combine: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_COND_COMBINE", "9"))  # ConditioningCombine
+    style_weight: float = Field(default_factory=lambda: _env_float("APP_COMFY_STYLE_WEIGHT", 1.8))
+
+    # Discovery (opt-in, decoupled from Pollinations)
+    auto_discovery_enable: bool = Field(default_factory=lambda: _env_bool01("AUTO_DISCOVERY_ENABLE", 1))
+    fallback_hosts_raw: str = Field(default_factory=lambda: _env_str("APP_COMFY_FALLBACK_HOSTS", ""))
+    discovery_subnets_raw: str = Field(default_factory=lambda: _env_str("AUTO_DISCOVERY_SUBNETS", ""))
+    discovery_max_parallel: int = Field(default_factory=lambda: _env_int("AUTO_DISCOVERY_MAX_PARALLEL", 64))
+
+    def assert_policy(self, host: str) -> None:
+        _assert_image_backend_host_policy(host)
+
+    @property
+    def fallback_hosts(self) -> List[str]:
+        items = [x.strip() for x in self.fallback_hosts_raw.replace(";", ",").split(",") if x.strip()]
+        out: List[str] = []
+        seen: Set[str] = set()
+        for h in items:
+            if h not in seen:
+                seen.add(h)
+                out.append(h)
+        return out
+
+    @property
+    def discovery_subnets(self) -> List[str]:
+        items = [x.strip() for x in self.discovery_subnets_raw.replace(",", " ").split() if x.strip()]
+        out: List[str] = []
+        for cidr in items:
+            try:
+                ipaddress.ip_network(cidr, strict=False)
+                out.append(cidr)
+            except Exception:
+                print(f"[DISCOVERY] ignoring invalid subnet: {cidr}")
+        return out
+
+
+class LocalComfyBackend(ImageBackend):
+    def __init__(self, out_dir: Path, cfg: Optional[ComfyConfig] = None) -> None:
+        self.out_dir = Path(out_dir).resolve()
+        self.cfg = cfg or ComfyConfig()
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self._samplers_cache: Optional[Set[str]] = None
+        self._active_host: Optional[str] = None
+        self._discovery_done: bool = False
+
+        # Optional per-request overrides: can be set by caller before generate()
+        self.request_style_text: Optional[str] = None
+        self.request_style_weight: Optional[float] = None
+
+    # ----- Discovery / probing -----
+
+    async def _probe_history(self, host: str, port: int, timeout: httpx.Timeout) -> bool:
+        try:
+            async with httpx.AsyncClient(limits=_httpx_limits(), timeout=timeout) as c:
+                r = await c.get(f"http://{host}:{port}/history")
+                r.raise_for_status()
+                return True
+        except Exception:
+            return False
+
+    async def _ensure_host(self) -> None:
+        if self._discovery_done and self._active_host:
+            return
+
+        # 1) Try configured host first
+        host = (self.cfg.host or "127.0.0.1").strip()
+        port = int(self.cfg.port)
+        try:
+            self.cfg.assert_policy(host)
+        except AssertionError as e:
+            print(f"[DISCOVERY] configured host rejected by policy: {e}")
+        else:
+            if await self._probe_history(host, port, _timeout_probe()):
+                self._active_host = host
+                self._discovery_done = True
+                print(f"[DISCOVERY] using configured ComfyUI host {host}:{port}")
+                return
+
+        # 2) Optionally try fallback/discovery (only if remote backends are allowed)
+        allow_remote = _env_bool01("APP_ALLOW_REMOTE_BACKENDS", 0)
+        if not allow_remote or not self.cfg.auto_discovery_enable:
+            self._active_host = host
+            self._discovery_done = True
+            print("[DISCOVERY] auto-discovery disabled or remote not allowed; keeping configured host")
+            return
+
+        # 2a) Sequential quick check of fallback hosts
+        for fb in self.cfg.fallback_hosts:
+            try:
+                self.cfg.assert_policy(fb)
+            except AssertionError as e:
+                print(f"[DISCOVERY] skip fallback {fb}: {e}")
+                continue
+            if await self._probe_history(fb, port, _timeout_probe()):
+                self._active_host = fb
+                self._discovery_done = True
+                print(f"[DISCOVERY] selected fallback ComfyUI host {fb}:{port}")
+                return
+
+        # 2b) Parallel scan of fallback hosts
+        if self.cfg.fallback_hosts and len(self.cfg.fallback_hosts) > 1:
+            sem = asyncio.Semaphore(self.cfg.discovery_max_parallel)
+
+            async def _task(h: str):
+                async with sem:
+                    try:
+                        self.cfg.assert_policy(h)
+                    except AssertionError:
+                        return None
+                    ok = await self._probe_history(h, port, _timeout_probe())
+                    return h if ok else None
+
+            tasks = [asyncio.create_task(_task(h)) for h in self.cfg.fallback_hosts]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for d in done:
+                res = d.result()
+                if res:
+                    for p in pending:
+                        p.cancel()
+                    self._active_host = res
+                    self._discovery_done = True
+                    print(f"[DISCOVERY] selected fallback (parallel) {res}:{port}")
+                    return
+            for p in pending:
+                try:
+                    res = await p
+                    if res:
+                        self._active_host = res
+                        self._discovery_done = True
+                        print(f"[DISCOVERY] selected fallback (late) {res}:{port}")
+                        return
+                except asyncio.CancelledError:
+                    pass
+
+        # 2c) Optional subnet scans
+        for cidr in self.cfg.discovery_subnets:
+            try:
+                net = ipaddress.ip_network(cidr, strict=False)
+            except Exception:
+                continue
+            ips = [str(ip) for ip in net.hosts()]
+            if not ips:
+                continue
+
+            sem = asyncio.Semaphore(self.cfg.discovery_max_parallel)
+
+            async def _probe(ip: str):
+                async with sem:
+                    try:
+                        self.cfg.assert_policy(ip)
+                    except AssertionError:
+                        return None
+                    ok = await self._probe_history(ip, port, _timeout_probe())
+                    return ip if ok else None
+
+            print(f"[DISCOVERY] scanning subnet {cidr} with up to {self.cfg.discovery_max_parallel} parallel probes")
+            tasks = [asyncio.create_task(_probe(ip)) for ip in ips]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for d in done:
+                res = d.result()
+                if res:
+                    for p in pending:
+                        p.cancel()
+                    self._active_host = res
+                    self._discovery_done = True
+                    print(f"[DISCOVERY] selected subnet host {res}:{port}")
+                    return
+            for p in pending:
+                try:
+                    res = await p
+                    if res:
+                        self._active_host = res
+                        self._discovery_done = True
+                        print(f"[DISCOVERY] selected subnet host (late) {res}:{port}")
+                        return
+                except asyncio.CancelledError:
+                    pass
+
+        # 3) Last resort
+        self._active_host = host
+        self._discovery_done = True
+        print(f"[DISCOVERY] no reachable ComfyUI found; keeping configured host {host}:{port}")
+
+    async def _available_active(self) -> bool:
+        await self._ensure_host()
+        host = self._active_host or self.cfg.host
+        port = self.cfg.port
+        return await self._probe_history(host, port, _timeout_probe())
+
+    async def _fetch_valid_samplers(self, host: str, port: int) -> Set[str]:
+        url = f"http://{host}:{port}/object_info/KSampler"
+        try:
+            async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_short()) as c:
+                r = await c.get(url)
+                r.raise_for_status()
+                j = r.json()
+                choices = j.get("input", {}).get("sampler_name", {}).get("choices", [])
+                if isinstance(choices, list):
+                    return {str(x) for x in choices}
+        except Exception:
+            pass
+        return {
+            "euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde",
+            "dpmpp_2m_karras", "heun", "dpm_fast", "uni_pc"
+        }
+
+    def _normalize_sampler(self, name: str) -> str:
+        n = (name or "").strip().lower()
+        if n in {"euler a", "euler_a", "euler-ancestral"}:
+            return "euler_ancestral"
+        return n
+
+    # ----- Workflow parsing/mutation helpers -----
+
+    def _load_prompt_file(self) -> dict:
+        data = json.loads(self.cfg.workflow_path.read_text(encoding="utf-8"))
+        if "prompt" in data and isinstance(data["prompt"], dict):
+            return data["prompt"]
+        return data
+
+    def _find_clip_nodes(self, prompt_dict: dict) -> list[dict]:
+        nodes = []
+        for node in prompt_dict.values():
+            if isinstance(node, dict) and node.get("class_type") == "CLIPTextEncode":
+                nodes.append(node)
+        return nodes
+
+    def _override_text_nodes(self, prompt_dict: dict, positive: str, negative: str) -> tuple[bool, bool]:
+        pos_set = False
+        neg_set = False
+
+        node_pos = prompt_dict.get(self.cfg.node_id_positive)
+        if isinstance(node_pos, dict) and node_pos.get("class_type") == "CLIPTextEncode":
+            inputs = node_pos.get("inputs")
+            if isinstance(inputs, dict) and "text" in inputs:
+                inputs["text"] = positive
+                pos_set = True
+
+        node_neg = prompt_dict.get(self.cfg.node_id_negative)
+        if isinstance(node_neg, dict) and node_neg.get("class_type") == "CLIPTextEncode":
+            inputs = node_neg.get("inputs")
+            if isinstance(inputs, dict) and "text" in inputs:
+                inputs["text"] = negative
+                neg_set = True
+
+        if not (pos_set and neg_set):
+            clip_nodes = self._find_clip_nodes(prompt_dict)
+            if not clip_nodes:
+                return pos_set, neg_set
+            if clip_nodes and not pos_set:
+                inputs = clip_nodes[0].get("inputs", {})
+                if isinstance(inputs, dict) and "text" in inputs:
+                    inputs["text"] = positive
+                    pos_set = True
+            if len(clip_nodes) > 1 and not neg_set:
+                inputs = clip_nodes[1].get("inputs", {})
+                if isinstance(inputs, dict) and "text" in inputs:
+                    inputs["text"] = negative
+                    neg_set = True
+
+        return pos_set, neg_set
+
+    def _override_style_nodes(self, prompt_dict: dict, style_text: Optional[str]) -> tuple[bool, Optional[str]]:
+        if not style_text:
+            return False, None
+
+        style_set = False
+        info = None
+
+        node_style = prompt_dict.get(self.cfg.node_id_style_positive)
+        if isinstance(node_style, dict) and node_style.get("class_type") == "CLIPTextEncode":
+            inputs = node_style.get("inputs")
+            if isinstance(inputs, dict) and "text" in inputs:
+                inputs["text"] = style_text
+                style_set = True
+        else:
+            return False, "style_node_missing"
+
+        node_combine = prompt_dict.get(self.cfg.node_id_conditioning_combine)
+        if isinstance(node_combine, dict) and (node_combine.get("class_type") or "").lower().startswith("conditioning"):
+            combine_inputs = node_combine.get("inputs", {})
+            if isinstance(combine_inputs, dict) and "strength" in combine_inputs:
+                wt = self.request_style_weight if (self.request_style_weight is not None) else self.cfg.style_weight
+                try:
+                    combine_inputs["strength"] = float(wt)
+                    info = f"style_weight_set:{wt}"
+                except Exception:
+                    info = "style_weight_invalid"
+        return style_set, info
+
+    def _override_dimensions_in_prompt(self, prompt_dict: dict, width: int, height: int) -> None:
+        node_latent = prompt_dict.get(self.cfg.node_id_latent)
+        if isinstance(node_latent, dict):
+            cls = str(node_latent.get("class_type") or node_latent.get("class", "")).strip()
+            if cls in {"EmptyLatentImage", "EmptyLatentImageBatch", "LatentImage", "CreateLatentImage"}:
+                inputs = node_latent.get("inputs")
+                if isinstance(inputs, dict):
+                    if "width" in inputs:
+                        inputs["width"] = width
+                    if "height" in inputs:
+                        inputs["height"] = height
+                    return
+
+        for node in prompt_dict.values():
+            if not isinstance(node, dict):
+                continue
+            cls = str(node.get("class_type") or node.get("class", "")).strip()
+            if cls in {"EmptyLatentImage", "EmptyLatentImageBatch", "LatentImage", "CreateLatentImage"}:
+                inputs = node.get("inputs")
+                if isinstance(inputs, dict):
+                    if "width" in inputs:
+                        inputs["width"] = width
+                    if "height" in inputs:
+                        inputs["height"] = height
+            if cls.startswith("KSampler"):
+                inputs = node.get("inputs")
+                if isinstance(inputs, dict):
+                    if "width" in inputs:
+                        inputs["width"] = width
+                    if "height" in inputs:
+                        inputs["height"] = height
+
+    def _override_sampling_params(self, prompt_dict: dict, steps: Optional[int], cfg: Optional[float], sampler_name: Optional[str]) -> None:
+        for node in prompt_dict.values():
+            if not isinstance(node, dict):
+                continue
+            cls = str(node.get("class_type") or node.get("class", "")).strip().lower()
+            if "ksampler" in cls:
+                inputs = node.get("inputs", {})
+                if not isinstance(inputs, dict):
+                    continue
+                if steps is not None and "steps" in inputs:
+                    inputs["steps"] = int(steps)
+                if cfg is not None and "cfg" in inputs:
+                    try:
+                        inputs["cfg"] = float(cfg)
+                    except Exception:
+                        pass
+                if sampler_name and "sampler_name" in inputs:
+                    inputs["sampler_name"] = sampler_name
+
+    def _copy_latest_from_comfy(self, since_ts: float) -> Optional[Path]:
+        src_dir = self.cfg.comfy_output_dir
+        if not src_dir or not src_dir.exists():
+            return None
+        candidates: List[Path] = []
+        for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
+            candidates.extend(src_dir.rglob(ext))
+        if not candidates:
+            return None
+        recent = [p for p in candidates if p.is_file() and p.stat().st_mtime >= since_ts - 0.8]
+        if not recent:
+            return None
+        latest = max(recent, key=lambda p: p.stat().st_mtime)
+        target = self.out_dir / f"img_{uuid.uuid4().hex}{latest.suffix.lower()}"
+        try:
+            shutil.copy2(latest, target)
+            if target.stat().st_size < 1024:
+                return None
+            return target
+        except Exception:
+            return None
+
+    # ----- Public API -----
+
+    async def generate(
+        self,
+        prompt: str,
+        width: int | None = None,
+        height: int | None = None,
+        negative: str | None = None,
+        style_text: Optional[str] = None,
+        style_weight: Optional[float] = None
+    ) -> Path:
+        if self.cfg.disabled:
+            raise RuntimeError("ComfyUI disabled (APP_DISABLE_COMFYUI=1)")
+        if not self.cfg.workflow_path.exists():
+            raise RuntimeError(f"workflow_not_found: {self.cfg.workflow_path}")
+
+        # Allow per-request style overrides
+        self.request_style_text = (style_text or self.request_style_text)
+        self.request_style_weight = (style_weight if style_weight is not None else self.request_style_weight)
+
+        await self._ensure_host()
+        host = self._active_host or self.cfg.host
+        port = int(self.cfg.port)
+
+        if not await self._probe_history(host, port, _timeout_probe()):
+            raise RuntimeError("comfy_unavailable")
+
+        rw, rh = _resolve_size_for_backend("comfyui", width, height)
+        w_eff = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
+        h_eff = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
+        w = _clamp_dim(w_eff)
+        h = _clamp_dim(h_eff)
+
+        valid_samplers = await self._fetch_valid_samplers(host, port)
+        sampler = self._normalize_sampler(self.cfg.sampler)
+        if sampler not in valid_samplers:
+            sampler = "euler" if "euler" in valid_samplers else (next(iter(valid_samplers)) if valid_samplers else "euler")
+
+        prompt_dict = self._load_prompt_file()
+        clip_nodes_before = self._find_clip_nodes(prompt_dict)
+
+        # Dimensions and sampling params
+        self._override_dimensions_in_prompt(prompt_dict, width=w, height=h)
+        self._override_sampling_params(prompt_dict, steps=self.cfg.steps, cfg=self.cfg.cfg, sampler_name=sampler)
+
+        pos_text = (prompt or "").strip()
+        neg_text = (negative or self.cfg.negative or "").strip()
+
+        # Legacy mapping (content + negative)
+        pos_set, neg_set = self._override_text_nodes(prompt_dict, positive=pos_text, negative=neg_text)
+
+        # Style mapping (if style node exists)
+        style_info_log = ""
+        style_set = False
+        if self.request_style_text:
+            style_set, style_info = self._override_style_nodes(prompt_dict, style_text=self.request_style_text)
+            if style_info:
+                style_info_log = style_info
+
+        # Fallback: append style to positive if no dedicated node
+        if self.request_style_text and not style_set:
+            if self.request_style_text.lower() not in pos_text.lower():
+                node_pos = prompt_dict.get(self.cfg.node_id_positive)
+                style_suffix = f" Style: {self.request_style_text}"
+                if isinstance(node_pos, dict) and node_pos.get("class_type") == "CLIPTextEncode":
+                    inputs = node_pos.get("inputs", {})
+                    if isinstance(inputs, dict) and "text" in inputs and isinstance(inputs["text"], str):
+                        inputs["text"] = (inputs["text"] or "") + style_suffix
+                        pos_set = True
+                else:
+                    clip_nodes = self._find_clip_nodes(prompt_dict)
+                    if clip_nodes:
+                        inputs = clip_nodes[0].get("inputs", {})
+                        if isinstance(inputs, dict) and "text" in inputs and isinstance(inputs["text"], str):
+                            inputs["text"] = (inputs["text"] or "") + style_suffix
+                            pos_set = True
+            style_info_log = style_info_log or "style_appended_to_positive"
+
+        clip_count = len(clip_nodes_before)
+        print(
+            f"[COMFY WORKFLOW] host={host} pos_set={pos_set} neg_set={neg_set} style_set={style_set} "
+            f"clip_nodes={clip_count} size={w}x{h} sampler={sampler} "
+            f"pos_sample='{pos_text[:96]}' style_text='{(self.request_style_text or '')[:72]}' "
+            f"neg_sample='{neg_text[:96]}' style_info='{style_info_log or ''}'"
+        )
+
+        if clip_count == 0:
+            raise RuntimeError("workflow_missing_CLIPTextEncode_nodes: no CLIPTextEncode nodes found; cannot set positive/negative/style text")
+        if not neg_set:
+            print("[WARN] Negative prompt node not matched by configured IDs; used fallback if possible. "
+                  "Verify APP_COMFY_NODE_NEG or workflow structure.")
+
+        started_at = _now()
+
+        images = await generate_from_prompt_dict(
+            prompt_dict=prompt_dict,
+            out_dir=self.out_dir,
+            positive_text=None,   # already injected into nodes
+            negative_text=None,   # already injected into nodes
+            width=None,           # already set on latent nodes
+            height=None,          # already set on latent nodes
+            steps=None,           # already overridden in graph
+            cfg=None,             # already overridden in graph
+            sampler_name=None,    # already overridden in graph
+            scheduler=None,
+            denoise=None,
+            seed=None,
+            host=host,
+            port=port,
+            max_wait_sec=float(self.cfg.timeout_sec),
+            poll_interval=1.0,
+        )
+
+        if images:
+            # At least one image saved in out_dir by bridge; broadcast first
+            try:
+                first = images[0]
+                await broadcast_gallery_updated(first)
+            except Exception as e:
+                print(f"[EVENT] broadcast error (local comfy direct): {e}")
+            return images[0]
+
+        copied = self._copy_latest_from_comfy(since_ts=started_at)
+        if copied:
+            try:
+                await broadcast_gallery_updated(copied)
+            except Exception as e:
+                print(f"[EVENT] broadcast error (local comfy copy): {e}")
+            return copied
+
+        raise RuntimeError("comfy_no_images")
+
+
+# ============================================================
+# ComfyUI (Remote via Cloudflared)
+# ============================================================
+
+class RemoteComfyConfig(BaseModel):
+    # Dedicated remote parameters (do not affect LocalComfyBackend)
+    host: str = Field(default_factory=lambda: _env_str("APP_COMFY_REMOTE_HOST", ""))
+    port: int = Field(default_factory=lambda: _env_int("APP_COMFY_REMOTE_PORT", 443))
+    scheme: str = Field(default_factory=lambda: (_env_str("APP_COMFY_REMOTE_SCHEME", "https") or "https").lower())
+    force_view_mode: str = Field(default_factory=lambda: _env_str("APP_COMFY_REMOTE_FORCE_VIEW_MODE", "query").lower())
+
+    # Reuse common workflow/dim settings, independent from local .env defaults
+    workflow_path: Path = Field(default_factory=lambda: Path(_env_str("APP_COMFY_WORKFLOW", "./workflows/text2img_SD15-FP16.json")).resolve())
+    width: int = Field(default_factory=lambda: _env_int("APP_COMFY_WIDTH", int(_env_str("APP_IMAGE_WIDTH", "512") or "512")))
+    height: int = Field(default_factory=lambda: _env_int("APP_COMFY_HEIGHT", int(_env_str("APP_IMAGE_HEIGHT", "512") or "512")))
+    steps: int = Field(default_factory=lambda: _env_int("APP_COMFY_STEPS", 20))
+    cfg: float = Field(default_factory=lambda: _env_float("APP_COMFY_CFG", 6.5))
+    sampler: str = Field(default_factory=lambda: _env_str("APP_COMFY_SAMPLER", "euler"))
+    timeout_sec: float = Field(default_factory=lambda: _env_float("APP_COMFY_TIMEOUT_SEC", 180.0))
+    disabled: bool = Field(default_factory=lambda: _env_bool01("APP_DISABLE_COMFYUI", 1))
+    negative: str = Field(default_factory=lambda: _env_str("APP_COMFY_NEGATIVE", "text, watermark, logo, low quality, blurry, bad anatomy"))
+
+    # Node IDs
+    node_id_positive: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_POS", "2"))
+    node_id_negative: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_NEG", "3"))
+    node_id_latent: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_LATENT", "4"))
+    node_id_ksampler: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_KSAMPLER", "5"))
+
+    node_id_style_positive: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_STYLE_POS", "8"))
+    node_id_conditioning_combine: str = Field(default_factory=lambda: _env_str("APP_COMFY_NODE_COND_COMBINE", "9"))
+    style_weight: float = Field(default_factory=lambda: _env_float("APP_COMFY_STYLE_WEIGHT", 1.8))
+
+    def assert_policy(self, host: str) -> None:
+        _assert_image_backend_host_policy(host)
+
+
+@contextmanager
+def _remote_env_ctx(scheme: str, force_view_mode: str):
+    """
+    Temporarily enforce comfyui_bridge behavior for remote:
+    - APP_COMFY_SCHEME=https
+    - APP_COMFY_FORCE_VIEW_MODE=query
+    This avoids touching global/local defaults permanently.
+    """
+    old_scheme = os.environ.get("APP_COMFY_SCHEME")
+    old_view = os.environ.get("APP_COMFY_FORCE_VIEW_MODE")
+    try:
+        os.environ["APP_COMFY_SCHEME"] = scheme
+        os.environ["APP_COMFY_FORCE_VIEW_MODE"] = force_view_mode
+        yield
+    finally:
+        if old_scheme is None:
+            os.environ.pop("APP_COMFY_SCHEME", None)
+        else:
+            os.environ["APP_COMFY_SCHEME"] = old_scheme
+        if old_view is None:
+            os.environ.pop("APP_COMFY_FORCE_VIEW_MODE", None)
+        else:
+            os.environ["APP_COMFY_FORCE_VIEW_MODE"] = old_view
+
+
+class RemoteComfyBackend(ImageBackend):
+    def __init__(self, out_dir: Path, cfg: Optional[RemoteComfyConfig] = None) -> None:
+        self.out_dir = Path(out_dir).resolve()
+        self.cfg = cfg or RemoteComfyConfig()
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Optional per-request overrides
+        self.request_style_text: Optional[str] = None
+        self.request_style_weight: Optional[float] = None
+
+        if not self.cfg.host:
+            raise RuntimeError("remote_host_missing: set APP_COMFY_REMOTE_HOST")
+
+        try:
+            self.cfg.assert_policy(self.cfg.host)
+        except AssertionError as e:
+            raise RuntimeError(f"remote_host_policy_blocked: {e}") from None
+
+    def _load_prompt_file(self) -> dict:
+        data = json.loads(self.cfg.workflow_path.read_text(encoding="utf-8"))
+        if "prompt" in data and isinstance(data["prompt"], dict):
+            return data["prompt"]
+        return data
+
+    def _find_clip_nodes(self, prompt_dict: dict) -> list[dict]:
+        nodes = []
+        for node in prompt_dict.values():
+            if isinstance(node, dict) and node.get("class_type") == "CLIPTextEncode":
+                nodes.append(node)
+        return nodes
+
+    def _override_text_nodes(self, prompt_dict: dict, positive: str, negative: str) -> tuple[bool, bool]:
+        pos_set = False
+        neg_set = False
+        node_pos = prompt_dict.get(self.cfg.node_id_positive)
+        if isinstance(node_pos, dict) and node_pos.get("class_type") == "CLIPTextEncode":
+            inputs = node_pos.get("inputs")
+            if isinstance(inputs, dict) and "text" in inputs:
+                inputs["text"] = positive
+                pos_set = True
+        node_neg = prompt_dict.get(self.cfg.node_id_negative)
+        if isinstance(node_neg, dict) and node_neg.get("class_type") == "CLIPTextEncode":
+            inputs = node_neg.get("inputs")
+            if isinstance(inputs, dict) and "text" in inputs:
+                inputs["text"] = negative
+                neg_set = True
+        if not (pos_set and neg_set):
+            clips = self._find_clip_nodes(prompt_dict)
+            if clips and not pos_set:
+                ins = clips[0].get("inputs", {})
+                if isinstance(ins, dict) and "text" in ins:
+                    ins["text"] = positive
+                    pos_set = True
+            if len(clips) > 1 and not neg_set:
+                ins = clips[1].get("inputs", {})
+                if isinstance(ins, dict) and "text" in ins:
+                    ins["text"] = negative
+                    neg_set = True
+        return pos_set, neg_set
+
+    def _override_dimensions(self, prompt_dict: dict, width: int, height: int) -> None:
+        for node in prompt_dict.values():
+            if not isinstance(node, dict):
+                continue
+            cls = str(node.get("class_type") or node.get("class", "")).strip()
+            if cls in {"EmptyLatentImage", "EmptyLatentImageBatch", "LatentImage", "CreateLatentImage"}:
+                ins = node.get("inputs", {})
+                if isinstance(ins, dict):
+                    if "width" in ins:
+                        ins["width"] = width
+                    if "height" in ins:
+                        ins["height"] = height
+            if cls.startswith("KSampler"):
+                ins = node.get("inputs", {})
+                if isinstance(ins, dict):
+                    if "width" in ins:
+                        ins["width"] = width
+                    if "height" in ins:
+                        ins["height"] = height
+
+    def _override_sampling(self, prompt_dict: dict, steps: Optional[int], cfg: Optional[float], sampler_name: Optional[str]) -> None:
+        for node in prompt_dict.values():
+            if not isinstance(node, dict):
+                continue
+            cls = str(node.get("class_type") or node.get("class", "")).strip().lower()
+            if "ksampler" in cls:
+                ins = node.get("inputs", {})
+                if not isinstance(ins, dict):
+                    continue
+                if steps is not None and "steps" in ins:
+                    ins["steps"] = int(steps)
+                if cfg is not None and "cfg" in ins:
+                    try:
+                        ins["cfg"] = float(cfg)
+                    except Exception:
+                        pass
+                if sampler_name and "sampler_name" in ins:
+                    ins["sampler_name"] = sampler_name
+
+    async def _probe_history_remote(self) -> bool:
+        url = f"{self.cfg.scheme}://{self.cfg.host}:{self.cfg.port}/history"
+        try:
+            async with httpx.AsyncClient(timeout=_timeout_probe(), limits=_httpx_limits()) as c:
+                r = await c.get(url)
+                r.raise_for_status()
+                return True
+        except Exception as e:
+            print(f"[COMFY REMOTE] health probe failed: {type(e).__name__}: {e}")
+            return False
+
+    async def generate(
+        self,
+        prompt: str,
+        width: int | None = None,
+        height: int | None = None,
+        negative: str | None = None,
+        style_text: Optional[str] = None,
+        style_weight: Optional[float] = None
+    ) -> Path:
+        """
+        Generate via ComfyUI (Remote over Cloudflared).
+        """
+        if self.cfg.disabled:
+            raise RuntimeError("ComfyUI disabled (APP_DISABLE_COMFYUI=1)")
+        if not self.cfg.workflow_path.exists():
+            raise RuntimeError(f"workflow_not_found: {self.cfg.workflow_path}")
+
+        # Quick health probe
+        if not await self._probe_history_remote():
+            raise RuntimeError("comfy_unavailable")
+
+        # Build workflow
+        prompt_dict = self._load_prompt_file()
+
+        # Sizes
+        rw, rh = _resolve_size_for_backend("comfyui", width, height)
+        w_eff = rw if (rw and rw > 0) else (width if (width and width > 0) else self.cfg.width)
+        h_eff = rh if (rh and rh > 0) else (height if (height and height > 0) else self.cfg.height)
+        w = _clamp_dim(w_eff)
+        h = _clamp_dim(h_eff)
+        self._override_dimensions(prompt_dict, width=w, height=h)
+
+        # Sampling
+        sampler = self.cfg.sampler
+        self._override_sampling(prompt_dict, steps=self.cfg.steps, cfg=self.cfg.cfg, sampler_name=sampler)
+
+        # Texts
+        pos_text = (prompt or "").strip()
+        neg_text = (negative or self.cfg.negative or "").strip()
+        pos_set, neg_set = self._override_text_nodes(prompt_dict, positive=pos_text, negative=neg_text)
+
+        # Style (best-effort, same semantics as local)
+        style_set = False
+        if style_text:
+            node_style_id = self.cfg.node_id_style_positive
+            node_style = prompt_dict.get(node_style_id)
+            if isinstance(node_style, dict) and node_style.get("class_type") == "CLIPTextEncode":
+                ins = node_style.get("inputs", {})
+                if isinstance(ins, dict) and "text" in ins:
+                    ins["text"] = style_text
+                    style_set = True
+            if not style_set and style_text.lower() not in pos_text.lower():
+                node_pos = prompt_dict.get(self.cfg.node_id_positive)
+                style_suffix = f" Style: {style_text}"
+                if isinstance(node_pos, dict) and node_pos.get("class_type") == "CLIPTextEncode":
+                    ins = node_pos.get("inputs", {})
+                    if isinstance(ins, dict) and "text" in ins and isinstance(ins["text"], str):
+                        ins["text"] = (ins["text"] or "") + style_suffix
+                        pos_set = True
+                else:
+                    clips = self._find_clip_nodes(prompt_dict)
+                    if clips:
+                        ins = clips[0].get("inputs", {})
+                        if isinstance(ins, dict) and "text" in ins and isinstance(ins["text"], str):
+                            ins["text"] = (ins["text"] or "") + style_suffix
+                            pos_set = True
+
+        print(
+            f"[COMFY REMOTE] host={self.cfg.host} port={self.cfg.port} scheme={self.cfg.scheme} view={self.cfg.force_view_mode} "
+            f"size={w}x{h} sampler={sampler} pos_set={pos_set} neg_set={neg_set} style_set={style_set}"
+        )
+
+        # Force comfyui_bridge to remote behaviors for this call only
+        with _remote_env_ctx(scheme=self.cfg.scheme, force_view_mode=self.cfg.force_view_mode):
+            images = await generate_from_prompt_dict(
+                prompt_dict=prompt_dict,
+                out_dir=self.out_dir,
+                positive_text=None,
+                negative_text=None,
+                width=None,
+                height=None,
+                steps=None,
+                cfg=None,
+                sampler_name=None,
+                scheduler=None,
+                denoise=None,
+                seed=None,
+                host=self.cfg.host,
+                port=self.cfg.port,
+                max_wait_sec=float(self.cfg.timeout_sec),
+                poll_interval=1.0,
+            )
+
+        if images:
+            try:
+                await broadcast_gallery_updated(images[0])
+            except Exception as e:
+                print(f"[EVENT] broadcast error (remote comfy): {e}")
+            return images[0]
+        raise RuntimeError("comfy_no_images")
+
+
+# ---------------------------
+# Factory (Decoupled selection)
+# ---------------------------
+
+class BackendEnv(BaseModel):
+    image_backend: str = Field(default_factory=lambda: _env_str("IMAGE_BACKEND", "comfyui").lower())
+    allow_cloud: bool = Field(default_factory=lambda: _env_bool01("ALLOW_CLOUD_IMAGE_BACKEND", 0))
+    output_dir: Path = Field(default_factory=lambda: Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")).resolve())
+    # Runtime comfy mode: 'local' | 'remote' | 'auto' (auto prefers remote if configured, else local)
+    comfy_mode: str = Field(default_factory=lambda: (_env_str("APP_COMFY_MODE", "local") or "local").lower())
+
+
+def build_image_backend() -> ImageBackend:
+    """
+    Build the current image backend based on environment.
+    Supports:
+    - IMAGE_BACKEND=comfyui|pollinations
+    - APP_COMFY_MODE=local|remote|auto (auto: prefer remote if configured, else local)
+    """
+    env = BackendEnv()
+    out_dir = env.output_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if env.image_backend == "comfyui":
+        mode = env.comfy_mode
+        if mode == "remote":
+            cfg = RemoteComfyConfig()
+            return RemoteComfyBackend(out_dir=out_dir, cfg=cfg)
+        elif mode == "auto":
+            # Prefer remote when reasonably configured; fallback to local on any config/policy error
+            try:
+                cfg_remote = RemoteComfyConfig()
+                if cfg_remote.host:
+                    return RemoteComfyBackend(out_dir=out_dir, cfg=cfg_remote)
+            except Exception as e:
+                print(f"[BACKEND FACTORY] remote auto-selection failed: {type(e).__name__}: {e} -> falling back to local")
+            cfg_local = ComfyConfig()
+            return LocalComfyBackend(out_dir=out_dir, cfg=cfg_local)
+        else:
+            cfg = ComfyConfig()
+            return LocalComfyBackend(out_dir=out_dir, cfg=cfg)
+
+    elif env.image_backend == "pollinations":
+        cfg = PollinationsConfig()
+        cfg.allow_cloud = env.allow_cloud
+        return PollinationsBackend(out_dir=out_dir, cfg=cfg)
+
+    else:
+        raise RuntimeError(f"Unsupported IMAGE_BACKEND={env.image_backend}")
+
+
+# ---------------------------
+# Optional helpers for controllers
+# ---------------------------
+
+def merge_style_prompt(content_prompt: str, style_positive: Optional[str]) -> str:
+    """
+    Merge content prompt with optional style-positive.
+    Strategy: append with a separator if not already contained.
+    Example: "<content>. Style: <style_positive>"
+    Keeps it short and backend-agnostic.
+    """
+    content = (content_prompt or "").strip()
+    style = (style_positive or "").strip()
+    if not style:
+        return content
+    if style.lower() in content.lower():
+        return content
+    sep = " "
+    return f"{content}{sep}Style: {style}".strip()
+
+
+def inject_negatives_for_final_prompt(prompt: str, negative: str | None) -> str:
+    """
+    Optional helper to inline negative constraints into a text-only backend prompt.
+    Reuses the Pollinations keyword injection logic to keep consistent behavior.
+    """
+    negative = (negative or "").strip()
+    if not negative:
+        return prompt
+    new_prompt, _preview = _inject_negatives_into_prompt_keyword(prompt, negative)
+    return new_prompt
+```
+
+---
+
+### model_downloader.py
+
+```py
+# model_downloader.py
+"""
+Validate download policy without fetching unapproved model artifacts.
+
+Schema version 1 permits only disabled downloads. Supporting real downloads
+requires an explicitly validated artifact contract and a schema extension.
+
+This module performs no filesystem, network, or subprocess operations at import.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+from pathlib import Path
+from typing import Any
+
+from runtime_config import (
+    RuntimeConfigurationError,
+    load_config,
+    validate_config,
+)
+
+LOGGER = logging.getLogger(__name__)
+
+
+class ModelDownloadError(RuntimeError):
+    """Report invalid policy or unsupported artifact downloads."""
+
+
+def download_models(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate the complete configuration before considering any download.
+
+    Return a policy result, not a claim that models exist or are usable.
+    Never invoke a model server, shell command, or download client.
+    """
+    try:
+        validated = validate_config(config)
+    except (RuntimeConfigurationError, RecursionError) as exc:
+        raise ModelDownloadError(
+            "Download configuration is invalid or not approved; "
+            "regenerate with config_generator.py."
+        ) from exc
+
+    downloads = validated["downloads"]
+
+    # Fail closed if a future schema enables downloads without implementing
+    # verified artifacts, pinned sources, licenses, and atomic persistence here.
+    if downloads.get("enabled") is not False:
+        raise ModelDownloadError(
+            "Active downloads are not supported by this downloader version. "
+            "No downloads were started."
+        )
+
+    if downloads.get("artifacts") not in ([], None):
+        raise ModelDownloadError(
+            "Disabled downloads must not specify any artifacts."
+        )
+
+    LOGGER.info(
+        "Downloads disabled for tier %s; no models were fetched.",
+        validated["tier"],
+    )
+
+    return {
+        "tier": validated["tier"],
+        "downloads_enabled": False,
+        "outcome": "skipped_by_policy",
+        "reason": downloads.get("reason", "downloads_disabled_by_schema_v1"),
+        "downloaded_artifacts": [],
+        "model_presence_checked": False,
+        "models_ready": False,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Load persisted configuration and report the enforced download policy."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Validate the slAIdshow download policy. "
+            "Schema version 1 does not allow model downloads."
+        )
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help=(
+            "YAML path; alternatively use CONFIG_PATH "
+            "or /app/config/generated.yaml."
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        configuration = load_config(args.config)
+        result = download_models(configuration.as_dict())
+    except (RuntimeConfigurationError, ModelDownloadError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(
+        "Downloads are disabled per configuration. "
+        "No network access or download commands were executed. "
+        "Model availability and show readiness are not confirmed.",
+        file=sys.stderr,
+    )
+
+    # A disabled download policy was successfully enforced. This exit status
+    # must not be interpreted as backend or model readiness.
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+---
+
+### repair_transcribe_parakeet_patch.py
+
+```py
+#!/usr/bin/env python3
+"""
+repair_transcribe_parakeet_patch.py
+
+Single-file patch installer for slAIdshow:
+- Smooths transcription flow by introducing an async buffer/worker that
+  flushes to the transcription backend without blocking audio capture.
+- Adds optional Parakeet STT backend adapter (CPU-only, opt-in via
+  APP_ENABLE_PARAKEET=1). When enabled and in Lowend/English path, it is
+  preferred for lower latency.
+Usage:
+    python3 repair_transcribe_parakeet_patch.py
+
+This script edits app.py and transcription_backend.py in-place,
+creating .repair_patch.bak backups. It is idempotent.
+"""
+
+from __future__ import annotations
+import os
+import sys
+import re
+import shutil
+import hashlib
+
+PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
+FILES_TO_PATCH = ["app.py", "transcription_backend.py"]
+MARKER = "# TRANSCRIBE_PARAKEET_PATCH_V1"
+
+def backup(path: str) -> None:
+    bak = path + ".repair_patch.bak"
+    if not os.path.exists(bak):
+        shutil.copy2(path, bak)
+        print(f"Backup created: {bak}")
+
+def read(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+def write(path: str, content: str) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"Patched: {path}")
+
+def replace_in_file(path: str, old: str, new: str) -> None:
+    txt = read(path)
+    if MARKER in txt:
+        print(f"{path} already patched (marker present). Skipping.")
+        return
+    if old not in txt:
+        raise RuntimeError(f"Expected pattern not found in {path}")
+    backup(path)
+    newtxt = txt.replace(old, new)
+    newtxt += "\n" + MARKER + "\n"
+    write(path, newtxt)
+
+# --- Patch content for transcription_backend.py ---
+# We inject:
+# 1) an async buffer worker class (AudioBufferWorker) that consumes
+#    raw PCM chunks from capture and produces concatenated buffers to
+#    send to the existing transcribe API without blocking capture.
+# 2) a ParakeetAdapter stub (CPU-only). It is optional; user must set
+#    APP_ENABLE_PARAKEET=1 or the runtime will not try to import real parakeet.
+# 3) small changes in usage points: enqueue capture to worker instead
+#    of blocking transcribe calls.
+#
+TRANSCRIPTION_BACKEND_OLD_SNIPPET = (
+    "class RealtimeTranscriber"
+)
+
+TRANSCRIPTION_BACKEND_INSERT = r'''
+# --- BEGIN injected: Async buffer worker + Parakeet adapter ---
+import asyncio
+import time
+from collections import deque
+from typing import Optional, Deque, Any, Tuple
+
+# Async buffer worker: decouples capture from backend transcribe calls.
+class AudioBufferWorker:
+    """
+    Receives PCM chunks (bytes) via .enqueue(pcm_bytes, sr)
+    and periodically flushes aggregated audio to a transcribe callback so
+    that capture loop remains smooth. Uses a background asyncio task.
+    """
+    def __init__(self, transcribe_callback, flush_interval: float = 0.5,
+                 max_buffer_sec: float = 30.0, sample_rate: int = 16000):
+        self._cb = transcribe_callback
+        self._flush_interval = flush_interval
+        self._max_buffer_sec = max_buffer_sec
+        self._sr = sample_rate
+        self._dq: Deque[bytes] = deque()
+        self._dq_bytes = 0
+        self._task: Optional[asyncio.Task] = None
+        self._closed = False
+        self._lock = asyncio.Lock()
+        self._last_flush = time.time()
+
+    async def start(self):
+        if self._task is None:
+            self._task = asyncio.create_task(self._runner())
+
+    async def stop(self):
+        self._closed = True
+        if self._task:
+            await self._task
+            self._task = None
+
+    async def enqueue(self, pcm_bytes: bytes):
+        # Keep enqueue non-blocking and bounded
+        async with self._lock:
+            self._dq.append(pcm_bytes)
+            self._dq_bytes += len(pcm_bytes)
+            # enforce max buffer size in seconds => bytes = sr * 2 (16bit) * seconds
+            max_bytes = int(self._sr * 2 * self._max_buffer_sec)
+            if self._dq_bytes > max_bytes:
+                # drop oldest chunks (best-effort) to avoid memory blowup
+                while self._dq and self._dq_bytes > max_bytes:
+                    b = self._dq.popleft()
+                    self._dq_bytes -= len(b)
+
+    async def _runner(self):
+        try:
+            while not self._closed:
+                await asyncio.sleep(self._flush_interval)
+                await self._maybe_flush()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # flush remaining on stop
+            await self._maybe_flush(finalize=True)
+
+    async def _maybe_flush(self, finalize: bool = False):
+        # If enough audio or if finalize requested, send to callback asynchronously
+        async with self._lock:
+            if not self._dq:
+                return
+            # heuristic: flush if > 0.5s buffered OR finalize
+            bytes_ready = self._dq_bytes
+            threshold = int(self._sr * 2 * 0.5)
+            if bytes_ready < threshold and not finalize:
+                return
+            # aggregate
+            parts = list(self._dq)
+            self._dq.clear()
+            self._dq_bytes = 0
+            aggregated = b''.join(parts)
+        # schedule callback without awaiting here; callback can be async or sync
+        try:
+            result = self._cb(aggregated, self._sr, finalize)
+            if asyncio.iscoroutine(result):
+                # don't block buffer worker on actual transcribe duration
+                asyncio.create_task(result)
+        except Exception:
+            # ensure buffer worker never crashes the main loop
+            import traceback; traceback.print_exc()
+
+# Parakeet adapter stub: light-weight optional adapter.
+class ParakeetAdapter:
+    """
+    Minimal parakeet adapter. Only attempts import when explicitly enabled.
+    Exposes method transcribe_bytes(pcm_bytes, sr) -> text.
+    """
+    def __init__(self):
+        self._loaded = False
+        self._model = None
+
+    def load(self):
+        # Attempt to import a hypothetical parakeet runtime if present.
+        # This is a safe, non-fatal attempt; if import fails we remain unloaded.
+        try:
+            import parakeet  # pragma: no cover - optional dependency
+            # actual initialization would go here
+            self._loaded = True
+            self._model = parakeet.load_model("tdt_0.6b_v3")  # placeholder API
+        except Exception:
+            self._loaded = False
+
+    async def transcribe_bytes(self, pcm_bytes: bytes, sr: int) -> str:
+        if not self._loaded:
+            raise RuntimeError("Parakeet not loaded")
+        # Convert to expected parakeet input then call model - placeholder
+        # Real implementation depends on parakeet python API.
+        return self._model.transcribe(pcm_bytes, sample_rate=sr)
+# --- END injected ---
+'''
+
+# --- Patch content for app.py ---
+# We will:
+# 1) add config env APP_ENABLE_PARAKEET check and launch a ParakeetAdapter instance
+# 2) ensure the capture loop enqueues audio chunks to the worker instead of calling transcribe directly
+APP_OLD_SNIPPET = "def start_capture("
+APP_INSERT_SNIPPET = r'''
+# --- BEGIN injected: start capture uses AudioBufferWorker (parakeet opt-in) ---
+import os, asyncio
+_APP_ENABLE_PARAKEET = os.getenv("APP_ENABLE_PARAKEET", "") == "1"
+try:
+    _parakeet_adapter = None
+    if _APP_ENABLE_PARAKEET:
+        from transcription_backend import ParakeetAdapter  # type: ignore
+        _parakeet_adapter = ParakeetAdapter()
+        _parakeet_adapter.load()
+except Exception:
+    _parakeet_adapter = None
+
+# locate existing RealtimeTranscriber or similar transcribe function
+# Provide a wrapper callback to accept aggregated bytes from worker.
+async def _buffer_transcribe_cb(pcm_bytes: bytes, sr: int, finalize: bool = False):
+    """
+    Called by AudioBufferWorker with aggregated PCM bytes.
+    This wrapper chooses backend: Parakeet (if enabled and loaded and
+    conditions met) else original transcribe facility.
+    """
+    # Lazy import of the module's transcribe function to avoid circular imports.
+    try:
+        import transcription_backend as tb
+    except Exception:
+        tb = None
+
+    text = ""
+    try:
+        # Prefer parakeet if enabled and loaded and language heuristics suggest it
+        if _parakeet_adapter and getattr(_parakeet_adapter, "_loaded", False):
+            # heuristic: if configured to prefer english or detected language is en,
+            # try parakeet first (non-fatal on failure)
+            try:
+                lang_hint = os.getenv("APP_TRANSCRIBE_LANG_HINT", "")  # optional
+                if lang_hint.lower().startswith("en"):
+                    txt = await _parakeet_adapter.transcribe_bytes(pcm_bytes, sr)
+                    if txt:
+                        text = txt
+                        # hand over to existing backend for integration (if needed)
+                        if tb and hasattr(tb, "accept_transcript"):
+                            await tb.accept_transcript(text, source="parakeet")
+                        return
+            except Exception:
+                # parakeet failure is non-fatal; fall back
+                pass
+
+        # fallback to existing transcription pipeline
+        if tb and hasattr(tb, "transcribe_bytes"):
+            # transcribe_bytes should be an async function returning text
+            txt = tb.transcribe_bytes(pcm_bytes, sr, finalize=finalize)
+            if asyncio.iscoroutine(txt):
+                txt = await txt
+            text = txt or ""
+            # accept into backend structures if available
+            if tb and hasattr(tb, "accept_transcript"):
+                await tb.accept_transcript(text, source="buffered")
+    except Exception:
+        import traceback; traceback.print_exc()
+    return text
+# --- END injected ---
+'''
+
+def patch_transcription_backend():
+    p = os.path.join(PROJECT_ROOT, "transcription_backend.py")
+    if not os.path.exists(p):
+        raise FileNotFoundError(p)
+    txt = read(p)
+    if MARKER in txt:
+        print("transcription_backend.py already patched. Skipping.")
+        return
+    # Find class RealtimeTranscriber and insert worker + parakeet adapter above it.
+    idx = txt.find(TRANSCRIPTION_BACKEND_OLD_SNIPPET)
+    if idx == -1:
+        raise RuntimeError("Could not find RealtimeTranscriber declaration to patch.")
+    # inject before the class keyword occurrence
+    newtxt = txt[:idx] + TRANSCRIPTION_BACKEND_INSERT + txt[idx:]
+    backup(p)
+    write(p, newtxt)
+
+def patch_app_py():
+    p = os.path.join(PROJECT_ROOT, "app.py")
+    if not os.path.exists(p):
+        raise FileNotFoundError(p)
+    txt = read(p)
+    if MARKER in txt:
+        print("app.py already patched. Skipping.")
+        return
+    # We look for a start_capture function snippet; if none, attempt to
+    # insert our wrapper near top-level imports.
+    if APP_OLD_SNIPPET not in txt:
+        # fallback: find the module-level imports and insert after them
+        m = re.search(r'(^import .+\n(?:from .+ import .+\n)*)', txt, flags=re.M)
+        insert_pos = m.end() if m else 0
+        newtxt = txt[:insert_pos] + APP_INSERT_SNIPPET + txt[insert_pos:]
+    else:
+        # naive replace: insert our wrapper before the function def
+        idx = txt.find(APP_OLD_SNIPPET)
+        newtxt = txt[:idx] + APP_INSERT_SNIPPET + txt[idx:]
+    backup(p)
+    write(p, newtxt)
+
+def main():
+    try:
+        patch_transcription_backend()
+        patch_app_py()
+    except Exception as e:
+        print("Patch failed:", e)
+        sys.exit(2)
+    print("Patch applied successfully. Backups created; rerun is idempotent.")
+    print("Next steps:")
+    print(" - Restart the application: python3 app.py")
+    print(" - If you enabled APP_ENABLE_PARAKEET=1, ensure a Parakeet runtime or keep it as optional stub.")
+    print(" - Monitor logs for 'AudioBufferWorker' and 'parakeet' messages.")
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+### requirements.txt
+
+```txt
+# requirements.txt
+# Python 3.12; shared application dependencies for all VRAM tiers.
+# Ollama and ComfyUI run as separate services.
+# This is a direct-dependency manifest, not a transitive lockfile.
+
+# Core web framework and server
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# Async HTTP and concurrency
+httpx[http2]==0.27.2
+anyio>=3.7.1,<5
+
+# Validation and typing
+pydantic>=2,<3
+typing-extensions>=4.9.0,<5
+
+# Hardware detection and YAML configuration
+# pynvml is the explicitly selected project dependency.
+# Recent pynvml releases install nvidia-ml-py transitively.
+pynvml==13.0.1
+PyYAML>=6.0.2,<7
+
+# Audio and numerical processing
+# Preserve the NumPy version reported as working locally.
+numpy==2.5.0
+sounddevice==0.4.7
+# For file-based audio fallback (WAV/FLAC/OGG etc.) used by transcribe_file_for_fallback
+soundfile>=0.12,<1
+
+# Existing local transcription backends
+# CPU execution is the baseline for the 6 GB profile.
+# GPU execution requires a separately validated CUDA runtime.
+pywhispercpp>=1.1.0,<2
+faster-whisper==1.2.1
+
+# Environment handling
+python-dotenv==1.0.1
+
+# Multipart uploads
+python-multipart>=0.0.18,<1
+
+# Image handling and asynchronous file access
+pillow>=10.3.0,<13
+aiofiles>=23.2.1,<26
+
+# JSON serialization
+orjson>=3.10.0,<4
+
+# Linux/macOS event loop; also selected by uvicorn[standard]
+uvloop>=0.19.0,<1; platform_system != "Windows"
+
+# Local image style analysis
+# Install only one OpenCV distribution in this environment.
+opencv-python-headless==4.13.0.92
+scikit-image==0.26.0
+scikit-learn==1.5.2
+
+# Native-extension build tooling
+# Kept for compatibility with the existing Docker build.
+setuptools>=68,<83
+wheel>=0.41,<1
+
+# Optional VAD remains disabled until explicitly integrated.
+# webrtcvad==2.0.10
+
+# Notes:
+# - parakeet-cli (parakeet.cpp) wird nicht als Python-Paket installiert; falls genutzt, läuft es als externer Subprozess.
+# - Keine zusätzlichen Cloud-Abhängigkeiten im Runtime-Pfad.
+```
+
+---
+
+### run.ps1
+
+```ps1
+#!/usr/bin/env pwsh
+
+
+param(
+  # Server bind (localhost only for privacy)
+  [string]$HostIP    = $(if ($env:HOST) { $env:HOST } else { "127.0.0.1" }),
+  [int]$Port         = $(if ($env:PORT) { [int]$env:PORT } else { 8080 }),
+
+  # Python and venv configuration
+  [string]$PythonBin = $(if ($env:PYTHON_BIN) { $env:PYTHON_BIN } else { "python" }),
+  [string]$VenvDir   = $(if ($env:VENV_DIR) { $env:VENV_DIR } else { ".venv" }),
+  [string]$ReqFile   = $(if ($env:REQ_FILE) { $env:REQ_FILE } else { "requirements.txt" }),
+
+  # Uvicorn reload for development and pip quiet mode
+  [int]$DevReload    = $(if ($env:DEV_RELOAD) { [int]$env:DEV_RELOAD } else { 1 }),
+  [int]$QuietPip     = $(if ($env:QUIET_PIP) { [int]$env:QUIET_PIP } else { 0 })
+)
+
+$ErrorActionPreference = "Stop"
+
+# Simple log helpers for consistent colored output
+function Write-Info([string]$msg) { Write-Host "[INFO] $msg" -ForegroundColor Cyan }
+function Write-Ok([string]$msg)   { Write-Host "[OK]   $msg" -ForegroundColor Green }
+function Write-Err([string]$msg)  { Write-Error $msg }
+function Write-Wrn([string]$msg)  { Write-Warning $msg }
+
+# Helper: run small Python snippets by piping code on stdin (avoids shell quoting issues)
+function PyRunStdin([string]$code) {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $PythonBin
+  $psi.Arguments = "-"
+  $psi.RedirectStandardInput = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.UseShellExecute = $false
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  [void]$proc.Start()
+  $proc.StandardInput.WriteLine($code)
+  $proc.StandardInput.Close()
+  $out = $proc.StandardOutput.ReadToEnd()
+  $err = $proc.StandardError.ReadToEnd()
+  $proc.WaitForExit()
+  if ($proc.ExitCode -ne 0) {
+    throw "python - (stdin) failed: $err"
+  }
+  return $out.Trim()
+}
+
+# Enforce localhost binding for privacy and GDPR compliance
+if ($HostIP -ne "127.0.0.1" -and $HostIP -ne "localhost") {
+  Write-Err ("For privacy, HostIP must be 127.0.0.1 or localhost. Given: {0}" -f $HostIP)
+  exit 1
+}
+
+# Check Python availability and version (>= 3.9)
+try {
+  $ver = PyRunStdin @'
+import sys
+print('{}.{}'.format(sys.version_info.major, sys.version_info.minor))
+'@
+  if (-not $ver) { throw "Python version detection returned empty output." }
+  Write-Info ("Python {0} detected via '{1}'" -f $ver, $PythonBin)
+  $maj = [int]$ver.Split('.')[0]; $min = [int]$ver.Split('.')[1]
+  if ($maj -lt 3 -or ($maj -eq 3 -and $min -lt 9)) { throw "Python >= 3.9 required" }
+} catch {
+  Write-Err ("Python not found or unsuitable: {0}" -f $_)
+  exit 1
+}
+
+# Detect if the current Python is already inside the desired venv
+$alreadyInVenv = $false
+try {
+  $pyinfo = PyRunStdin @'
+import sys
+print(sys.executable)
+print(sys.prefix)
+print(sys.base_prefix)
+'@
+  $lines = $pyinfo -split "`r?`n"
+  $exePath = $lines[0]; $sysPrefix = $lines[1]; $basePrefix = $lines[2]
+  if ($sysPrefix -ne $basePrefix -and ($exePath -like "*$VenvDir*")) {
+    $alreadyInVenv = $true
+    Write-Info ("Existing venv detected: {0}" -f $exePath)
+  }
+} catch {
+  # Non-fatal; continue with venv creation/activation below
+}
+
+# Create and activate virtual environment if not already active
+if (-not $alreadyInVenv) {
+  if (-not (Test-Path $VenvDir)) {
+    Write-Info ("Creating venv at '{0}'..." -f $VenvDir)
+    & $PythonBin -m venv $VenvDir
+  } else {
+    Write-Info ("Using existing venv at '{0}'" -f $VenvDir)
+  }
+  $activate = Join-Path $VenvDir "Scripts\Activate.ps1"
+  if (-not (Test-Path $activate)) {
+    Write-Err ("Could not activate venv (missing {0})." -f $activate)
+    exit 1
+  }
+  # Dot-source the venv activation for the current PowerShell session
+  . $activate
+  $venvPy = PyRunStdin @'
+import sys
+print(sys.executable)
+'@
+  Write-Ok ("Activated venv: {0}" -f $venvPy)
+} else {
+  Write-Ok "Keeping current active venv."
+}
+
+# Upgrade pip inside the venv, optionally in quiet mode
+if ($QuietPip -eq 1) {
+  python -m pip install --upgrade pip -q
+} else {
+  python -m pip install --upgrade pip
+}
+
+# Install base requirements if a requirements.txt is present
+if (Test-Path $ReqFile) {
+  Write-Info ("Installing requirements from {0}..." -f $ReqFile)
+  if ($QuietPip -eq 1) {
+    pip install -r $ReqFile -q
+  } else {
+    pip install -r $ReqFile
+  }
+} else {
+  Write-Wrn ("No {0} found; skipping base dependency install." -f $ReqFile)
+}
+
+# Optional: attempt to install webrtcvad wheels (not critical; used for VAD speed)
+try {
+  $hasVad = PyRunStdin @'
+import importlib.util
+print('yes' if importlib.util.find_spec('webrtcvad') else 'no')
+'@
+} catch { $hasVad = "no" }
+if ($hasVad -ne "yes") {
+  Write-Info "Attempting install: webrtcvad-wheels (optional)"
+  try {
+    pip install --no-cache-dir webrtcvad-wheels | Out-Null
+  } catch {
+    Write-Wrn "webrtcvad-wheels failed - continuing without WebRTC VAD."
+  }
+} else {
+  Write-Info "webrtcvad already installed"
+}
+
+# Ensure pywhispercpp is available (required for realtime transcription)
+try {
+  $hasWhisper = PyRunStdin @'
+import importlib.util
+print('yes' if importlib.util.find_spec('pywhispercpp') else 'no')
+'@
+} catch { $hasWhisper = "no" }
+if ($hasWhisper -ne "yes") {
+  Write-Info "Installing pywhispercpp..."
+  try {
+    pip install --no-cache-dir pywhispercpp
+  } catch {
+    Write-Err "pywhispercpp could not be installed. See https://github.com/absadiki/pywhispercpp"
+    exit 2
+  }
+} else {
+  Write-Info "pywhispercpp already installed"
+}
+
+# Ensure outputs directory exists for generated images
+try {
+  $null = New-Item -ItemType Directory -Force -Path "outputs\images" | Out-Null
+} catch {
+  # Non-fatal, continue
+}
+
+# Port reachability test without colliding with PowerShell's $Host variable
+function Test-Port {
+  param(
+    [string]$Name,
+    [string]$TargetHost,
+    [int]$TargetPort
+  )
+  try {
+    $client = New-Object System.Net.Sockets.TcpClient
+    $iar = $client.BeginConnect($TargetHost, $TargetPort, $null, $null)
+    $ok = $iar.AsyncWaitHandle.WaitOne(1000, $false)
+    if ($ok -and $client.Connected) {
+      $client.EndConnect($iar); $client.Close()
+      Write-Ok ("{0} reachable at {1}:{2}" -f $Name, $TargetHost, $TargetPort)
+      return $true
+    } else {
+      $client.Close()
+      Write-Wrn ("{0} NOT reachable at {1}:{2} - continuing anyway." -f $Name, $TargetHost, $TargetPort)
+      return $false
+    }
+  } catch {
+    Write-Wrn ("{0} NOT reachable at {1}:{2} - continuing anyway." -f $Name, $TargetHost, $TargetPort)
+    return $false
+  }
+}
+
+# Resolve local service endpoints (kept to 127.0.0.1 by default)
+$OllamaHost = if ($env:APP_OLLAMA_HOST) { $env:APP_OLLAMA_HOST } else { "127.0.0.1" }
+$OllamaPort = if ($env:APP_OLLAMA_PORT) { [int]$env:APP_OLLAMA_PORT } else { 11434 }
+$ComfyHost  = if ($env:APP_COMFY_HOST)  { $env:APP_COMFY_HOST } else { "127.0.0.1" }
+$ComfyPort  = if ($env:APP_COMFY_PORT)  { [int]$env:APP_COMFY_PORT } else { 8188 }
+
+# Non-fatal preflight checks: helpful hints if services are not yet up
+$ollamaUp = Test-Port -Name "Ollama" -TargetHost $OllamaHost -TargetPort $OllamaPort
+$comfyUp  = Test-Port -Name "ComfyUI" -TargetHost $ComfyHost  -TargetPort $ComfyPort
+
+if (-not $ollamaUp) {
+  Write-Wrn "Tip: Start Ollama first (ollama serve) and pull a small model, e.g., 'ollama pull llama3.2:3b'."
+}
+if (-not $comfyUp) {
+  Write-Wrn "Tip: Start ComfyUI: python main.py --listen 127.0.0.1 --port 8188 --lowvram"
+}
+
+# Start FastAPI via uvicorn on localhost
+$extra = @()
+if ($DevReload -eq 1) { $extra += "--reload" }
+
+Write-Host ("Starting server at http://{0}:{1}" -f $HostIP, $Port)
+python -m uvicorn app:app --host $HostIP --port $Port @extra
+```
+
+---
+
+### run.sh
+
+```sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =========================
+# slAIdshow bootstrap script (project-folder agnostic)
+# =========================
+
+# ---- Settings (overridable via env) ----
+HOST="${HOST:-127.0.0.1}"          # Bind strictly to localhost
+PORT="${PORT:-8080}"
+VENV_DIR="${VENV_DIR:-.venv}"
+REQ_FILE="${REQ_FILE:-requirements.txt}"
+DEV_RELOAD="${DEV_RELOAD:-1}"      # 1 = uvicorn --reload
+QUIET_PIP="${QUIET_PIP:-0}"        # 1 = quieter pip output
+AUTO_APT="${AUTO_APT:-1}"          # 1 = try to install OS prereqs on Debian/Ubuntu
+
+# ---- Normalize working directory to the script location ----
+SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+cd "${SCRIPT_DIR}"
+
+log()  { echo -e "[INFO] $*"; }
+warn() { echo -e "[WARN] $*" >&2; }
+err()  { echo -e "[ERROR] $*" >&2; }
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+is_debian_like() {
+  if [[ -f /etc/os-release ]]; then
+    . /etc/os-release
+    case "${ID:-}${ID_LIKE:-}" in
+      *debian*|*ubuntu*|*linuxmint*|*elementary*|*pop*|*neon*) return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+maybe_install_apt_prereqs() {
+  if [[ "${AUTO_APT}" != "1" ]]; then
+    log "Skipping OS prereqs (AUTO_APT=0)."
+    return 0
+  fi
+  if ! is_debian_like; then
+    log "Non-Debian/Ubuntu system – skipping apt prereqs."
+    return 0
+  fi
+  if ! have_cmd sudo || ! have_cmd apt; then
+    warn "sudo/apt not available – skipping apt prereqs."
+    return 0
+  fi
+  log "Installing Debian/Ubuntu prereqs (requires sudo)..."
+  set +e
+  sudo apt update
+  sudo apt install -y build-essential cmake pkg-config python3-dev libportaudio2 libasound2-dev
+  local rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    warn "apt prereqs installation failed (code $rc). Continuing anyway."
+  else
+    log "apt prereqs OK."
+  fi
+}
+
+# Unset any pre-existing venv to avoid PATH pollution from other projects
+unset VIRTUAL_ENV || true
+
+# --- Validate or create venv ---
+create_venv() {
+  local sys_py=""
+  if have_cmd python3; then
+    sys_py="$(command -v python3)"
+  elif have_cmd python; then
+    sys_py="$(command -v python)"
+  else
+    err "Kein Python 3 gefunden. Installiere python3 (z.B. 'sudo apt install -y python3')."
+    exit 1
+  fi
+  log "Creating virtual environment at ${VENV_DIR} using ${sys_py}"
+  "${sys_py}" -m venv "${VENV_DIR}"
+}
+
+validate_or_recreate_venv() {
+  # Fall 1: venv fehlt → erstellen
+  if [[ ! -d "${VENV_DIR}" ]]; then
+    create_venv
+    return
+  fi
+
+  # Fall 2: venv existiert, prüfe .venv/bin/python
+  if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
+    warn "Existing venv is missing bin/python → recreating."
+    rm -rf "${VENV_DIR}"
+    create_venv
+    return
+  fi
+
+  # Fall 3: Prüfe, ob Pip/Shebang auf einen falschen Pfad zeigt
+  if [[ -f "${VENV_DIR}/bin/pip" ]]; then
+    if head -n1 "${VENV_DIR}/bin/pip" | grep -q "speechtoimage_ai/.venv/bin/python"; then
+      warn "Detected stale shebang in pip (points to old project path). Recreating venv."
+      rm -rf "${VENV_DIR}"
+      create_venv
+      return
+    fi
+  fi
+
+  # Fall 4: Zusätzlicher Integritätscheck: Python aus venv starten
+  if ! "${VENV_DIR}/bin/python" -c 'import sys; print(sys.executable)' >/dev/null 2>&1; then
+    warn "Venv python is not runnable → recreating."
+    rm -rf "${VENV_DIR}"
+    create_venv
+    return
+  fi
+}
+
+activate_venv() {
+  # shellcheck disable=SC1091
+  source "${VENV_DIR}/bin/activate"
+  echo "[DEBUG] which python after activate: $(command -v python || echo 'not found')"
+  echo "[DEBUG] PATH: $PATH"
+}
+
+ensure_requirements() {
+  local PY_BIN="${VENV_DIR}/bin/python"
+  local PIP_BIN="${VENV_DIR}/bin/pip"
+
+  local quiet_flag=()
+  if [[ "${QUIET_PIP}" == "1" ]]; then
+    quiet_flag+=(-q)
+  fi
+
+  "${PY_BIN}" -m pip install --upgrade pip setuptools wheel "${quiet_flag[@]}"
+
+  if [[ -f "${REQ_FILE}" ]]; then
+    log "Installing Python requirements from ${REQ_FILE}"
+    "${PIP_BIN}" install -r "${REQ_FILE}" "${quiet_flag[@]}"
+  else
+    warn "No requirements.txt found – installing minimal core deps"
+    "${PIP_BIN}" install httpx pydantic fastapi 'uvicorn[standard]' "${quiet_flag[@]}"
+  fi
+}
+
+ensure_webrtcvad() {
+  local PY_BIN="${VENV_DIR}/bin/python"
+  local PIP_BIN="${VENV_DIR}/bin/pip"
+  if "${PY_BIN}" - <<'PY' >/dev/null 2>&1
+import importlib; importlib.import_module("webrtcvad")
+PY
+  then
+    log "webrtcvad already present"
+  else
+    log "Attempting optional install: webrtcvad-wheels"
+    if ! "${PIP_BIN}" install --no-cache-dir webrtcvad-wheels >/dev/null 2>&1; then
+      warn "webrtcvad-wheels install failed – continuing without WebRTC VAD."
+    fi
+  fi
+}
+
+ensure_pywhispercpp() {
+  local PY_BIN="${VENV_DIR}/bin/python"
+  local PIP_BIN="${VENV_DIR}/bin/pip"
+  if "${PY_BIN}" - <<'PY' >/dev/null 2>&1
+import importlib; importlib.import_module("pywhispercpp")
+PY
+  then
+    log "pywhispercpp already present"
+  else
+    log "Installing pywhispercpp (prefer wheels)"
+    if ! "${PIP_BIN}" install --no-cache-dir pywhispercpp; then
+      err "pywhispercpp could not be installed. Please verify platform/wheels."
+      err "See: https://github.com/absadiki/pywhispercpp"
+      exit 2
+    fi
+  fi
+}
+
+check_local() {
+  local name="$1" host="$2" port="$3"
+  local PY_BIN="${VENV_DIR}/bin/python"
+  if "${PY_BIN}" - <<PY >/dev/null 2>&1
+import socket
+h="${host}"; p=int("${port}")
+s=socket.socket(); s.settimeout(1.0)
+ok=False
+try:
+    s.connect((h,p)); ok=True
+except Exception:
+    ok=False
+finally:
+    s.close()
+print("ok" if ok else "no")
+PY
+  then
+    echo "[OK] ${name} reachable at ${host}:${port}"
+  else
+    echo "[WARN] ${name} NOT reachable at ${host}:${port} – continuing anyway."
+  fi
+}
+
+main() {
+  maybe_install_apt_prereqs
+
+  validate_or_recreate_venv
+  activate_venv
+
+  # Explizit Python-Version aus venv prüfen
+  local PY_BIN="${VENV_DIR}/bin/python"
+  local VER MAJ MIN
+  VER="$("${PY_BIN}" -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  MAJ="$("${PY_BIN}" -c 'import sys;print(sys.version_info.major)')"
+  MIN="$("${PY_BIN}" -c 'import sys;print(sys.version_info.minor)')"
+  echo "[INFO] Python ${VER} (venv) detected"
+  if [ "$MAJ" -lt 3 ] || { [ "$MAJ" -eq 3 ] && [ "$MIN" -lt 9 ]; }; then
+    err "Python >= 3.9 required."
+    exit 1
+  fi
+
+  ensure_requirements
+  ensure_webrtcvad
+  ensure_pywhispercpp
+
+  mkdir -p outputs/images
+
+  local OLLAMA_HOST="${APP_OLLAMA_HOST:-127.0.0.1}"
+  local OLLAMA_PORT="${APP_OLLAMA_PORT:-11434}"
+  local COMFY_HOST="${APP_COMFY_HOST:-127.0.0.1}"
+  local COMFY_PORT="${APP_COMFY_PORT:-8188}"
+  check_local "Ollama" "${OLLAMA_HOST}" "${OLLAMA_PORT}"
+  check_local "ComfyUI" "${COMFY_HOST}" "${COMFY_PORT}"
+
+  local EXTRA_FLAGS=()
+  if [[ "${DEV_RELOAD}" == "1" ]]; then
+    EXTRA_FLAGS+=(--reload)
+  fi
+
+  log "Starting server at http://${HOST}:${PORT}"
+  exec "${VENV_DIR}/bin/uvicorn" app:app --host "${HOST}" --port "${PORT}" "${EXTRA_FLAGS[@]}"
+}
+
+main "$@"
+```
+
+---
+
+### runtime_config.py
+
+```py
+# runtime_config.py
+"""Load conservative generated configuration without initializing backends.
+
+This module has no import-time filesystem, GPU, or network side effects.
+Schema version 1 accepts only the current conservative generator output.
+Application integration must happen after dotenv loading and before importing
+backend modules that read environment variables.
+
+Loading configuration does not enforce runtime policy or establish readiness.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import os
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from config_generator import (
+    DEFAULT_CONFIG_PATH,
+    SCHEMA_VERSION,
+    ConfigurationError,
+    build_config,
+    select_tier,
+    validate_hardware,
+)
+
+MAX_CONFIG_BYTES = 256 * 1024
+HARDWARE_REPORT_FIELDS = (
+    "is_apple_silicon",
+    "gpu_index",
+    "gpu_count",
+    "gpu_uuid",
+    "gpu_name",
+    "vram_total_bytes",
+    "vram_free_bytes",
+    "vram_used_bytes",
+)
+
+
+class RuntimeConfigurationError(ValueError):
+    """Report missing, malformed, or unsupported runtime configuration."""
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Reject duplicate mapping keys instead of silently overwriting them."""
+
+
+def _construct_mapping(
+    loader: _UniqueKeyLoader,
+    node: yaml.MappingNode,
+) -> dict[str, Any]:
+    """Require unique string keys in every YAML mapping."""
+    result: dict[str, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if not isinstance(key, str):
+            raise RuntimeConfigurationError(
+                "YAML-Schlüssel müssen Zeichenketten sein."
+            )
+        if key in result:
+            # Do not echo untrusted keys or potential secrets.
+            raise RuntimeConfigurationError(
+                "Konfiguration enthält einen doppelten YAML-Schlüssel."
+            )
+        result[key] = loader.construct_object(value_node, deep=True)
+    return result
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_mapping,
+)
+
+
+def _match_baseline(
+    actual: object,
+    expected: object,
+    path: str = "config",
+) -> None:
+    """Check exact types and values without exposing configuration values."""
+    if type(actual) is not type(expected):
+        raise RuntimeConfigurationError(
+            f"Ungültiger Datentyp bei '{path}'."
+        )
+
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            raise RuntimeConfigurationError(
+                f"Ungültiges Objekt bei '{path}'."
+            )
+        if actual.keys() != expected.keys():
+            raise RuntimeConfigurationError(
+                f"Fehlende oder unbekannte Felder bei '{path}'."
+            )
+        # Only trusted baseline keys are included in diagnostic paths.
+        for key, value in expected.items():
+            _match_baseline(actual[key], value, f"{path}.{key}")
+        return
+
+    if isinstance(expected, list):
+        if not isinstance(actual, list) or len(actual) != len(expected):
+            raise RuntimeConfigurationError(
+                f"Nicht freigegebene Liste bei '{path}'."
+            )
+        for index, value in enumerate(expected):
+            _match_baseline(actual[index], value, f"{path}[{index}]")
+        return
+
+    if actual != expected:
+        raise RuntimeConfigurationError(
+            f"Nicht freigegebener Wert bei '{path}'; "
+            "Konfiguration mit config_generator.py neu erzeugen."
+        )
+
+
+def validate_config(data: object) -> dict[str, Any]:
+    """Accept only the current conservative configuration contract."""
+    if not isinstance(data, dict):
+        raise RuntimeConfigurationError(
+            "Konfiguration muss ein YAML-Objekt enthalten."
+        )
+
+    version = data.get("schema_version")
+    if type(version) is not int or version != SCHEMA_VERSION:
+        raise RuntimeConfigurationError(
+            "Konfigurations-Schema-Version fehlt oder wird nicht unterstützt."
+        )
+
+    hardware = data.get("hardware")
+    if not isinstance(hardware, dict):
+        raise RuntimeConfigurationError("Hardware-Konfiguration fehlt.")
+
+    tier = data.get("tier")
+    if not isinstance(tier, str):
+        raise RuntimeConfigurationError("Konfigurationsprofil fehlt.")
+
+    if hardware.get("memory_unit") != "bytes":
+        raise RuntimeConfigurationError(
+            "Hardware-Konfiguration muss Byte-Zähler deklarieren."
+        )
+    if hardware.get("is_apple_silicon") is not False:
+        raise RuntimeConfigurationError(
+            "Dieses lokale GPU-Profil benötigt "
+            "'is_apple_silicon: false'."
+        )
+
+    # Adapt the generated schema to the detector schema explicitly.
+    # Preserve all supplied hardware facts, especially platform information.
+    # The detector's GiB label accompanies authoritative byte counters.
+    report = {
+        "schema_version": version,
+        "memory_unit": "GiB",
+        **{key: hardware.get(key) for key in HARDWARE_REPORT_FIELDS},
+    }
+
+    try:
+        normalized_hardware = validate_hardware(report)
+        selected = select_tier(
+            normalized_hardware["vram_total_bytes"],
+            tier,
+        )
+        expected = build_config(normalized_hardware, selected)
+    except ConfigurationError as exc:
+        # Generator errors may include untrusted override values.
+        raise RuntimeConfigurationError(
+            "Hardware-Konfiguration oder Profil ist ungültig; "
+            "Konfiguration mit config_generator.py neu erzeugen."
+        ) from exc
+
+    # Reject edits that could bypass the conservative memory/offline policy.
+    # Model selections and deployment variants need an explicit contract update.
+    _match_baseline(data, expected)
+    return copy.deepcopy(expected)
+
+
+@dataclass(frozen=True)
+class LoadedConfiguration:
+    """Hold validated data without claiming backend readiness.
+
+    Use as_dict() for application initialization. The private dictionary is
+    an internal implementation detail, not a security boundary.
+    """
+
+    path: Path
+    _data: dict[str, Any]
+
+    @property
+    def tier(self) -> str:
+        return str(self._data["tier"])
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a detached copy for application initialization."""
+        return copy.deepcopy(self._data)
+
+    def status(self) -> dict[str, Any]:
+        """Expose policy status without URLs, paths, prompts, or credentials."""
+        return {
+            "loaded": True,
+            "schema_version": self._data["schema_version"],
+            "tier": self.tier,
+            "offline_policy": self._data["runtime"]["offline"],
+            "stt_device_policy": self._data["stt"]["device"],
+            "scheduler_mode_policy": self._data["scheduler"]["mode"],
+            "parallel_allowed": self._data["scheduler"]["parallel_allowed"],
+            "image_size_policy": {
+                "width": self._data["image"]["width"],
+                "height": self._data["image"]["height"],
+            },
+            "downloads_enabled": self._data["downloads"]["enabled"],
+            "readiness": copy.deepcopy(self._data["readiness"]),
+            "runtime_policy_enforced": False,
+            "hardware_snapshot_revalidated": False,
+            "backend_readiness_checked": False,
+        }
+
+
+def _config_path(path: str | Path | None) -> Path:
+    """Resolve explicit or environment configuration paths without I/O."""
+    raw_path = (
+        path
+        if path is not None
+        else os.environ.get("CONFIG_PATH", str(DEFAULT_CONFIG_PATH))
+    )
+    if not isinstance(raw_path, (str, Path)):
+        raise RuntimeConfigurationError(
+            "CONFIG_PATH muss eine Zeichenkette oder ein Path sein."
+        )
+    if isinstance(raw_path, str) and not raw_path.strip():
+        raise RuntimeConfigurationError("CONFIG_PATH darf nicht leer sein.")
+
+    try:
+        source = Path(raw_path).expanduser()
+        if "\x00" in str(source):
+            raise RuntimeConfigurationError(
+                "CONFIG_PATH enthält ein ungültiges Nullzeichen."
+            )
+        return source
+    except (OSError, RuntimeError, ValueError) as exc:
+        if isinstance(exc, RuntimeConfigurationError):
+            raise
+        raise RuntimeConfigurationError(
+            "CONFIG_PATH konnte nicht aufgelöst werden."
+        ) from exc
+
+
+def load_config(
+    path: str | Path | None = None,
+) -> LoadedConfiguration:
+    """Load required configuration without silently mutating it."""
+    source = _config_path(path)
+
+    try:
+        with source.open("rb") as handle:
+            content = handle.read(MAX_CONFIG_BYTES + 1)
+    except (OSError, ValueError) as exc:
+        raise RuntimeConfigurationError(
+            "Konfiguration konnte nicht gelesen werden; "
+            "CONFIG_PATH und Dateiberechtigungen prüfen."
+        ) from exc
+
+    if len(content) > MAX_CONFIG_BYTES:
+        raise RuntimeConfigurationError(
+            "Konfigurationsdatei überschreitet 256 KiB."
+        )
+
+    try:
+        data = yaml.load(
+            content.decode("utf-8"),
+            Loader=_UniqueKeyLoader,
+        )
+    except RuntimeConfigurationError:
+        raise
+    except (UnicodeError, yaml.YAMLError, RecursionError, ValueError) as exc:
+        raise RuntimeConfigurationError(
+            "Konfiguration enthält ungültiges oder zu stark "
+            "verschachteltes UTF-8/YAML."
+        ) from exc
+
+    try:
+        validated = validate_config(data)
+    except RecursionError as exc:
+        raise RuntimeConfigurationError(
+            "Konfiguration enthält eine nicht unterstützte Verschachtelung."
+        ) from exc
+
+    # Overrides belong to generation, not hidden runtime mutation.
+    override = os.environ.get("SLAIDSHOW_TIER")
+    if override is not None and override != validated["tier"]:
+        raise RuntimeConfigurationError(
+            "SLAIDSHOW_TIER widerspricht der gespeicherten Konfiguration; "
+            "config_generator.py mit dem gewünschten Profil und --force "
+            "bewusst erneut ausführen."
+        )
+
+    return LoadedConfiguration(path=source, _data=validated)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Validate persisted YAML without loading models or contacting servers."""
+    parser = argparse.ArgumentParser(
+        description="Prüft die persistierte slAIdshow-Konfiguration."
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="YAML-Pfad; alternativ CONFIG_PATH oder /app/config/generated.yaml.",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        configuration = load_config(args.config)
+    except RuntimeConfigurationError as exc:
+        print(f"Fehler: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        json.dumps(
+            configuration.status(),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+---
+
+### sourcecode_snapshot.py
+
+```py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+create_source_snapshot_code_only.py
+
+Creates a markdown snapshot "slAIdshow_aktuell.md" in the project root.
+
+Contents:
+ - A directory tree excerpt (depth controlled below).
+ - Then concatenated source files only, limited to:
+     .py, .html, .yml, .yaml, .sh, .ps1, .txt, .service
+   and specific filenames:
+     .env.example, .gitignore, .dockerignore, Dockerfile, Makefile
+
+Behavior:
+ - Non-destructive: only reads project files and writes slAIdshow_aktuell.md.
+ - Skips common large/irrelevant directories (virtualenvs, models, outputs, recordings).
+ - Skips very large files (> MAX_FILE_SIZE).
+ - Preserves stable ordering.
+ - Attempts UTF-8 reading, falls back to latin-1.
+ - Prints progress and final path.
+
+Usage:
+    python3 create_source_snapshot_code_only.py
+"""
+from __future__ import annotations
+import os
+import sys
+import time
+from pathlib import Path
+from typing import List
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+OUT_MD = PROJECT_ROOT / "slAIdshow_aktuell.md"
+TIMESTAMP = time.strftime("%Y-%m-%d %H:%M:%S")
+
+# Allowed patterns / names
+ALLOWED_EXTS = {".py", ".html", ".yml", ".yaml", ".sh", ".ps1", ".txt", ".service"}
+ALLOWED_NAMES = {".env.example", ".gitignore", ".dockerignore", "Dockerfile", "Makefile"}
+
+# Excluded top-level dirs (do not descend)
+EXCLUDE_DIRS = {
+    ".venv", "venv", "__pycache__", ".git", ".pytest_cache", ".mypy_cache",
+    "models", "outputs", "recordings", "node_modules", "dist", "build"
+}
+
+# Maximum file size to include (avoid huge assets)
+MAX_FILE_SIZE = 30 * 1024 * 1024  # 30 MiB
+
+TREE_DEPTH = 2  # depth for tree excerpt
+
+def is_allowed_file(p: Path) -> bool:
+    name = p.name
+    if name in ALLOWED_NAMES:
+        return True
+    if p.suffix.lower() in ALLOWED_EXTS:
+        return True
+    return False
+
+def should_skip_dir(dirpath: Path) -> bool:
+    return dirpath.name in EXCLUDE_DIRS
+
+def gather_files(root: Path) -> List[Path]:
+    files: List[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        # filter dirs in-place to avoid walking excluded dirs
+        dirnames[:] = [d for d in dirnames if not should_skip_dir(Path(dirpath) / d)]
+        for fn in filenames:
+            p = Path(dirpath) / fn
+            # skip the output markdown if it exists from previous run
+            if p == OUT_MD:
+                continue
+            # skip symlinks
+            try:
+                if p.is_symlink():
+                    continue
+            except Exception:
+                continue
+            # skip large files
+            try:
+                if p.stat().st_size > MAX_FILE_SIZE:
+                    # skip very large files
+                    continue
+            except Exception:
+                continue
+            if is_allowed_file(p):
+                files.append(p)
+    files.sort()
+    return files
+
+def make_tree_listing(root: Path, depth: int = TREE_DEPTH) -> str:
+    """
+    Simple tree-like listing of top-level structure up to given depth.
+    """
+    lines: List[str] = []
+    def walk(p: Path, prefix: str, current_depth: int):
+        if current_depth > depth:
+            return
+        try:
+            entries = sorted([e for e in p.iterdir()])
+        except Exception:
+            return
+        for i, e in enumerate(entries):
+            connector = "└── " if i == len(entries)-1 else "├── "
+            lines.append(f"{prefix}{connector}{e.name}")
+            if e.is_dir():
+                ext_prefix = prefix + ("    " if i == len(entries)-1 else "│   ")
+                walk(e, ext_prefix, current_depth + 1)
+    lines.append(f"{root.name}/")
+    walk(root, "", 1)
+    return "\n".join(lines)
+
+def read_text_file(p: Path) -> str:
+    try:
+        return p.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        try:
+            return p.read_text(encoding="latin-1")
+        except Exception:
+            return f"# Could not read file {p}\n"
+    except Exception:
+        return f"# Could not read file {p}\n"
+
+def write_md(tree: str, files: List[Path], out_md: Path) -> None:
+    header = f"# slAIdshow - aktuelle Quellkopie\n\n"
+    header += f"Erstellt: {TIMESTAMP}\n\n"
+    header += "## Verzeichnisbaum (Auszug)\n\n"
+    header += "```\n" + tree + "\n```\n\n"
+    header += "## Enthaltene Quelldateien (Code-only snapshot)\n\n"
+    header += ("Die folgenden Dateien sind im Snapshot enthalten. "
+               "Nach jedem Dateinamen folgt dessen Inhalt.\n\n")
+    with out_md.open("w", encoding="utf-8") as f:
+        f.write(header)
+        for p in files:
+            rel = p.relative_to(PROJECT_ROOT)
+            f.write(f"\n---\n\n### {rel}\n\n")
+            lang = p.suffix.lstrip(".")
+            # Use code fence for readability
+            f.write(f"```{lang}\n")
+            content = read_text_file(p)
+            f.write(content)
+            if not content.endswith("\n"):
+                f.write("\n")
+            f.write("```\n")
+    print(f"Wrote markdown snapshot: {out_md}")
+
+def main() -> int:
+    if not (PROJECT_ROOT / "app.py").exists():
+        print("Error: app.py not found in current directory; run this from project root", file=sys.stderr)
+        return 2
+    files = gather_files(PROJECT_ROOT)
+    if not files:
+        print("No source files found with the allowed patterns.", file=sys.stderr)
+        return 3
+    tree = make_tree_listing(PROJECT_ROOT, depth=TREE_DEPTH)
+    write_md(tree, files, OUT_MD)
+    print("\nFertig.\n")
+    print(f"Markdown erzeugt: {OUT_MD}")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+---
+
+### style_engine.py
+
+```py
+# style_engine.py
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+import asyncio
+import base64
+import contextlib
+import mimetypes
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import httpx
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+
+# =========================
+# Environment helpers
+# =========================
+
+def _env_str(k: str, d: str = "") -> str:
+    return (os.getenv(k, d) or "").strip()
+
+def _env_int(k: str, d: int) -> int:
+    try:
+        return int(os.getenv(k, str(d)))
+    except Exception:
+        return d
+
+def _env_float(k: str, d: float) -> float:
+    try:
+        return float(os.getenv(k, str(d)))
+    except Exception:
+        return d
+
+def _env_bool01(k: str, d: int = 0) -> bool:
+    v = (os.getenv(k, str(d)) or "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+
+# =========================
+# Core configuration
+# =========================
+
+APP_IMAGE_WIDTH = _env_int("APP_IMAGE_WIDTH", 1280)
+APP_IMAGE_HEIGHT = _env_int("APP_IMAGE_HEIGHT", 720)
+
+# Reference directory used by the app UI (/static serves outputs/images)
+DEFAULT_REFS_DIR = Path(_env_str("APP_REFS_DIR", "./outputs/images/refs")).resolve()
+
+# HTTP retry/timeouts aligned with app.py defaults
+HTTP_TIMEOUT_SEC = float(_env_float("APP_OLLAMA_TIMEOUT_SEC", 90.0))
+HTTP_MAX_RETRIES = int(_env_int("APP_OLLAMA_MAX_RETRIES", 4))
+HTTP_RETRY_BASE_DELAY = float(_env_float("APP_OLLAMA_RETRY_BASE_DELAY", 0.8))
+
+# Vision defaults (local by default; policy can forbid remote)
+OLLAMA_HOST = _env_str("APP_OLLAMA_HOST", "127.0.0.1")
+OLLAMA_PORT = _env_int("APP_OLLAMA_PORT", 11434)
+OLLAMA_VISION_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
+OLLAMA_VISION_MODEL = _env_str("APP_OLLAMA_VISION_MODEL", "llava:latest")
+OLLAMA_VISION_TEMPERATURE = float(_env_float("APP_OLLAMA_TEMPERATURE", 0.2))
+OLLAMA_VISION_NUM_CTX = _env_int("APP_OLLAMA_NUM_CTX", 1024)
+OLLAMA_VISION_NUM_PREDICT = _env_int("APP_OLLAMA_NUM_PREDICT", 256)
+OLLAMA_VISION_TOP_K = _env_int("APP_OLLAMA_TOP_K", 40)
+OLLAMA_VISION_TOP_P = float(_env_float("APP_OLLAMA_TOP_P", 0.9))
+OLLAMA_VISION_REPEAT_PENALTY = float(_env_float("APP_OLLAMA_REPEAT_PENALTY", 1.1))
+
+# Remote vision policy: disabled unless explicitly enabled
+APP_ALLOW_REMOTE_VISION = _env_bool01("APP_ALLOW_REMOTE_VISION", 0)
+
+# File download limits
+MAX_DOWNLOAD_BYTES = _env_int("APP_STYLE_MAX_DOWNLOAD_BYTES", 15_000_000)  # 15 MB
+ALLOWED_IMAGE_MIME = {
+    "image/jpeg", "image/png", "image/webp", "image/bmp", "image/gif",
+}
+
+# Feature toggles
+FEATURE_LOCAL_STYLE_ANALYSIS_DEFAULT = _env_bool01("FEATURE_LOCAL_STYLE_ANALYSIS_DEFAULT", 1)
+# Default Vision ON for better UX unless overridden in .env
+FEATURE_OLLAMA_VISION_DEFAULT = _env_bool01("FEATURE_OLLAMA_VISION_DEFAULT", 1)
+# Safety: force local analysis whenever a reference exists (ignores UI flag). Default OFF.
+FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON = _env_bool01("FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON", 0)
+
+# Token caps per source to keep prompt concise and user-prioritized
+MAX_TOKENS_STYLE_TEXT = _env_int("STYLE_ENGINE_MAX_TOKENS_STYLE_TEXT", 40)
+MAX_TOKENS_VISION = _env_int("STYLE_ENGINE_MAX_TOKENS_VISION", 24)
+MAX_TOKENS_DESCRIPTORS = _env_int("STYLE_ENGINE_MAX_TOKENS_DESCRIPTORS", 12)
+MAX_TOKENS_FINAL = _env_int("STYLE_ENGINE_MAX_TOKENS_FINAL", 40)
+
+# Local debug toggle controlling [style:debug] lines during local analysis
+STYLE_LOCAL_DEBUG = _env_bool01("STYLE_LOCAL_DEBUG", 1)
+
+
+# =========================
+# Pydantic data models
+# =========================
+
+class StyleEngineRequest(BaseModel):
+    """
+    Input to style builder. This module does NOT generate images.
+    It returns an additive style string plus metadata.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    content_positive: str = Field(default="")
+    style_text_prompt: str = Field(default="")
+
+    reference_source: str = Field(default="none")  # "none" | "local_file" | "url"
+    reference_id: Optional[str] = Field(default=None)
+    reference_url: Optional[str] = Field(default=None)
+    reference_strength: float = Field(default=0.6, ge=0.0, le=1.0)
+
+    use_local_style_features: bool = Field(default=FEATURE_LOCAL_STYLE_ANALYSIS_DEFAULT)
+    use_ollama_vision: bool = Field(default=FEATURE_OLLAMA_VISION_DEFAULT)
+
+    # UI "Reset styles" control
+    deactivate_all_styles: bool = Field(default=False)
+
+    width: Optional[int] = Field(default=None)
+    height: Optional[int] = Field(default=None)
+    seed: Optional[int] = Field(default=None)
+
+    target_backend_name: str = Field(default="comfyui")
+
+    # Optional routing hints for Ollama Vision
+    ollama_vision_mode: Optional[str] = Field(default=None)  # "local" | "remote" | "cloud"
+    ollama_vision_local_url: Optional[str] = Field(default=None)
+    ollama_vision_remote_url: Optional[str] = Field(default=None)
+    ollama_vision_cloud_url: Optional[str] = Field(default=None)
+
+    @field_validator("reference_source")
+    @classmethod
+    def _validate_source(cls, v: str) -> str:
+        vv = (v or "").strip().lower()
+        if vv == "url_file":
+            vv = "url"
+        if vv not in {"none", "local_file", "url"}:
+            raise ValueError("reference_source must be one of: none | local_file | url")
+        return vv
+
+
+class StyleEngineResponse(BaseModel):
+    """
+    Output: additive style text and metadata for transparency.
+    The caller (app/image_backend) merges style_positive with the content prompt.
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    style_positive: str = Field(default="")  # Final additive style tags
+    descriptors_used: List[str] = Field(default_factory=list)
+    vision_text_used: str = Field(default="")
+    reference_file_saved: Optional[str] = Field(default=None)
+    reference_id: Optional[str] = Field(default=None)
+    warnings: List[str] = Field(default_factory=list)
+    notes: List[str] = Field(default_factory=list)
+
+    # passthrough
+    content_positive: str = Field(default="")
+    style_text_prompt_raw: str = Field(default="")
+    negative_hint: str = Field(default="")  # blueprint only; not injected automatically
+
+
+# =========================
+# Reference store (safe local file handling)
+# =========================
+
+class ReferenceStore:
+    """Safe local store under DEFAULT_REFS_DIR."""
+
+    def __init__(self, base_dir: Union[str, Path]) -> None:
+        self.base = Path(base_dir).resolve()
+        self.base.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _safe_basename(name: str) -> str:
+        if not name:
+            raise ValueError("empty name")
+        if "/" in name or "\\" in name:
+            raise ValueError("invalid path separator")
+        if not re.fullmatch(r"[A-Za-z0-9._\-]+", name):
+            raise ValueError("illegal characters")
+        return name
+
+    def put(self, filename: str, data: bytes) -> Tuple[str, Path]:
+        if not isinstance(data, (bytes, bytearray)):
+            raise ValueError("data must be bytes")
+        base_raw = Path(filename or "ref.png").name
+        try:
+            base = self._safe_basename(base_raw)
+        except Exception:
+            base = "ref.png"
+
+        if "." not in base:
+            base += ".png"
+
+        target = self.base / base
+        if target.exists():
+            stem = target.stem
+            suf = target.suffix or ".png"
+            for i in range(1, 1000):
+                cand = self.base / f"{stem}_{i}{suf}"
+                if not cand.exists():
+                    target = cand
+                    break
+
+        target.write_bytes(bytes(data))
+        return (target.name, target)
+
+    def get_path(self, reference_id: str) -> Path:
+        safe = self._safe_basename(reference_id)
+        p = (self.base / safe).resolve()
+        if p.parent != self.base or not p.exists() or not p.is_file():
+            raise FileNotFoundError(f"reference not found: {reference_id}")
+        return p
+
+
+# =========================
+# HTTP helpers (timeouts, retries)
+# =========================
+
+def _httpx_limits() -> httpx.Limits:
+    return httpx.Limits(max_keepalive_connections=6, max_connections=8, keepalive_expiry=20.0)
+
+def _timeout_generic() -> httpx.Timeout:
+    return httpx.Timeout(connect=8.0, read=HTTP_TIMEOUT_SEC, write=30.0, pool=8.0)
+
+# Friendly defaults for CDNs (minimal, non-invasive)
+DEFAULT_HEADERS = {
+    "User-Agent": "slAIdshow/1.0 (+https://github.com/neuraplus-ai/slAIdshow)",
+    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
+WIKI_REFERER = "https://de.wikipedia.org/"
+
+def _headers_for_url(url: str, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    h = dict(DEFAULT_HEADERS)
+    if "wikipedia.org" in url or "wikimedia.org" in url:
+        h["Referer"] = WIKI_REFERER
+    if extra:
+        h.update(extra)
+    return h
+
+async def _get_with_retries(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: Optional[Dict[str, str]] = None,
+    max_retries: int = HTTP_MAX_RETRIES,
+    base_delay: float = HTTP_RETRY_BASE_DELAY,
+) -> httpx.Response:
+    last_exc: Optional[Exception] = None
+    delay = float(base_delay)
+    for attempt in range(1, int(max_retries) + 1):
+        try:
+            # Use friendly headers and follow redirects; keep explicit headers additive
+            req_headers = _headers_for_url(url, headers)
+            r = await client.get(url, headers=req_headers, follow_redirects=True)
+            # Special handling for Wikimedia thumbs that sometimes 403 on first GET
+            if r.status_code == 403 and "upload.wikimedia.org" in url:
+                try:
+                    await client.head(url, headers=req_headers, follow_redirects=True)
+                    r = await client.get(url, headers=req_headers, follow_redirects=True)
+                except Exception:
+                    pass
+            r.raise_for_status()
+            return r
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
+            last_exc = e
+            if attempt >= max_retries:
+                break
+            await asyncio.sleep(delay)
+            delay *= 1.8
+    raise RuntimeError(f"GET failed after {max_retries} attempts: {last_exc}")
+
+async def _post_json_with_retries(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    json: Dict[str, Any],
+    headers: Optional[Dict[str, str]] = None,
+    max_retries: int = HTTP_MAX_RETRIES,
+    base_delay: float = HTTP_RETRY_BASE_DELAY,
+) -> httpx.Response:
+    last_exc: Optional[Exception] = None
+    delay = float(base_delay)
+    for attempt in range(1, int(max_retries) + 1):
+        try:
+            h = dict(headers or {})
+            # Keep default UA to be nice to local/remote services; not strictly required here
+            if "User-Agent" not in h:
+                h["User-Agent"] = DEFAULT_HEADERS["User-Agent"]
+            r = await client.post(url, json=json, headers=h)
+            r.raise_for_status()
+            return r
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
+            last_exc = e
+            if attempt >= max_retries:
+                break
+            await asyncio.sleep(delay)
+            delay *= 1.8
+    raise RuntimeError(f"POST failed after {max_retries} attempts: {last_exc}")
+
+
+# =========================
+# Minimal image validation
+# =========================
+
+MAGIC_HEADERS = (
+    b"\x89PNG",        # PNG
+    b"\xFF\xD8\xFF",   # JPEG
+    b"RIFF",           # WEBP
+    b"BM",             # BMP
+    b"GIF87a",         # GIF
+    b"GIF89a",         # GIF
+)
+
+def validate_image_bytes_minimal(data: bytes) -> None:
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError("invalid bytes")
+    if len(data) < 128:
+        raise ValueError("image too small")
+    head = data[:16]
+    if head.startswith(b"RIFF"):
+        if b"WEBP" not in data[:64]:
+            raise ValueError("invalid WEBP magic")
+        return
+    if not any(head.startswith(m) for m in MAGIC_HEADERS):
+        print("[STYLE] unknown image magic header; continuing")
+
+def sniff_mime_from_bytes(data: bytes, fallback: str = "application/octet-stream") -> str:
+    head = data[:16]
+    if head.startswith(b"\x89PNG"):
+        return "image/png"
+    if head.startswith(b"\xFF\xD8\xFF"):
+        return "image/jpeg"
+    if head.startswith(b"RIFF") and b"WEBP" in data[:64]:
+        return "image/webp"
+    if head[:2] == b"BM":
+        return "image/bmp"
+    if head.startswith(b"GIF87a") or head.startswith(b"GIF89a"):
+        return "image/gif"
+    return fallback
+
+def ensure_image_extension(name: str, mime: str) -> str:
+    ext = Path(name).suffix.lower()
+    if ext:
+        return name
+    if mime == "image/jpeg":
+        return name + ".jpg"
+    if mime == "image/png":
+        return name + ".png"
+    if mime == "image/webp":
+        return name + ".webp"
+    if mime == "image/bmp":
+        return name + ".bmp"
+    if mime == "image/gif":
+        return name + ".gif"
+    return name + ".png"
+
+
+# =========================
+# Public reference helpers (controller-compat)
+# =========================
+
+def ensure_dirs() -> None:
+    """Ensure refs dir exists and is writable."""
+    DEFAULT_REFS_DIR.mkdir(parents=True, exist_ok=True)
+    test = DEFAULT_REFS_DIR / ".__touch_test__"
+    test.write_text("ok", encoding="utf-8")
+    with contextlib.suppress(Exception):
+        test.unlink()
+
+async def save_reference_from_bytes(filename: str, data: bytes) -> Dict[str, str]:
+    """
+    Save uploaded bytes to refs dir. Returns dict with reference_id, path, url_path.
+    """
+    ensure_dirs()
+    validate_image_bytes_minimal(data)
+    mime = sniff_mime_from_bytes(data, fallback=mimetypes.guess_type(filename or "")[0] or "application/octet-stream")
+    safe_name = Path(filename or "reference").name
+    safe_name = re.sub(r"[^A-Za-z0-9._\-]", "_", safe_name)
+    safe_name = ensure_image_extension(safe_name, mime)
+    store = ReferenceStore(DEFAULT_REFS_DIR)
+    rid, path = store.put(safe_name, data)
+    return {"reference_id": rid, "path": str(path), "url_path": f"/static/{Path(path).name}"}
+
+async def save_reference_from_url(url: str, filename_hint: Optional[str] = None) -> Dict[str, str]:
+    """
+    Download an image by URL and store locally. Returns same dict as save_reference_from_bytes.
+    """
+    ensure_dirs()
+    url = (url or "").strip()
+    if not url or not (url.startswith("http://") or url.startswith("https://")):
+        raise ValueError("invalid url")
+
+    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_generic(), follow_redirects=True, http2=True) as client:
+        # Use robust retries with friendly headers and redirect support
+        r = await _get_with_retries(client, url)
+        cl = int(r.headers.get("Content-Length", "0") or "0")
+        if cl and cl > MAX_DOWNLOAD_BYTES:
+            raise ValueError(f"file too large: {cl} bytes")
+        data = r.content
+        if len(data) > MAX_DOWNLOAD_BYTES:
+            raise ValueError(f"file too large after download: {len(data)} bytes")
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+
+    validate_image_bytes_minimal(data)
+    mime = sniff_mime_from_bytes(data, fallback=ctype or "application/octet-stream")
+
+    name = filename_hint or Path(httpx.URL(url).path or "reference").name or "reference"
+    name = re.sub(r"[^A-Za-z0-9._\-]", "_", name)
+    name = ensure_image_extension(name, mime)
+
+    store = ReferenceStore(DEFAULT_REFS_DIR)
+    rid, path = store.put(name, data)
+    return {"reference_id": rid, "path": str(path), "url_path": f"/static/{Path(path).name}"}
+
+
+# =========================
+# Local style features (strict 1:1 integration)
+# =========================
+
+# We embed the exact logic from style_features.py so that metrics, gates,
+# class scoring, and descriptor mapping are identical and reproducible.
+
+try:
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+    from skimage.feature import canny  # type: ignore
+    from skimage.color import rgb2gray  # type: ignore
+    try:
+        from sklearn.metrics import silhouette_score  # type: ignore
+        _HAVE_SKLEARN = True
+    except Exception:
+        _HAVE_SKLEARN = False
+except Exception as _e:
+    # Defer errors until analysis is actually called to avoid import-time failures in environments without OpenCV.
+    cv2 = None  # type: ignore
+    np = None  # type: ignore
+    canny = None  # type: ignore
+    rgb2gray = None  # type: ignore
+    silhouette_score = None  # type: ignore
+    _HAVE_SKLEARN = False
+    _IMPORT_ERR = _e
+else:
+    _IMPORT_ERR = None
+
+@dataclass
+class StyleAnalysis:
+    edge_density: float
+    edge_coherence: float
+    edge_thickness_score: float
+    saturation_mean: float
+    saturation_std: float
+    color_clusters: int
+    color_silhouette: float
+    contrast: float
+    grayscale_ratio: float
+    grain_score: float
+    hf_ratio: float
+    dot_pattern_score: float
+    straight_line_score: float
+    brush_texture_score: float
+    bokeh_score: float
+    class_scores: Dict[str, float]
+    primary_class: str
+
+def _ensure_cv_stack_ready() -> None:
+    if _IMPORT_ERR is not None or cv2 is None or np is None or canny is None or rgb2gray is None:
+        raise RuntimeError(f"CV stack not available: {_IMPORT_ERR}")
+
+def _load_bgr(path: Path) -> "np.ndarray":
+    _ensure_cv_stack_ready()
+    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if img is None:
+        raise FileNotFoundError(f"cannot read image: {path}")
+    return img  # BGR
+
+def _downscale(img: "np.ndarray", max_side: int = 640) -> "np.ndarray":
+    h, w = img.shape[:2]
+    ms = max(h, w)
+    if ms <= max_side:
+        return img
+    s = max_side / ms
+    return cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+
+def _edge_metrics(bgr: "np.ndarray") -> Tuple[float, float, float]:
+    # Kanten-Dichte, Orientierungs-Kohärenz (Proxy), und Kanten-"Dicke"
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    gray = _downscale(gray, 640)
+    edges = canny(gray.astype(np.float32) / 255.0, sigma=1.2)
+    edge_density = float(edges.mean())
+
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.hypot(gx, gy) + 1e-6
+    ori = np.arctan2(gy, gx)
+
+    mask = (mag > (mag.mean() + mag.std()))
+    if int(mask.sum()) > 100:
+        ori_edges = ori[mask]
+        var_ori = float(np.var(np.sin(ori_edges)) + np.var(np.cos(ori_edges)))
+        edge_coherence = max(0.0, 1.0 - min(1.0, var_ori / 1.0))
+    else:
+        edge_coherence = 0.0
+
+    edges_u = (edges.astype(np.uint8) * 255)
+    dil = cv2.dilate(edges_u, np.ones((3, 3), np.uint8), 1)
+    thickness_score = float((dil > 0).mean() - edge_density)
+    return edge_density, edge_coherence, thickness_score
+
+def _estimate_silhouette_fallback(X: "np.ndarray", labels: "np.ndarray") -> float:
+    # Lightweight Silhouette-Approximation ohne sklearn
+    try:
+        labs = labels.reshape(-1)
+        ks = np.unique(labs)
+        if ks.size < 2:
+            return -0.05
+        cents = []
+        intras = []
+        for k in ks:
+            pts = X[labs == k]
+            if pts.size == 0:
+                continue
+            c = pts.mean(axis=0)
+            cents.append(c)
+            d = np.linalg.norm(pts - c, axis=1).mean()
+            intras.append(d if np.isfinite(d) else 0.0)
+        if len(cents) < 2:
+            return -0.03
+        cents = np.vstack(cents)
+        dsum = 0.0
+        cnt = 0
+        for i in range(len(cents)):
+            for j in range(i + 1, len(cents)):
+                dsum += float(np.linalg.norm(cents[i] - cents[j]))
+                cnt += 1
+        inter = (dsum / cnt) if cnt else 0.0
+        intra = float(np.mean(intras)) if intras else 0.0
+        if intra <= 1e-6:
+            return 0.2
+        ratio = inter / intra
+        val = (ratio - 1.0) * 0.15
+        return float(np.clip(val, -0.1, 0.5))
+    except Exception:
+        return -0.05
+
+def _color_metrics(bgr: "np.ndarray") -> Tuple[float, float, int, float]:
+    # Sättigungs-Statistik + einfache KMeans-Paletten-Clustering-Qualität
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    s = hsv[:, :, 1].astype(np.float32) / 255.0
+    s_mean = float(s.mean())
+    s_std = float(s.std())
+
+    sample = _downscale(bgr, 480)
+    flat = sample.reshape(-1, 3).astype(np.float32)
+    if flat.shape[0] > 40000:
+        idx = np.random.choice(flat.shape[0], 40000, replace=False)
+        flat = flat[idx]
+
+    best_k = 3
+    best_sil = -1.0
+    prev_compact = None
+    for k in range(3, 9):
+        criteria = (cv2.TERM_CRITERIA_MAX_ITER + cv2.TERM_CRITERIA_EPS, 20, 1.0)
+        compactness, labels, _ = cv2.kmeans(flat, k, None, criteria, 2, cv2.KMEANS_PP_CENTERS)
+        if _HAVE_SKLEARN:
+            try:
+                if flat.shape[0] > 2000:
+                    idx = np.random.choice(flat.shape[0], 2000, replace=False)
+                    sil = silhouette_score(flat[idx], labels[idx].ravel(), metric='euclidean')  # type: ignore
+                else:
+                    sil = silhouette_score(flat, labels.ravel(), metric='euclidean')  # type: ignore
+            except Exception:
+                sil = -1.0
+        else:
+            sil = _estimate_silhouette_fallback(flat, labels)
+
+        if sil > best_sil:
+            best_sil = sil
+            best_k = k
+
+        if prev_compact is None:
+            prev_compact = compactness
+        else:
+            if compactness > prev_compact * 0.98:
+                break
+            prev_compact = compactness
+
+    return s_mean, s_std, int(best_k), float(best_sil)
+
+def _contrast_metric(bgr: "np.ndarray") -> float:
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    return float(gray.std())
+
+def _grayscale_ratio(bgr: "np.ndarray") -> float:
+    b, g, r = cv2.split(bgr.astype(np.float32))
+    diff = (np.abs(r - g) + np.abs(g - b) + np.abs(r - b)) / (3.0 * 255.0)
+    return float((diff < 0.03).mean())
+
+def _grain_and_hf(bgr: "np.ndarray") -> Tuple[float, float]:
+    # Korn/Noise via Laplacian-Varianz; HF/LF Spektrum via FFT-Ringe
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+
+    g_small = _downscale((gray * 255).astype(np.uint8), 512).astype(np.float32) / 255.0
+    lap = cv2.Laplacian(g_small, cv2.CV_32F)
+    grain = float(lap.var())
+
+    G = _downscale(gray, 512)
+    F = np.fft.fftshift(np.fft.fft2(G))
+    mag = np.log1p(np.abs(F))
+    H, W = mag.shape
+    yy, xx = np.ogrid[:H, :W]
+    cy, cx = H // 2, W // 2
+    r = np.hypot(yy - cy, xx - cx)
+    hf_mask = (r > min(H, W) * 0.22) & (r < min(H, W) * 0.48)
+    lf_mask = (r < min(H, W) * 0.12)
+    hf_ratio = float(mag[hf_mask].mean() / (mag[lf_mask].mean() + 1e-6))
+    return grain, hf_ratio
+
+def _dot_pattern_score(bgr: "np.ndarray") -> float:
+    # Halftone-Ring-Detektor (Frequenzbereich)
+    gray = rgb2gray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    gray = _downscale((gray * 255).astype(np.uint8), 512).astype(np.float32) / 255.0
+    F = np.fft.fftshift(np.fft.fft2(gray))
+    mag = np.log1p(np.abs(F))
+    H, W = mag.shape
+    yy, xx = np.ogrid[:H, :W]
+    cy, cx = H // 2, W // 2
+    r = np.hypot(yy - cy, xx - cx)
+    ring = (r > 26) & (r < 46)
+    neigh = ((r > 18) & (r < 24)) | ((r > 48) & (r < 56))
+    ring_mean = float(mag[ring].mean())
+    neigh_mean = float(mag[neigh].mean() + 1e-6)
+    z = (ring_mean - neigh_mean) / (neigh_mean + 1e-6)
+    return float(max(0.0, z * 3.0))
+
+def _straight_line_score(bgr: "np.ndarray") -> float:
+    # Hough-Linienlänge relativ zum Umfang
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    gray = _downscale(gray, 800)
+    edges = cv2.Canny(gray, 80, 160, apertureSize=3, L2gradient=True)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=80, minLineLength=40, maxLineGap=3)
+    if lines is None or len(lines) == 0:
+        return 0.0
+    h, w = gray.shape
+    per = float(h + w)
+    total_len = 0.0
+    for l in lines:
+        x1, y1, x2, y2 = l[0]
+        total_len += float(np.hypot(x2 - x1, y2 - y1))
+    return float(min(1.0, total_len / (per * 15.0)))
+
+def _brush_texture_score(bgr: "np.ndarray") -> float:
+    # DoG-Varianz als grober Pinseltextur-Hinweis
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
+    L = lab[:, :, 0].astype(np.float32) / 255.0
+    Ls = _downscale(L, 512)
+    g1 = cv2.GaussianBlur(Ls, (0, 0), 1.0)
+    g2 = cv2.GaussianBlur(Ls, (0, 0), 3.0)
+    dog = cv2.absdiff(g1, g2)
+    mean = cv2.blur(dog, (9, 9))
+    sq = cv2.blur(dog * dog, (9, 9))
+    var = sq - mean * mean
+    return float(np.clip(var.mean() * 50.0, 0.0, 1.0))
+
+def _bokeh_score(bgr: "np.ndarray") -> float:
+    # Varianz lokaler Schärfe → Hinweis auf DoF/Bokeh
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    gs = _downscale(gray, 512)
+    lap = cv2.Laplacian(gs, cv2.CV_32F)
+    sharp = cv2.GaussianBlur(lap * lap, (0, 0), 1.0)
+    h, w = sharp.shape
+    tiles = 6
+    th, tw = h // tiles, w // tiles
+    vals = []
+    for i in range(tiles):
+        for j in range(tiles):
+            patch = sharp[i*th:(i+1)*th, j*tw:(j+1)*tw]
+            if patch.size > 0:
+                vals.append(float(patch.mean()))
+    vals = np.array(vals, dtype=np.float32)
+    if vals.size < 4:
+        return 0.0
+    v = float(np.std(vals))
+    return float(np.clip(v * 10.0, 0.0, 1.5))
+
+def analyze_style(path: Path) -> StyleAnalysis:
+    """
+    Full analysis strictly identical to style_features.py:
+    - Computes metrics
+    - Applies the same gates and class scoring
+    - Returns StyleAnalysis with class scores and primary_class
+    """
+    bgr = _load_bgr(path)
+
+    ed, ecoh, th = _edge_metrics(bgr)
+    s_mean, s_std, k, sil = _color_metrics(bgr)
+    contr = _contrast_metric(bgr)
+    gray_ratio = _grayscale_ratio(bgr)
+    grain, hf_ratio = _grain_and_hf(bgr)
+    dots = _dot_pattern_score(bgr)
+    straight_score = _straight_line_score(bgr)
+    brush_score = _brush_texture_score(bgr)
+    bokeh = _bokeh_score(bgr)
+
+    # Photo
+    photo = 0.0
+    if hf_ratio > 1.15:
+        photo += 0.55
+    if bokeh > 0.26:
+        photo += 0.30
+    if s_mean > 0.20 and s_std > 0.09:
+        photo += 0.18
+    if k >= 7:
+        photo += 0.12
+    if sil < 0.05:
+        photo += 0.08
+    if (hf_ratio > 1.15) and (bokeh > 0.26):
+        photo += 0.12
+    if contr > 0.17:
+        photo += 0.07
+    if grain > 80.0:
+        photo += 0.05
+
+    # Photo-like gate
+    photo_like_gate = (
+        (1.07 <= hf_ratio <= 1.15) and
+        (bokeh >= 0.18 or contr >= 0.15) and
+        ((k >= 6) or (sil <= 0.08)) and
+        (straight_score < 0.18) and
+        not (ecoh > 0.28 and 0.012 < th < 0.060) and
+        (dots < 0.8)
+    )
+    if photo_like_gate:
+        photo += 0.20
+
+    # Relaxed photo-like gate (Policy)
+    photo_like_gate_relaxed = (
+        (hf_ratio < 1.00) and
+        (bokeh < 0.12) and
+        (k <= 4) and (sil >= 0.45) and
+        (s_mean >= 0.32) and (s_std >= 0.18) and
+        (straight_score < 0.12) and
+        (ecoh <= 0.06) and
+        (th >= 0.10) and
+        (dots < 0.6)
+    )
+    if photo_like_gate_relaxed:
+        photo += 0.32
+
+    # Anti-photo Penalties
+    if ecoh > 0.32 and 0.012 < th < 0.050 and bokeh < 0.22 and hf_ratio < 1.14:
+        photo -= 0.35
+    if (ecoh <= 0.06 and th >= 0.10 and hf_ratio < 0.95 and k <= 4 and sil >= 0.45):
+        photo -= 0.05
+    if dots > 1.1 and gray_ratio > 0.45:
+        photo -= 0.20
+
+    photo = max(0.0, photo)
+
+    # Comic (UNVERÄNDERT LASSEN)
+    comic = 0.0
+    if ecoh >= 0.20 and 0.012 < th < 0.060 and hf_ratio < 1.12:
+        comic += 0.50
+    if bokeh < 0.22:
+        comic += 0.12
+    if k <= 7 and sil > 0.06:
+        comic += 0.10
+    if ed > 0.040:
+        comic += 0.06
+    if dots > 0.9:
+        comic += 0.08
+    if (ecoh <= 0.05 and k <= 4 and sil >= 0.45 and th >= 0.10 and hf_ratio < 0.95):
+        comic -= 0.16
+    if (hf_ratio > 1.15 and bokeh > 0.26) or (s_mean > 0.22 and s_std > 0.10 and k >= 7):
+        comic -= 0.08
+    if s_mean > 0.28 and s_std > 0.12 and k >= 7:
+        comic -= 0.10
+    if (0.16 <= s_mean <= 0.42) and (0.12 <= s_std <= 0.35) and (4 <= k <= 7) \
+       and (th >= 0.10) and (ecoh <= 0.10) and (bokeh < 0.24) and (hf_ratio < 1.10) \
+       and (straight_score < 0.10) and (dots < 1.1):
+        comic += 0.24
+    comic = max(0.0, comic)
+
+    # Colored cartoon guard (tightened)
+    if (0.16 <= s_mean <= 0.42) and (0.12 <= s_std <= 0.35) and (4 <= k <= 7) \
+       and (th >= 0.10) and (ecoh <= 0.10) and (bokeh < 0.24) and (hf_ratio < 1.10) \
+       and (straight_score < 0.10) and (dots < 1.1):
+        comic += 0.24
+
+    comic = max(0.0, comic)
+
+    # Manga
+    manga = 0.0
+    if gray_ratio > 0.60 and ed > 0.032 and ecoh > 0.24 and hf_ratio < 1.08:
+        manga += 0.60
+    if dots > 1.0:
+        manga += 0.15
+    if s_mean > 0.15:
+        manga -= 0.10
+    manga = max(0.0, manga)
+
+    # Children sketches
+    child_sketch = 0.0
+    if s_mean < 0.16:
+        child_sketch += 0.20
+    else:
+        child_sketch -= 0.15
+    if k <= 4:
+        child_sketch += 0.15
+    else:
+        child_sketch -= 0.10
+    if hf_ratio < 1.06:
+        child_sketch += 0.15
+    else:
+        child_sketch -= 0.15
+    if th < 0.016:
+        child_sketch += 0.15
+    else:
+        child_sketch -= 0.10
+    if ed > 0.030 and ecoh < 0.18:
+        child_sketch += 0.20
+    else:
+        child_sketch -= 0.10
+    if bokeh > 0.22 or (s_mean > 0.18 and s_std > 0.08):
+        child_sketch -= 0.25
+    child_sketch = max(0.0, child_sketch)
+
+    # Classical oil painting
+    oil = 0.0
+    if brush_score > 0.46:
+        oil += 0.30
+    if hf_ratio < 1.26 and s_std > 0.06:
+        oil += 0.18
+    if contr > 0.12:
+        oil += 0.10
+    if sil < 0.07 and k >= 5:
+        oil += 0.12
+    if hf_ratio > 1.18:
+        oil -= 0.14
+    if bokeh > 0.30:
+        oil -= 0.12
+    if s_mean > 0.20 and s_std > 0.09:
+        oil -= 0.08
+    if k >= 7:
+        oil -= 0.08
+    oil = max(0.0, oil)
+
+    # Science infographic / poster-like graphics
+    sci_infog = 0.0
+    if ecoh > 0.36:
+        sci_infog += 0.30
+    if sil > 0.12 and k <= 6:
+        sci_infog += 0.20
+    if straight_score > 0.28:
+        sci_infog += 0.35
+    if s_std < 0.09:
+        sci_infog += 0.15
+
+    poster_like = (
+        (ecoh <= 0.06) and
+        (th >= 0.10) and
+        (hf_ratio < 0.90) and
+        (k <= 4) and
+        (sil >= 0.45) and
+        (s_mean >= 0.32) and
+        (s_std >= 0.18) and
+        (straight_score < 0.12) and
+        (dots < 0.6)
+    )
+    if poster_like:
+        sci_infog += 0.28
+        comic = max(0.0, comic - 0.12)
+
+    sci_infog = max(0.0, sci_infog)
+
+    # Watercolor
+    watercolor = 0.0
+    if s_mean < 0.22 and s_std < 0.07:
+        watercolor += 0.30
+    if th < 0.018 and ed < 0.04:
+        watercolor += 0.25
+    if hf_ratio < 1.12:
+        watercolor += 0.20
+    if sil < 0.08 and k <= 6:
+        watercolor += 0.25
+    watercolor = max(0.0, watercolor)
+
+    # Technical drawing
+    technical = 0.0
+    if straight_score > 0.32:
+        technical += 0.45
+    if ecoh > 0.32:
+        technical += 0.25
+    if gray_ratio > 0.45 or s_std < 0.06:
+        technical += 0.20
+    if ed > 0.028 and th < 0.02:
+        technical += 0.10
+    technical = max(0.0, technical)
+
+    # Scribble/sketches
+    scribble = 0.0
+    if s_mean < 0.14 and s_std < 0.055 and k <= 4:
+        scribble += 0.22
+    if ed > 0.052 and ecoh < 0.18 and th < 0.018:
+        scribble += 0.20
+    if hf_ratio < 1.06:
+        scribble += 0.15
+    if bokeh < 0.16:
+        scribble += 0.08
+
+    photo_like = int(hf_ratio > 1.15) + int(bokeh > 0.26) + int(s_mean > 0.20 and s_std > 0.09) + int(k >= 7)
+    comic_like = int(ecoh >= 0.20) + int(0.012 < th < 0.060) + int(hf_ratio < 1.12) + int(bokeh < 0.22)
+    if photo_like >= 2:
+        scribble -= 0.30
+    if comic_like >= 3 and s_mean >= 0.16:
+        scribble -= 0.25
+    scribble = max(0.0, scribble)
+
+    scores = {
+        "comic": float(min(1.0, comic)),
+        "manga": float(min(1.0, manga)),
+        "photo": float(min(1.0, photo)),
+        "science illustration/infographic": float(min(1.0, sci_infog)),
+        "classical oil painting": float(min(1.0, oil)),
+        "watercolor": float(min(1.0, watercolor)),
+        "children sketches": float(min(1.0, child_sketch)),
+        "technical drawing/technical sketch": float(min(1.0, technical)),
+        "scribble/sketches": float(min(1.0, scribble)),
+    }
+    primary = max(scores, key=scores.get)
+
+    return StyleAnalysis(
+        edge_density=ed,
+        edge_coherence=ecoh,
+        edge_thickness_score=th,
+        saturation_mean=s_mean,
+        saturation_std=s_std,
+        color_clusters=k,
+        color_silhouette=sil,
+        contrast=contr,
+        grayscale_ratio=gray_ratio,
+        grain_score=grain,
+        hf_ratio=hf_ratio,
+        dot_pattern_score=dots,
+        straight_line_score=straight_score,
+        brush_texture_score=brush_score,
+        bokeh_score=bokeh,
+        class_scores=scores,
+        primary_class=primary,
+    )
+
+def _base_descriptors_for_class(a: StyleAnalysis) -> List[str]:
+    """
+    Exact descriptor mapping copied from style_features.py to ensure parity.
+    """
+    c = a.primary_class
+    d: List[str] = []
+
+    if c == "comic":
+        d.append("clear line art" if a.edge_coherence < 0.34 or a.edge_thickness_score < 0.03 else "bold outlines")
+        d.append("flat colors" if a.saturation_mean < 0.18 and a.saturation_std < 0.06 and a.color_clusters <= 5 else "balanced palette")
+        if a.contrast > 0.16:
+            d.append("high contrast")
+        if a.dot_pattern_score > 0.9:
+            d.append("screen-tone dots")
+        if a.hf_ratio < 1.1 and a.grain_score < 70.0:
+            d.append("clean finish")
+
+    elif c == "manga":
+        d += ["monochrome", "clear line art"]
+        if a.dot_pattern_score > 0.8:
+            d.append("halftone shading")
+        if a.contrast > 0.15:
+            d.append("high contrast")
+        if a.hf_ratio < 1.15:
+            d.append("clean finish")
+
+    elif c == "photo":
+        d.append("natural lighting")
+        if a.hf_ratio > 1.20:
+            d.append("fine detail")
+        d.append("smooth gradients")
+        if a.saturation_std > 0.1:
+            d.append("rich colors")
+        if a.bokeh_score > 0.30:
+            d.append("shallow depth of field")
+
+    elif c == "science illustration/infographic":
+        d += ["thin precise lines", "flat colors", "clean layout"]
+        if a.straight_line_score > 0.35:
+            d.append("geometric accuracy")
+        if a.saturation_std < 0.08:
+            d.append("limited palette")
+
+    elif c == "classical oil painting":
+        d += ["brush textures", "rich tones", "soft transitions"]
+        if a.brush_texture_score > 0.45:
+            d.append("impasto strokes")
+
+    elif c == "watercolor":
+        d += ["soft washes", "bleeding edges", "delicate tones"]
+        if a.saturation_mean < 0.2:
+            d.append("pastel palette")
+
+    elif c == "children sketches":
+        d += ["simple shapes", "thin uneven lines", "playful composition"]
+
+    elif c == "technical drawing/technical sketch":
+        d += ["precise straight lines", "monochrome", "high clarity"]
+
+    else:
+        d += ["loose strokes", "expressive lines", "dynamic texture"]
+
+    out: List[str] = []
+    for x in d:
+        if x not in out:
+            out.append(x)
+    return out[:5]
+
+def extract_style_descriptors(image_path: Path, debug: bool = False) -> List[str]:
+    """
+    Return short style descriptors for a given image.
+    When debug=True, print logs identical to style_features.py:
+      - [style:debug] primary_class
+      - [style:debug] class_scores
+      - [style:debug] metrics line
+      - [style:debug] descriptors
+    """
+    a = analyze_style(image_path)
+    desc = _base_descriptors_for_class(a)
+    if debug:
+        # metrics line format must match test script expectations
+        print("[style:debug] primary_class:", a.primary_class)
+        print("[style:debug] class_scores:", a.class_scores)
+        print(
+            "[style:debug] metrics:",
+            f"ed={a.edge_density:.3f}",
+            f"ecoh={a.edge_coherence:.3f}",
+            f"th={a.edge_thickness_score:.3f}",
+            f"s_mean={a.saturation_mean:.3f}",
+            f"s_std={a.saturation_std:.3f}",
+            f"k={a.color_clusters}",
+            f"sil={a.color_silhouette:.3f}",
+            f"contrast={a.contrast:.3f}",
+            f"gray_ratio={a.grayscale_ratio:.3f}",
+            f"grain={a.grain_score:.1f}",
+            f"hf_ratio={a.hf_ratio:.2f}",
+            f"dots={a.dot_pattern_score:.2f}",
+            f"straight={a.straight_line_score:.2f}",
+            f"brush={a.brush_texture_score:.2f}",
+            f"bokeh={a.bokeh_score:.2f}",
+        )
+        print("[style:debug] descriptors:", desc)
+    return desc
+
+def detect_primary_style_label(image_path: Path) -> str:
+    return analyze_style(image_path).primary_class
+
+def extract_style_with_label(image_path: Path, debug: bool = False) -> Tuple[str, List[str]]:
+    a = analyze_style(image_path)
+    desc = _base_descriptors_for_class(a)
+    if debug:
+        print("[style:debug] primary_class:", a.primary_class)
+        print("[style:debug] class_scores:", a.class_scores)
+        print("[style:debug] descriptors:", desc)
+    return a.primary_class, desc
+
+
+# =========================
+# Ollama Vision integration (enhanced URL routing + policy)
+# =========================
+
+VISION_SYS_PROMPT = (
+    "You are an expert visual stylist. Describe the visual style of the provided image "
+    "concisely, in short comma-separated tags suitable for image generation prompts. "
+    "Focus on style, materials, technique, composition, lighting, and color mood. "
+    "Avoid meta commentary, avoid long sentences, no punctuation except commas."
+)
+
+def _normalize_url(u: Optional[str]) -> Optional[str]:
+    """
+    Ensure the URL has a scheme (http://) and no trailing slash. Accepts None and returns None.
+    """
+    if not u:
+        return None
+    u = u.strip()
+    if not u:
+        return None
+    if not re.match(r"^https?://", u, flags=re.I):
+        u = "http://" + u
+    return u.rstrip("/")
+
+def _url_is_localhost(u: str) -> bool:
+    """
+    Check whether the netloc is localhost/127.0.0.1/::1 regardless of scheme.
+    """
+    try:
+        # crude but robust: strip scheme, split host:port, ignore userinfo
+        s = re.sub(r"^https?://", "", u, flags=re.I)
+        s = s.split("/", 1)[0]
+        s = s.split("@")[-1]
+        host = s.split(":")[0].strip().lower()
+        return host in {"localhost", "127.0.0.1", "::1"}
+    except Exception:
+        return False
+
+def _validate_vision_policy(url: str) -> None:
+    """
+    Enforce policy: If APP_ALLOW_REMOTE_VISION=0 then only localhost/127.0.0.1/::1 are allowed.
+    Both http and https are accepted for localhost.
+    """
+    if APP_ALLOW_REMOTE_VISION:
+        return
+    if not _url_is_localhost(url):
+        raise PermissionError("Remote Ollama vision access is disabled by policy (APP_ALLOW_REMOTE_VISION=0).")
+
+def _resolve_vision_url(
+    mode: Optional[str],
+    local_url: Optional[str],
+    remote_url: Optional[str],
+    cloud_url: Optional[str],
+) -> Tuple[str, str]:
+    """
+    Resolve effective (mode_used, base_url) with schema fix and sensible fallbacks.
+    Priority:
+      - If mode in {local,remote,cloud}: use the matching URL if given (normalized)
+      - Else pick the first available among local, remote, cloud (in that order)
+      - Else fallback to OLLAMA_VISION_URL
+    Returns (mode_used, base_url)
+    """
+    mode_norm = (mode or "").strip().lower() or "local"
+    cand_local = _normalize_url(local_url) or _normalize_url(OLLAMA_VISION_URL)
+    cand_remote = _normalize_url(remote_url)
+    cand_cloud = _normalize_url(cloud_url)
+
+    candidates: Dict[str, Optional[str]] = {
+        "local": cand_local,
+        "remote": cand_remote,
+        "cloud": cand_cloud,
+    }
+    chosen_mode = mode_norm if mode_norm in candidates else "local"
+    base = candidates.get(chosen_mode)
+    if not base:
+        # fallback order: local -> remote -> cloud -> env default
+        base = cand_local or cand_remote or cand_cloud or _normalize_url(OLLAMA_VISION_URL)
+        # infer mode from the chosen base if possible
+        if base == cand_remote:
+            chosen_mode = "remote"
+        elif base == cand_cloud:
+            chosen_mode = "cloud"
+        else:
+            chosen_mode = "local"
+    return chosen_mode, str(base)
+
+def _b64_from_file(path: Path) -> str:
+    data = path.read_bytes()
+    return base64.b64encode(data).decode("ascii")
+
+def _tokenize(text: str) -> List[str]:
+    parts = [t.strip(" ,.;-") for t in (text or "").split(",")]
+    return [t for t in parts if t]
+
+def _retokenize_limit(text: str, limit: int) -> str:
+    toks = _tokenize(text)
+    return ", ".join(toks[:max(0, limit)])
+
+async def _ollama_vision_describe(path: Path, mode_url: Optional[str] = None) -> str:
+    """
+    Use Ollama /api/generate with 'images' to extract compact comma-separated style tags.
+    mode_url can override default OLLAMA_VISION_URL (app may pass via request).
+    """
+    url_base = (mode_url or OLLAMA_VISION_URL).rstrip("/")
+    _validate_vision_policy(url_base)
+    url = f"{url_base}/api/generate"
+    img_b64 = await asyncio.to_thread(_b64_from_file, path)
+
+    body = {
+        "model": OLLAMA_VISION_MODEL,
+        "prompt": "Describe the visual style of this image in compact, comma-separated tags.",
+        "images": [img_b64],
+        "options": {
+            "temperature": OLLAMA_VISION_TEMPERATURE,
+            "num_ctx": OLLAMA_VISION_NUM_CTX,
+            "num_predict": OLLAMA_VISION_NUM_PREDICT,
+            "top_k": OLLAMA_VISION_TOP_K,
+            "top_p": OLLAMA_VISION_TOP_P,
+            "repeat_penalty": OLLAMA_VISION_REPEAT_PENALTY,
+        },
+        "system": VISION_SYS_PROMPT,
+        "stream": False,
+    }
+
+    async with httpx.AsyncClient(limits=_httpx_limits(), timeout=_timeout_generic(), follow_redirects=True, http2=True) as client:
+        r = await _post_json_with_retries(client, url, json=body)
+        js = r.json()
+        text = (js.get("response") or "").strip()
+        text = re.sub(r"\s+", " ", text)
+        tags = [t.strip(" ,.;-") for t in text.split(",") if t.strip(" ,.;-")]
+        out: List[str] = []
+        seen: set[str] = set()
+        for t in tags:
+            tl = t.lower()
+            if tl not in seen:
+                seen.add(tl)
+                out.append(t)
+        return ", ".join(out[:MAX_TOKENS_VISION])
+
+
+# =========================
+# Style fusion helpers
+# =========================
+
+def _dedup_ordered_tokens(parts: List[str]) -> List[str]:
+    """
+    Split by commas, trim and deduplicate preserving order across multiple inputs.
+    """
+    out: List[str] = []
+    seen: set[str] = set()
+    for p in parts:
+        if not p:
+            continue
+        tokens = [t.strip() for t in re.split(r",", p) if t.strip()]
+        for t in tokens:
+            tl = t.lower()
+            if tl not in seen:
+                seen.add(tl)
+                out.append(t)
+    return out
+
+def _limit_join(tokens: List[str], limit: int) -> str:
+    return ", ".join(tokens[:max(0, limit)])
+
+def _sanitize_style_text(text: str) -> str:
+    t = (text or "").strip()
+    t = re.sub(r"\s+", " ", t)
+    t = re.sub(r"^(style|stil)[:\s-]+", "", t, flags=re.I)
+    return _retokenize_limit(t, MAX_TOKENS_STYLE_TEXT)
+
+def _apply_deactivate_all_styles(resp: StyleEngineResponse) -> None:
+    resp.style_positive = ""
+    resp.descriptors_used = []
+    resp.vision_text_used = ""
+    resp.notes.append("All style inputs deactivated (reset).")
+
+
+# =========================
+# Public orchestration
+# =========================
+
+def _format_metrics_line(a: StyleAnalysis) -> str:
+    """
+    Produce the exact compact metrics line expected by tests.
+    """
+    return " ".join([
+        f"ed={a.edge_density:.3f}",
+        f"ecoh={a.edge_coherence:.3f}",
+        f"th={a.edge_thickness_score:.3f}",
+        f"s_mean={a.saturation_mean:.3f}",
+        f"s_std={a.saturation_std:.3f}",
+        f"k={a.color_clusters}",
+        f"sil={a.color_silhouette:.3f}",
+        f"contrast={a.contrast:.3f}",
+        f"gray_ratio={a.grayscale_ratio:.3f}",
+        f"grain={a.grain_score:.1f}",
+        f"hf_ratio={a.hf_ratio:.2f}",
+        f"dots={a.dot_pattern_score:.2f}",
+        f"straight={a.straight_line_score:.2f}",
+        f"brush={a.brush_texture_score:.2f}",
+        f"bokeh={a.bokeh_score:.2f}",
+    ])
+
+async def build_styles(req: StyleEngineRequest, refs_dir: Union[str, Path] = DEFAULT_REFS_DIR) -> StyleEngineResponse:
+    """
+    Build additive style text from:
+      1) User style text (priority source)
+      2) Ollama Vision tags (if enabled and reference provided)
+      3) Local descriptors from image analysis (if enabled and reference provided)
+
+    Merge policy:
+      - Order-preserving deduplication across sources
+      - Per-source token caps: style_text (40), vision (24), descriptors (12)
+      - Final cap MAX_TOKENS_FINAL (40)
+
+    Reset policy:
+      - If deactivate_all_styles==True AND no new inputs in this request:
+          -> clear styles and return empty
+      - If deactivate_all_styles==True BUT new inputs present:
+          -> ignore reset and apply new inputs
+
+    Remote vision policy:
+      - If APP_ALLOW_REMOTE_VISION=0, only localhost URLs are permitted
+      - Otherwise, remote/cloud URLs are allowed
+    """
+    ensure_dirs()
+    resp = StyleEngineResponse(
+        content_positive=(req.content_positive or "").strip(),
+        style_text_prompt_raw=(req.style_text_prompt or "").strip(),
+    )
+
+    # Resolve reference (if any)
+    resolved_path: Optional[Path] = None
+    if req.reference_source == "local_file":
+        if req.reference_id:
+            try:
+                store = ReferenceStore(refs_dir)
+                p = store.get_path(req.reference_id)
+                resolved_path = p
+                resp.reference_id = req.reference_id
+                resp.reference_file_saved = str(p)
+            except Exception as e:
+                resp.warnings.append(f"local reference not found: {e}")
+        else:
+            resp.warnings.append("reference_id missing for local_file source")
+    elif req.reference_source == "url":
+        if req.reference_url:
+            try:
+                saved = await save_reference_from_url(req.reference_url, filename_hint=None)
+                resp.reference_id = saved.get("reference_id")
+                spath = saved.get("path")
+                if spath:
+                    resolved_path = Path(spath)
+                resp.reference_file_saved = spath
+            except Exception as e:
+                resp.warnings.append(f"download failed: {e}")
+        else:
+            resp.warnings.append("reference_url missing for url source")
+    else:
+        resp.notes.append("No reference image provided.")
+
+    # Determine whether this request carries new inputs
+    has_new_style_text = bool((req.style_text_prompt or "").strip())
+    has_new_reference = resolved_path is not None
+    has_new_inputs = has_new_style_text or has_new_reference
+
+    # Deactivate handling
+    if req.deactivate_all_styles and not has_new_inputs:
+        _apply_deactivate_all_styles(resp)
+        resp.notes.append("Deactivate applied (no new inputs in request).")
+        return resp
+    elif req.deactivate_all_styles and has_new_inputs:
+        resp.notes.append("Deactivate requested but new inputs detected; applying new styles (auto-reactivate).")
+
+    # Safety mode toggles
+    if has_new_reference:
+        if FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON and not req.use_local_style_features:
+            req.use_local_style_features = True
+            resp.notes.append("Local style analysis forced on by env (FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON=1).")
+        if (not req.use_ollama_vision) and (not req.use_local_style_features):
+            req.use_local_style_features = True
+            resp.notes.append("Local style safety-net enabled: reference provided, vision disabled.")
+
+    # Collect style parts in priority order
+    style_parts_in_order: List[str] = []
+
+    # 1) User style text
+    if has_new_style_text:
+        st = _sanitize_style_text(req.style_text_prompt)
+        if st:
+            style_parts_in_order.append(st)
+            resp.notes.append(f"Applied style_text_prompt (up to {MAX_TOKENS_STYLE_TEXT} tokens).")
+    else:
+        resp.notes.append("No style_text_prompt provided.")
+
+    # 2) Ollama vision (enhanced routing + policy + notes)
+    if req.use_ollama_vision:
+        if resolved_path is None:
+            resp.notes.append("Ollama vision requested but no reference image resolved.")
+        else:
+            # Resolve effective URL based on mode and per-mode URLs
+            mode_used, base_url = _resolve_vision_url(
+                req.ollama_vision_mode,
+                req.ollama_vision_local_url,
+                req.ollama_vision_remote_url,
+                req.ollama_vision_cloud_url,
+            )
+            try:
+                print(f"[STYLE][vision] mode={mode_used} url={base_url} allow_remote={APP_ALLOW_REMOTE_VISION} ref={resolved_path}")
+                txt = await _ollama_vision_describe(resolved_path, mode_url=base_url)
+                print(f"[STYLE][vision] response_len={len(txt) if txt else 0} sample='{(txt or '')[:160]}'")
+                if txt:
+                    resp.vision_text_used = _retokenize_limit(txt, MAX_TOKENS_VISION)
+                    style_parts_in_order.append(resp.vision_text_used)
+                    resp.notes.append(f"Ollama vision used via {base_url} (mode={mode_used}, max {MAX_TOKENS_VISION} tokens).")
+                else:
+                    resp.notes.append("Ollama vision returned empty text.")
+            except PermissionError as pe:
+                print(f"[STYLE][vision][policy] {pe}")
+                resp.warnings.append(str(pe))
+                resp.notes.append(f"Ollama vision blocked by policy (mode={mode_used}, url={base_url}).")
+            except Exception as e:
+                print(f"[STYLE][vision][error] {e}")
+                resp.warnings.append(f"ollama vision failed: {e}")
+                resp.notes.append(f"Ollama vision failed (mode={mode_used}, url={base_url}).")
+    else:
+        resp.notes.append("Ollama vision disabled by request.")
+
+    # 3) Local descriptors with strict debug output parity
+    if req.use_local_style_features:
+        if resolved_path is None:
+            resp.notes.append("Local style features requested but no reference image resolved.")
+        else:
+            try:
+                # Compute full analysis once for logging parity and descriptor generation
+                a = analyze_style(resolved_path)
+                if STYLE_LOCAL_DEBUG:
+                    print("[style:debug] primary_class:", a.primary_class)
+                    print("[style:debug] class_scores:", a.class_scores)
+                    print("[style:debug] metrics:", _format_metrics_line(a))
+                # Use exact descriptor mapping
+                try:
+                    desc = _base_descriptors_for_class(a)
+                except Exception:
+                    # Fallback to extract_style_with_label if something unexpected happens
+                    _, desc = extract_style_with_label(resolved_path, debug=False)
+                if STYLE_LOCAL_DEBUG:
+                    print("[style:debug] descriptors:", desc)
+                # Cap and deduplicate descriptors locally before merging
+                if desc:
+                    dedup_desc: List[str] = []
+                    seen: set[str] = set()
+                    for d in desc:
+                        dl = d.lower().strip()
+                        if dl and dl not in seen:
+                            seen.add(dl)
+                            dedup_desc.append(d.strip())
+                        if len(dedup_desc) >= MAX_TOKENS_DESCRIPTORS:
+                            break
+                    resp.descriptors_used = dedup_desc
+                    if dedup_desc:
+                        style_parts_in_order.append(", ".join(dedup_desc))
+                        resp.notes.append(f"Local descriptors used (max {MAX_TOKENS_DESCRIPTORS} tokens).")
+                else:
+                    resp.notes.append("Local analysis produced no descriptors.")
+            except Exception as e:
+                print(f"[STYLE][local][error] {e}")
+                resp.warnings.append(f"local style analysis failed: {e}")
+    else:
+        resp.notes.append("Local style features disabled by request.")
+
+    # Finalize style: deduplicate tokens across sources (order-preserving)
+    tokens = _dedup_ordered_tokens(style_parts_in_order)
+    if tokens:
+        resp.style_positive = _limit_join(tokens, MAX_TOKENS_FINAL)
+        resp.notes.append(f"Final style merged with cap {MAX_TOKENS_FINAL} tokens.")
+    else:
+        reasons: List[str] = []
+        if not has_new_style_text:
+            reasons.append("no style_text_prompt")
+        if resolved_path is None:
+            reasons.append("no reference image")
+        if not req.use_local_style_features:
+            reasons.append("local_features_disabled")
+        if not req.use_ollama_vision:
+            reasons.append("vision_disabled")
+        if reasons:
+            resp.warnings.append("style_positive is empty: " + ", ".join(reasons))
+
+    return resp
+
+
+# =========================
+# Module init diagnostics
+# =========================
+
+def _log_style_env() -> None:
+    print(
+        "[STYLE-ENGINE-ENV]",
+        f"refs_dir={str(DEFAULT_REFS_DIR)}",
+        f"ollama_vision_model={OLLAMA_VISION_MODEL}",
+        f"ollama_host={OLLAMA_HOST}:{OLLAMA_PORT}",
+        f"vision_remote_allowed={'yes' if APP_ALLOW_REMOTE_VISION else 'no'}",
+        f"size_default={APP_IMAGE_WIDTH}x{APP_IMAGE_HEIGHT}",
+        f"timeout={HTTP_TIMEOUT_SEC}s",
+        f"retries={HTTP_MAX_RETRIES}",
+        f"caps(style={MAX_TOKENS_STYLE_TEXT}, vision={MAX_TOKENS_VISION}, desc={MAX_TOKENS_DESCRIPTORS}, final={MAX_TOKENS_FINAL})",
+        f"feature_defaults(local={FEATURE_LOCAL_STYLE_ANALYSIS_DEFAULT}, vision={FEATURE_OLLAMA_VISION_DEFAULT}, force_local={FEATURE_LOCAL_STYLE_ANALYSIS_FORCE_ON})",
+        f"local_debug={'on' if STYLE_LOCAL_DEBUG else 'off'}",
+    )
+
+with contextlib.suppress(Exception):
+    _log_style_env()
+
+
+# =========================
+# Minimal self-test (optional)
+# =========================
+
+if __name__ == "__main__":
+    async def _quick_test():
+        ensure_dirs()
+
+        # Case A: pure reset (no new inputs) -> empty
+        req_reset = StyleEngineRequest(
+            content_positive="",
+            style_text_prompt="",
+            reference_source="none",
+            use_local_style_features=False,
+            use_ollama_vision=False,
+            deactivate_all_styles=True,
+            target_backend_name="comfyui",
+        )
+        out_reset = await build_styles(req_reset)
+        print("A reset style_positive:", out_reset.style_positive, "| notes:", out_reset.notes, "| warnings:", out_reset.warnings)
+
+        # Case B: reset + new style text -> should apply style (ignore reset)
+        req_apply = StyleEngineRequest(
+            content_positive="",
+            style_text_prompt="thin precise lines, flat colors, clean layout",
+            reference_source="none",
+            use_local_style_features=False,
+            use_ollama_vision=False,
+            deactivate_all_styles=True,  # request reset, but new input present
+            target_backend_name="comfyui",
+        )
+        out_apply = await build_styles(req_apply)
+        print("B apply style_positive:", out_apply.style_positive, "| notes:", out_apply.notes, "| warnings:", out_apply.warnings)
+
+    asyncio.run(_quick_test())
+```
+
+---
+
+### tests/test_config_generator.py
+
+```py
+# tests/test_config_generator.py
+
+"""Test configuration generation without GPU access or network calls."""
+
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
+
+import pytest
+import yaml
+
+import config_generator as generator
+
+
+@pytest.fixture(autouse=True)
+def clean_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate tests from local configuration overrides."""
+    for name in ("SLAIDSHOW_TIER", "HARDWARE_PATH", "CONFIG_PATH"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def hardware() -> dict[str, Any]:
+    """Provide a valid report for one selected 6 GiB GPU."""
+    return {
+        "schema_version": 1,
+        "memory_unit": "GiB",
+        "is_apple_silicon": False,
+        "gpu_index": 0,
+        "gpu_count": 1,
+        "gpu_uuid": "GPU-test-0001",
+        "gpu_name": "Mock NVIDIA GPU",
+        "vram_total_bytes": 6 * generator.GIB,
+        "vram_free_bytes": 5 * generator.GIB,
+        "vram_used_bytes": generator.GIB,
+    }
+
+
+@pytest.fixture
+def paths(
+    tmp_path: Path, hardware: dict[str, Any]
+) -> tuple[Path, Path]:
+    source = tmp_path / "hardware.json"
+    source.write_text(json.dumps(hardware), encoding="utf-8")
+    return source, tmp_path / "config" / "generated.yaml"
+
+
+@pytest.mark.parametrize(
+    ("total_bytes", "expected"),
+    [
+        (6 * generator.GIB, "6gb"),
+        (8 * generator.GIB - 1, "6gb"),
+        (8 * generator.GIB, "8gb"),
+        (12 * generator.GIB, "8gb"),
+        (16 * generator.GIB - 1, "8gb"),
+        (16 * generator.GIB, "16gb"),
+        (24 * generator.GIB - 1, "16gb"),
+        (24 * generator.GIB, "24gb"),
+        (48 * generator.GIB, "24gb"),
+    ],
+)
+def test_tier_boundaries(total_bytes: int, expected: str) -> None:
+    assert generator.select_tier(total_bytes) == expected
+
+
+@pytest.mark.parametrize(
+    "total_bytes",
+    [0, -1, 6 * generator.GIB - 1, True, 6.0, "6"],
+)
+def test_invalid_capacity_is_rejected(total_bytes: Any) -> None:
+    with pytest.raises(generator.ConfigurationError):
+        generator.select_tier(total_bytes)
+
+
+@pytest.mark.parametrize("override", ["", "12gb", "6GB", " 6gb", 6])
+def test_invalid_override_is_rejected(override: Any) -> None:
+    with pytest.raises(generator.ConfigurationError):
+        generator.select_tier(24 * generator.GIB, override)
+
+
+def test_smaller_override_is_allowed() -> None:
+    assert generator.select_tier(24 * generator.GIB, "6gb") == "6gb"
+
+
+def test_larger_override_is_rejected() -> None:
+    with pytest.raises(generator.ConfigurationError, match="übersteigt"):
+        generator.select_tier(6 * generator.GIB, "8gb")
+
+
+def test_hardware_validation_does_not_mutate_input(
+    hardware: dict[str, Any],
+) -> None:
+    original = copy.deepcopy(hardware)
+    result = generator.validate_hardware(hardware)
+
+    assert hardware == original
+    assert result["vram_total_bytes"] == 6 * generator.GIB
+    assert result["gpu_uuid"] == hardware["gpu_uuid"]
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("schema_version", 2),
+        ("schema_version", True),
+        ("memory_unit", "GB"),
+        ("is_apple_silicon", True),
+        ("gpu_index", -1),
+        ("gpu_index", True),
+        ("gpu_count", 0),
+        ("gpu_uuid", ""),
+        ("gpu_name", " "),
+        ("vram_total_bytes", 0),
+        ("vram_free_bytes", -1),
+        ("vram_used_bytes", False),
+    ],
+)
+def test_invalid_hardware_field_is_rejected(
+    hardware: dict[str, Any], key: str, value: Any
+) -> None:
+    hardware[key] = value
+    with pytest.raises(generator.ConfigurationError):
+        generator.validate_hardware(hardware)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "schema_version",
+        "memory_unit",
+        "is_apple_silicon",
+        "gpu_index",
+        "gpu_count",
+        "gpu_uuid",
+        "gpu_name",
+        "vram_total_bytes",
+        "vram_free_bytes",
+        "vram_used_bytes",
+    ],
+)
+def test_missing_hardware_field_is_rejected(
+    hardware: dict[str, Any], key: str
+) -> None:
+    del hardware[key]
+    with pytest.raises(generator.ConfigurationError):
+        generator.validate_hardware(hardware)
+
+
+def test_invalid_gpu_index_is_rejected(hardware: dict[str, Any]) -> None:
+    hardware["gpu_index"] = hardware["gpu_count"]
+    with pytest.raises(generator.ConfigurationError):
+        generator.validate_hardware(hardware)
+
+
+def test_inconsistent_memory_is_rejected(hardware: dict[str, Any]) -> None:
+    hardware["vram_free_bytes"] = hardware["vram_total_bytes"]
+    with pytest.raises(generator.ConfigurationError):
+        generator.validate_hardware(hardware)
+
+
+def test_multiple_gpu_memory_is_not_added(
+    paths: tuple[Path, Path], hardware: dict[str, Any]
+) -> None:
+    source, target = paths
+    hardware["gpu_count"] = 4
+    source.write_text(json.dumps(hardware), encoding="utf-8")
+
+    config = generator.generate(source, target)
+
+    assert config["tier"] == "6gb"
+    assert config["hardware"]["vram_total_bytes"] == 6 * generator.GIB
+
+
+def test_low_free_memory_does_not_change_capacity_tier(
+    paths: tuple[Path, Path], hardware: dict[str, Any]
+) -> None:
+    source, target = paths
+    hardware["vram_free_bytes"] = 0
+    hardware["vram_used_bytes"] = hardware["vram_total_bytes"]
+    source.write_text(json.dumps(hardware), encoding="utf-8")
+
+    config = generator.generate(source, target)
+
+    assert config["tier"] == "6gb"
+    assert config["scheduler"]["measure_free_vram_before_each_phase"] is True
+    assert config["scheduler"]["phase_budget_validation_required"] is True
+
+
+def test_safe_configuration_round_trip(paths: tuple[Path, Path]) -> None:
+    source, target = paths
+    config = generator.generate(source, target)
+
+    assert yaml.safe_load(target.read_text(encoding="utf-8")) == config
+    assert config["schema_version"] == 1
+    assert config["stt"]["device"] == "cpu"
+    assert config["scheduler"]["mode"] == "sequential"
+    assert config["scheduler"]["parallel_allowed"] is False
+    assert config["scheduler"]["require_confirmed_unload"] is True
+    assert config["scheduler"]["on_unload_failure"] == "block_next_gpu_phase"
+    assert config["image"]["width"] == 512
+    assert config["image"]["height"] == 512
+    assert config["runtime"]["offline"] is True
+    assert config["runtime"]["cloud_enabled"] is False
+    assert config["runtime"]["remote_backends_enabled"] is False
+    assert config["downloads"]["enabled"] is False
+    assert config["downloads"]["artifacts"] == []
+    assert all(config["readiness"].values())
+
+
+def test_environment_paths_are_used(
+    paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target = paths
+    monkeypatch.setenv("HARDWARE_PATH", str(source))
+    monkeypatch.setenv("CONFIG_PATH", str(target))
+
+    generator.generate()
+
+    assert target.is_file()
+
+
+def test_explicit_tier_overrides_environment(
+    paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target = paths
+    monkeypatch.setenv("SLAIDSHOW_TIER", "24gb")
+
+    assert generator.generate(source, target, tier="6gb")["tier"] == "6gb"
+
+
+def test_invalid_environment_override_preserves_existing_config(
+    paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target = paths
+    target.parent.mkdir()
+    target.write_text("previous configuration\n", encoding="utf-8")
+    monkeypatch.setenv("SLAIDSHOW_TIER", "24gb")
+
+    with pytest.raises(generator.ConfigurationError):
+        generator.generate(source, target)
+
+    assert target.read_text(encoding="utf-8") == "previous configuration\n"
+
+
+@pytest.mark.parametrize("content", ["{", "[]", "null", '{"schema_version": 1}'])
+def test_invalid_json_report_is_rejected(
+    paths: tuple[Path, Path], content: str
+) -> None:
+    source, target = paths
+    source.write_text(content, encoding="utf-8")
+
+    with pytest.raises(generator.ConfigurationError):
+        generator.generate(source, target)
+
+    assert not target.exists()
+
+
+def test_missing_hardware_file_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(generator.ConfigurationError):
+        generator.generate(tmp_path / "missing.json", tmp_path / "generated.yaml")
+
+
+def test_source_cannot_be_overwritten(paths: tuple[Path, Path]) -> None:
+    source, _ = paths
+    previous = source.read_bytes()
+
+    with pytest.raises(generator.ConfigurationError, match="identisch"):
+        generator.generate(source, source)
+
+    assert source.read_bytes() == previous
+
+
+def test_failed_replace_preserves_existing_config_and_removes_temporary_file(
+    paths: tuple[Path, Path],
+) -> None:
+    source, target = paths
+    target.parent.mkdir()
+    target.write_bytes(b"previous configuration\n")
+
+    with (
+        patch.object(generator.os, "replace", side_effect=OSError("mock failure")),
+        pytest.raises(generator.ConfigurationError),
+    ):
+        generator.generate(source, target)
+
+    assert target.read_bytes() == b"previous configuration\n"
+    assert list(target.parent.glob(f".{target.name}.*.tmp")) == []
+
+
+def test_failed_serialization_preserves_existing_config(
+    paths: tuple[Path, Path],
+) -> None:
+    source, target = paths
+    target.parent.mkdir()
+    target.write_bytes(b"previous configuration\n")
+
+    with (
+        patch.object(generator.yaml, "safe_dump", side_effect=yaml.YAMLError("mock")),
+        pytest.raises(generator.ConfigurationError),
+    ):
+        generator.generate(source, target)
+
+    assert target.read_bytes() == b"previous configuration\n"
+    assert list(target.parent.glob(f".{target.name}.*.tmp")) == []
+
+
+def test_cli_success(
+    paths: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, target = paths
+
+    result = generator.main(
+        ["--hardware", str(source), "--output", str(target), "--tier", "6gb"]
+    )
+
+    assert result == 0
+    assert target.is_file()
+    assert "Profil 6gb" in capsys.readouterr().err
+
+
+def test_cli_failure(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    result = generator.main(
+        [
+            "--hardware",
+            str(tmp_path / "missing.json"),
+            "--output",
+            str(tmp_path / "generated.yaml"),
+        ]
+    )
+
+    assert result == 1
+    assert "Fehler:" in capsys.readouterr().err
+    assert not (tmp_path / "generated.yaml").exists()
+```
+
+---
+
+### tests/test_hardware_detect.py
+
+```py
+# tests/test_harware_detect.py
+"""Test NVIDIA discovery with mocked NVML and isolated filesystem writes."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+
+import hardware_detect as detector
+
+GIB = 1024**3
+
+
+@pytest.fixture(autouse=True)
+def isolated_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Avoid platform and environment dependencies."""
+    monkeypatch.delenv("GPU_INDEX", raising=False)
+    monkeypatch.delenv("HARDWARE_PATH", raising=False)
+    monkeypatch.setattr(detector.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(detector, "detect_cpu_ram", lambda: 32.0)
+
+
+@pytest.fixture
+def nvml(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Provide a fake NVML module without importing pynvml."""
+    module = MagicMock()
+    module.nvmlDeviceGetCount.return_value = 1
+    module.nvmlDeviceGetHandleByIndex.side_effect = lambda index: index
+    module.nvmlDeviceGetMemoryInfo.return_value = SimpleNamespace(
+        total=6 * GIB,
+        free=5 * GIB,
+        used=GIB,
+    )
+    module.nvmlDeviceGetName.return_value = b"Mock NVIDIA GPU"
+    module.nvmlDeviceGetUUID.return_value = b"GPU-mock-0001"
+    monkeypatch.setattr(
+        detector.importlib, "import_module", lambda name: module
+    )
+    return module
+
+
+def test_detect_preserves_exact_memory_and_writes_json(
+    nvml: MagicMock, tmp_path: Path
+) -> None:
+    target = tmp_path / "config" / "hardware.json"
+
+    result = detector.detect(output_path=target)
+
+    assert json.loads(target.read_text(encoding="utf-8")) == result
+    assert result["schema_version"] == 1
+    assert result["memory_unit"] == "GiB"
+    assert result["gpu_index"] == 0
+    assert result["gpu_uuid"] == "GPU-mock-0001"
+    assert result["vram_total_bytes"] == 6 * GIB
+    assert result["vram_free_bytes"] == 5 * GIB
+    assert result["vram_used_bytes"] == GIB
+    assert result["vram_gb"] == 6.0
+    assert result["cpu_ram_gb"] == 32.0
+    nvml.nvmlShutdown.assert_called_once()
+
+
+@pytest.mark.parametrize("name", [b"Mock GPU", "Mock GPU"])
+def test_gpu_name_accepts_bytes_and_text(
+    nvml: MagicMock, name: bytes | str
+) -> None:
+    nvml.nvmlDeviceGetName.return_value = name
+    assert detector.detect_nvidia()[0].gpu_name == "Mock GPU"
+
+
+def test_missing_pynvml_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing_module(name: str) -> Any:
+        raise ImportError("mock missing module")
+
+    monkeypatch.setattr(detector.importlib, "import_module", missing_module)
+
+    with pytest.raises(detector.HardwareDetectionError, match="pynvml"):
+        detector.detect_nvidia()
+
+
+def test_initialization_failure_does_not_shutdown(nvml: MagicMock) -> None:
+    nvml.nvmlInit.side_effect = RuntimeError("mock driver failure")
+
+    with pytest.raises(detector.HardwareDetectionError, match="initialisiert"):
+        detector.detect_nvidia()
+
+    nvml.nvmlShutdown.assert_not_called()
+
+
+def test_read_failure_still_shuts_down(nvml: MagicMock) -> None:
+    nvml.nvmlDeviceGetMemoryInfo.side_effect = RuntimeError("mock read failure")
+
+    with pytest.raises(detector.HardwareDetectionError, match="NVML-Daten"):
+        detector.detect_nvidia()
+
+    nvml.nvmlShutdown.assert_called_once()
+
+
+def test_shutdown_failure_does_not_discard_result(nvml: MagicMock) -> None:
+    nvml.nvmlShutdown.side_effect = RuntimeError("mock shutdown failure")
+    assert len(detector.detect_nvidia()) == 1
+
+
+def test_no_gpu_does_not_write_file(
+    nvml: MagicMock, tmp_path: Path
+) -> None:
+    nvml.nvmlDeviceGetCount.return_value = 0
+    target = tmp_path / "hardware.json"
+
+    with pytest.raises(detector.HardwareDetectionError, match="Keine NVIDIA"):
+        detector.detect(output_path=target)
+
+    assert not target.exists()
+    nvml.nvmlShutdown.assert_called_once()
+
+
+def test_multiple_gpus_require_explicit_selection(
+    nvml: MagicMock, tmp_path: Path
+) -> None:
+    nvml.nvmlDeviceGetCount.return_value = 2
+
+    with pytest.raises(detector.HardwareDetectionError, match="Mehrere"):
+        detector.detect(output_path=tmp_path / "hardware.json")
+
+
+def test_selected_gpu_memory_is_not_added(
+    nvml: MagicMock, tmp_path: Path
+) -> None:
+    nvml.nvmlDeviceGetCount.return_value = 2
+
+    result = detector.detect(gpu_index=1, output_path=tmp_path / "hardware.json")
+
+    assert result["gpu_index"] == 1
+    assert result["gpu_count"] == 2
+    assert result["vram_total_bytes"] == 6 * GIB
+
+
+def test_environment_selects_gpu(
+    nvml: MagicMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nvml.nvmlDeviceGetCount.return_value = 2
+    monkeypatch.setenv("GPU_INDEX", "1")
+
+    result = detector.detect(output_path=tmp_path / "hardware.json")
+
+    assert result["gpu_index"] == 1
+
+
+def test_explicit_index_overrides_environment(
+    nvml: MagicMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nvml.nvmlDeviceGetCount.return_value = 2
+    monkeypatch.setenv("GPU_INDEX", "invalid")
+
+    result = detector.detect(gpu_index=0, output_path=tmp_path / "hardware.json")
+
+    assert result["gpu_index"] == 0
+
+
+@pytest.mark.parametrize("index", [-1, True, 1.5, "0"])
+def test_invalid_explicit_index_is_rejected(index: Any) -> None:
+    with pytest.raises(detector.HardwareDetectionError, match="GPU-Index"):
+        detector.detect(gpu_index=index)
+
+
+@pytest.mark.parametrize("value", ["", "-1", "1.5", " 0", "01", "true"])
+def test_invalid_environment_index_is_rejected(
+    value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GPU_INDEX", value)
+
+    with pytest.raises(detector.HardwareDetectionError, match="GPU_INDEX"):
+        detector.detect()
+
+
+def test_unavailable_index_is_rejected(
+    nvml: MagicMock, tmp_path: Path
+) -> None:
+    with pytest.raises(detector.HardwareDetectionError, match="nicht verfügbar"):
+        detector.detect(gpu_index=4, output_path=tmp_path / "hardware.json")
+
+
+def test_small_gpu_is_reported_with_warning(
+    nvml: MagicMock, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    nvml.nvmlDeviceGetMemoryInfo.return_value = SimpleNamespace(
+        total=4 * GIB, free=3 * GIB, used=GIB
+    )
+
+    result = detector.detect(output_path=tmp_path / "hardware.json")
+
+    assert result["vram_total_bytes"] == 4 * GIB
+    assert "weniger als 6 GiB" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("machine", ["arm64", "x86_64"])
+def test_macos_is_rejected_before_nvml_access(
+    nvml: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    machine: str,
+) -> None:
+    monkeypatch.setattr(detector.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(detector.platform, "machine", lambda: machine)
+
+    with pytest.raises(detector.HardwareDetectionError, match="nicht unterstützt"):
+        detector.detect()
+
+    nvml.nvmlInit.assert_not_called()
+
+
+def test_hardware_path_environment_is_used(
+    nvml: MagicMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "hardware.json"
+    monkeypatch.setenv("HARDWARE_PATH", str(target))
+
+    detector.detect()
+
+    assert target.is_file()
+
+
+def test_failed_replace_preserves_previous_report(
+    nvml: MagicMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "hardware.json"
+    target.write_bytes(b"previous report\n")
+
+    def fail_replace(source: Any, destination: Any) -> None:
+        raise OSError("mock replace failure")
+
+    monkeypatch.setattr(detector.os, "replace", fail_replace)
+
+    with pytest.raises(detector.HardwareDetectionError, match="geschrieben"):
+        detector.detect(output_path=target)
+
+    assert target.read_bytes() == b"previous report\n"
+    assert list(tmp_path.glob(".hardware.json.*")) == []
+
+
+def test_cli_success(
+    nvml: MagicMock, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / "hardware.json"
+
+    assert detector.main(["--output", str(target)]) == 0
+    assert target.is_file()
+    assert "Hardware-Datei geschrieben" in capsys.readouterr().err
+
+
+def test_cli_failure(
+    nvml: MagicMock, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    nvml.nvmlDeviceGetCount.return_value = 0
+    target = tmp_path / "hardware.json"
+
+    assert detector.main(["--output", str(target)]) == 1
+    assert not target.exists()
+    assert "Fehler:" in capsys.readouterr().err
+
+```
+
+---
+
+### transcription_backend.py
+
+```py
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import io
+import os
+import re
+import time
+import traceback
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+
+import numpy as np
+
+print(f"[TRANSCRIBE][FILE] loaded: {__file__}")
+
+
+# -----------------------
+# --- Realtime merging and sentence heuristics utilities ---
+# -----------------------
+
+SENTENCE_END_RE = re.compile(r"[\.!\?…]\s*$")
+
+
+def _merge_overlap(prev: str, new: str, min_overlap: int = 5, max_overlap: int = 18) -> str:
+    """
+    Merge 'new' into 'prev' with de-duplication by overlapping tail/head.
+    Returns the combined string.
+    """
+    prev = prev or ""
+    new = new or ""
+    if not prev:
+        return new
+    # Normalize spaces
+    prev_n = re.sub(r"\s+", " ", prev).strip()
+    new_n = re.sub(r"\s+", " ", new).strip()
+    if not new_n:
+        return prev_n
+    # Try largest overlap between end(prev) and start(new)
+    max_k = min(max_overlap, len(prev_n), len(new_n))
+    for k in range(max_k, min_overlap - 1, -1):
+        if prev_n.endswith(new_n[:k]):
+            return (prev_n + new_n[k:]).strip()
+    # Try the reverse (rare but cheap)
+    if new_n.endswith(prev_n[:max_k]):
+        return (prev_n + " " + new_n).strip()
+    return (prev_n + " " + new_n).strip()
+
+
+def _is_meaningful(text: str, min_chars: int = 12, min_words: int = 3) -> bool:
+    text_n = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(text_n) < min_chars:
+        return False
+    if len(text_n.split()) < min_words:
+        return False
+    return True
+
+
+def _is_punct_only_change(prev_norm: str, new_norm: str) -> bool:
+    """
+    Return True if the only difference between prev and new is a terminal punctuation change.
+    This reduces UI "flicker" when Whisper only toggles a trailing '.' or '…' etc.
+    """
+    if prev_norm == new_norm:
+        return False
+    prev_core = re.sub(r"[\.!\?…]+\s*$", "", prev_norm)
+    new_core = re.sub(r"[\.!\?…]+\s*$", "", new_norm)
+    return prev_core == new_core
+
+
+# -----------------------
+# Environment helpers
+# -----------------------
+
+def _env_str(key: str, default: str = "") -> str:
+    return (os.getenv(key, default) or "").strip()
+
+
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(os.getenv(key, str(default)))
+    except Exception:
+        return default
+
+
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.getenv(key, str(default)))
+    except Exception:
+        return default
+
+
+def _env_bool(key: str, default: bool = False) -> bool:
+    """
+    Returns True if env var is one of: 1, true, yes, on (case-insensitive).
+    A missing key falls back to 'default'.
+    """
+    default_text = "1" if default else "0"
+    value = (os.getenv(key, default_text) or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+# -----------------------
+# Regex helpers
+# -----------------------
+
+TEXT_FIELD_RE = re.compile(r"text\s*=\s*(.+?)(?:,|$)")
+META_RE = re.compile(
+    r"\b(musik|music|applaus|applause|lachen|laugh|geräusch|noise|"
+    r"husten|cough|klatschen|klingel|ring|summen|hmm+|pause)\b",
+    re.IGNORECASE,
+)
+
+
+# -----------------------
+# Low-end profile helpers (Whisper-only scope)
+# -----------------------
+
+def _only_if_unset_str(key: str, value: str) -> None:
+    if os.getenv(key, "") == "":
+        os.environ[key] = str(value)
+
+
+def _only_if_unset_int(key: str, value: int) -> None:
+    if os.getenv(key, "") == "":
+        os.environ[key] = str(int(value))
+
+
+def _only_if_unset_float(key: str, value: float) -> None:
+    if os.getenv(key, "") == "":
+        os.environ[key] = str(float(value))
+
+
+def _only_if_unset_bool(key: str, value: bool) -> None:
+    if os.getenv(key, "") == "":
+        os.environ[key] = "1" if value else "0"
+
+
+def _override_from_lowend_or_default(
+    app_key: str,
+    lowend_key: str,
+    fallback_setter: Callable[[str], None],
+) -> None:
+    """
+    If LOWEND_* env exists (non-empty), override APP_* with its value (hard override).
+    Otherwise, call fallback_setter(app_key) which should fill APP_* only-if-unset.
+    """
+    lowend_val = os.getenv(lowend_key, "")
+    if lowend_val != "":
+        os.environ[app_key] = lowend_val
+        print(f"[LOWEND] {app_key} <- {lowend_key} ({lowend_val})")
+        return
+    # No LOWEND value: use conservative default only if APP_* is currently unset
+    fallback_setter(app_key)
+
+
+def _apply_low_end_overrides_if_enabled() -> None:
+    """
+    Apply Whisper-only low-end overrides when APP_LOWEND_MODE=1.
+    - Reads LOWEND_* variables and assigns them to their APP_* counterparts (hard override).
+    - If LOWEND_* is absent, uses conservative defaults but only when APP_* is unset.
+    - No changes to non-Whisper domains (VAD, segmentation, UI, LLM, image backends).
+    """
+    if not _env_bool("APP_LOWEND_MODE", False):
+        return
+
+    print("[TRANSCRIBE] APP_LOWEND_MODE=1 detected – applying Whisper low-end overrides")
+
+    # Whisper (shared)
+    _override_from_lowend_or_default(
+        "APP_WHISPER_BACKEND",
+        "LOWEND_WHISPER_BACKEND",
+        lambda k: _only_if_unset_str(k, "faster_whisper"),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_LANGUAGE",
+        "LOWEND_WHISPER_LANGUAGE",
+        lambda k: _only_if_unset_str(k, ""),  # keep auto-detect unless explicitly set
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_THREADS",
+        "LOWEND_WHISPER_THREADS",
+        lambda k: _only_if_unset_int(k, 2),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_TEMPERATURE",
+        "LOWEND_WHISPER_TEMPERATURE",
+        lambda k: _only_if_unset_float(k, 0.0),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_MIN_SEC",
+        "LOWEND_WHISPER_MIN_SEC",
+        lambda k: _only_if_unset_float(k, 0.8),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_MIN_PEAK",
+        "LOWEND_WHISPER_MIN_PEAK",
+        lambda k: _only_if_unset_float(k, 0.0015),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_NO_SPEECH_THRESHOLD",
+        "LOWEND_WHISPER_NO_SPEECH_THRESHOLD",
+        lambda k: _only_if_unset_float(k, 0.8),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_LOGPROB_THRESHOLD",
+        "LOWEND_WHISPER_LOGPROB_THRESHOLD",
+        lambda k: _only_if_unset_float(k, -0.8),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT",
+        "LOWEND_WHISPER_CONDITION_ON_PREVIOUS_TEXT",
+        lambda k: _only_if_unset_bool(k, True),
+    )
+    _override_from_lowend_or_default(
+        "APP_WHISPER_COMPRESSION_RATIO_THRESHOLD",
+        "LOWEND_WHISPER_COMPRESSION_RATIO_THRESHOLD",
+        lambda k: _only_if_unset_float(k, 2.4),
+    )
+
+    # Faster-Whisper (CTranslate2)
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_MODEL",
+        "LOWEND_FASTER_WHISPER_MODEL",
+        lambda k: _only_if_unset_str(k, "tiny"),
+    )
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_DEVICE",
+        "LOWEND_FASTER_WHISPER_DEVICE",
+        lambda k: _only_if_unset_str(k, "cpu"),
+    )
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_COMPUTE_TYPE",
+        "LOWEND_FASTER_WHISPER_COMPUTE_TYPE",
+        lambda k: _only_if_unset_str(k, "int8"),
+    )
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_CPU_THREADS",
+        "LOWEND_FASTER_WHISPER_CPU_THREADS",
+        lambda k: _only_if_unset_int(k, 2),
+    )
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_NUM_WORKERS",
+        "LOWEND_FASTER_WHISPER_NUM_WORKERS",
+        lambda k: _only_if_unset_int(k, 1),
+    )
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_BEAM_SIZE",
+        "LOWEND_FASTER_WHISPER_BEAM_SIZE",
+        lambda k: _only_if_unset_int(k, 1),
+    )
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_VAD_FILTER",
+        "LOWEND_FASTER_WHISPER_VAD_FILTER",
+        lambda k: _only_if_unset_bool(k, False),
+    )
+    _override_from_lowend_or_default(
+        "APP_FASTER_WHISPER_DOWNLOAD_ROOT",
+        "LOWEND_FASTER_WHISPER_DOWNLOAD_ROOT",
+        lambda k: _only_if_unset_str(k, "./models/faster-whisper-cache"),
+    )
+
+
+# -----------------------
+# Configuration dataclass
+# -----------------------
+
+@dataclass(frozen=True)
+class TranscriptionConfig:
+    """Configuration loaded once from environment variables."""
+
+    requested_backend: str
+    language: Optional[str]
+    threads: int
+    temperature: float
+    min_seconds: float
+    min_peak: float
+
+    # Optional Whisper-level thresholds (used by faster-whisper)
+    no_speech_threshold: Optional[float]
+    logprob_threshold: Optional[float]
+    condition_on_previous_text: bool
+
+    pywhispercpp_model_path: str
+
+    faster_whisper_model: str
+    faster_whisper_device: str
+    faster_whisper_compute_type: str
+    faster_whisper_cpu_threads: int
+    faster_whisper_num_workers: int
+    faster_whisper_beam_size: int
+    faster_whisper_vad_filter: bool
+    faster_whisper_download_root: Optional[str]
+
+    # Parakeet toggles
+    parakeet_enable: bool
+    parakeet_device: str  # auto|cpu|cuda
+    parakeet_model: str   # logical name for loader (e.g., "tdt_0.6b_v3")
+
+    # Realtime parameters (unchanged; low-end switch does not touch them)
+    rt_slice_sec: float
+    rt_window_sec: float
+    rt_end_debounce_ms: int
+    vad_enabled: bool
+    vad_rms_threshold: float
+    rt_fallback_record: bool
+    rt_fallback_dir: str
+
+    # Partials/debounce tunables (unchanged by low-end switch)
+    min_partial_decode_interval_ms: int
+    min_partial_emit_interval_ms: int
+    partial_min_growth_chars: int
+    partial_min_growth_words: int
+    partial_min_chars: int
+    partial_min_words: int
+
+    # Adaptive finalization delays (unchanged by low-end switch)
+    finalize_base_delay_sec: float
+    finalize_nosent_delay_sec: float
+
+    # Fallback recording minimum record time
+    fallback_min_record_ms: int
+
+    @classmethod
+    def from_environment(cls) -> "TranscriptionConfig":
+        # Log raw env before applying overrides
+        print(f"[LOWEND][CFG] from_env: APP_LOWEND_MODE='{os.getenv('APP_LOWEND_MODE', '')}'")
+        # Apply whisper-only low-end overrides first (if APP_LOWEND_MODE=1)
+        _apply_low_end_overrides_if_enabled()
+        # Log selected core keys after env-based overrides (note: no cfg object yet)
+        print(
+            "[LOWEND][CFG] after_overrides_env: "
+            f"APP_WHISPER_BACKEND='{os.getenv('APP_WHISPER_BACKEND', '')}' "
+            f"APP_FASTER_WHISPER_DEVICE='{os.getenv('APP_FASTER_WHISPER_DEVICE', '')}' "
+            f"APP_FASTER_WHISPER_MODEL='{os.getenv('APP_FASTER_WHISPER_MODEL', '')}' "
+            f"APP_FASTER_WHISPER_COMPUTE_TYPE='{os.getenv('APP_FASTER_WHISPER_COMPUTE_TYPE', '')}'"
+        )
+
+        requested_backend = _env_str("APP_WHISPER_BACKEND", "auto").lower()
+        if requested_backend not in {"auto", "faster_whisper", "pywhispercpp", "parakeet"}:
+            print(
+                "[TRANSCRIBE] Invalid APP_WHISPER_BACKEND="
+                f"{requested_backend!r}; using 'auto'."
+            )
+            requested_backend = "auto"
+
+        faster_device = _env_str("APP_FASTER_WHISPER_DEVICE", "auto").lower()
+        if faster_device not in {"auto", "cuda", "cpu"}:
+            print(
+                "[TRANSCRIBE] Invalid APP_FASTER_WHISPER_DEVICE="
+                f"{faster_device!r}; using 'auto'."
+            )
+            faster_device = "auto"
+
+        faster_compute_type = _env_str("APP_FASTER_WHISPER_COMPUTE_TYPE", "auto").lower()
+
+        download_root_raw = _env_str("APP_FASTER_WHISPER_DOWNLOAD_ROOT", "")
+        download_root = str(Path(download_root_raw).resolve()) if download_root_raw else None
+
+        # Optional decode controls; None means "do not pass" to keep library defaults
+        no_speech_threshold_env = _env_str("APP_WHISPER_NO_SPEECH_THRESHOLD", "")
+        no_speech_threshold: Optional[float] = None
+        if no_speech_threshold_env:
+            try:
+                no_speech_threshold = float(no_speech_threshold_env)
+            except Exception:
+                print("[TRANSCRIBE] Ignoring invalid APP_WHISPER_NO_SPEECH_THRESHOLD")
+
+        logprob_threshold_env = _env_str("APP_WHISPER_LOGPROB_THRESHOLD", "")
+        logprob_threshold: Optional[float] = None
+        if logprob_threshold_env:
+            try:
+                logprob_threshold = float(logprob_threshold_env)
+            except Exception:
+                print("[TRANSCRIBE] Ignoring invalid APP_WHISPER_LOGPROB_THRESHOLD")
+
+        # Parakeet toggles (optional; 6GB-first => default disabled)
+        parakeet_enable = _env_bool("APP_PARAKEET_ENABLE", False) or (requested_backend == "parakeet")
+        parakeet_device = _env_str("APP_PARAKEET_DEVICE", "auto").lower()
+        if parakeet_device not in {"auto", "cpu", "cuda"}:
+            parakeet_device = "auto"
+        parakeet_model = _env_str("APP_PARAKEET_MODEL", "tdt_0.6b_v3")
+
+        # Realtime params with sensible defaults
+        rt_slice_sec = _env_float("APP_RT_SLICE_SEC", 3.0)
+        rt_window_sec = _env_float("APP_RT_WINDOW_SEC", 30.0)
+        rt_end_debounce_ms = _env_int("APP_RT_END_DEBOUNCE_MS", 550)
+        vad_enabled = not _env_bool("APP_DISABLE_VAD", True)  # default True (enabled), inverted flag
+        vad_rms_threshold = _env_float("APP_RMS_VAD_THRESHOLD", 0.015)
+        rt_fallback_record = _env_bool("APP_RT_FALLBACK_RECORD", True)
+        rt_fallback_dir = _env_str("APP_RT_FALLBACK_DIR", "./outputs/voice_fallback")
+
+        cfg = cls(
+            requested_backend=requested_backend,
+            language=(_env_str("APP_WHISPER_LANGUAGE", "").strip() or None),
+            threads=max(1, _env_int("APP_WHISPER_THREADS", 2)),
+            temperature=max(0.0, _env_float("APP_WHISPER_TEMPERATURE", 0.0)),
+            min_seconds=max(0.0, _env_float("APP_WHISPER_MIN_SEC", 0.8)),
+            min_peak=max(0.0, _env_float("APP_WHISPER_MIN_PEAK", 0.0009)),
+            no_speech_threshold=no_speech_threshold,
+            logprob_threshold=logprob_threshold,
+            condition_on_previous_text=_env_bool("APP_WHISPER_CONDITION_ON_PREVIOUS_TEXT", True),
+            pywhispercpp_model_path=_env_str("APP_WHISPER_MODEL_PATH", ""),
+            faster_whisper_model=_env_str("APP_FASTER_WHISPER_MODEL", "small"),
+            faster_whisper_device=faster_device,
+            faster_whisper_compute_type=faster_compute_type,
+            faster_whisper_cpu_threads=max(
+                1,
+                _env_int(
+                    "APP_FASTER_WHISPER_CPU_THREADS",
+                    _env_int("APP_WHISPER_THREADS", 2),
+                ),
+            ),
+            faster_whisper_num_workers=max(
+                1,
+                _env_int("APP_FASTER_WHISPER_NUM_WORKERS", 1),
+            ),
+            faster_whisper_beam_size=max(
+                1,
+                _env_int("APP_FASTER_WHISPER_BEAM_SIZE", 1),
+            ),
+            faster_whisper_vad_filter=_env_bool(
+                "APP_FASTER_WHISPER_VAD_FILTER",
+                False,
+            ),
+            faster_whisper_download_root=download_root,
+            # Parakeet toggles
+            parakeet_enable=parakeet_enable,
+            parakeet_device=parakeet_device,
+            parakeet_model=parakeet_model,
+            # Realtime params (unchanged by low-end switch)
+            rt_slice_sec=rt_slice_sec,
+            rt_window_sec=rt_window_sec,
+            rt_end_debounce_ms=rt_end_debounce_ms,
+            vad_enabled=vad_enabled,
+            vad_rms_threshold=vad_rms_threshold,
+            rt_fallback_record=rt_fallback_record,
+            rt_fallback_dir=rt_fallback_dir,
+            # Partials/debounce (unchanged by low-end switch)
+            min_partial_decode_interval_ms=_env_int("APP_MIN_PARTIAL_DECODE_MS", 350),
+            min_partial_emit_interval_ms=_env_int("APP_MIN_PARTIAL_EMIT_MS", 600),
+            partial_min_growth_chars=_env_int("APP_PARTIAL_MIN_GROWTH_CHARS", 3),
+            partial_min_growth_words=_env_int("APP_PARTIAL_MIN_GROWTH_WORDS", 1),
+            partial_min_chars=_env_int("APP_PARTIAL_MIN_CHARS", 10),
+            partial_min_words=_env_int("APP_PARTIAL_MIN_WORDS", 2),
+            # Adaptive finalization (unchanged by low-end switch)
+            finalize_base_delay_sec=_env_float("APP_FINALIZE_BASE_DELAY_SEC", 0.35),
+            finalize_nosent_delay_sec=_env_float("APP_FINALIZE_NOSENT_DELAY_SEC", 0.85),
+            # Fallback recording threshold
+            fallback_min_record_ms=_env_int("APP_RT_FALLBACK_MIN_RECORD_MS", 1500),
+        )
+
+        # Final, effective config log
+        print(
+            "[LOWEND][CFG] effective_config: "
+            f"lowend_mode={_env_bool('APP_LOWEND_MODE', False)} "
+            f"requested_backend={cfg.requested_backend} "
+            f"faster_device={cfg.faster_whisper_device} "
+            f"compute_type={cfg.faster_whisper_compute_type} "
+            f"model={cfg.faster_whisper_model} "
+            f"threads={cfg.faster_whisper_cpu_threads} "
+            f"workers={cfg.faster_whisper_num_workers} "
+            f"beam_size={cfg.faster_whisper_beam_size} "
+            f"vad_filter={int(cfg.faster_whisper_vad_filter)} "
+            f"parakeet_enable={int(cfg.parakeet_enable)} "
+            f"parakeet_device={cfg.parakeet_device} "
+            f"parakeet_model={cfg.parakeet_model} "
+            f"language={cfg.language} "
+            f"temperature={cfg.temperature:.2f} "
+            f"min_sec={cfg.min_seconds:.2f} "
+            f"min_peak={cfg.min_peak:.4f} "
+            f"no_speech_thr={cfg.no_speech_threshold} "
+            f"logprob_thr={cfg.logprob_threshold} "
+            f"cond_prev={int(cfg.condition_on_previous_text)}"
+        )
+
+        return cfg
+
+# -----------------------
+# Status dataclass
+# -----------------------
+
+@dataclass
+class TranscriptionStatus:
+    """Runtime-visible state for /config and operational troubleshooting."""
+
+    requested_backend: str
+    selected_backend: str = "uninitialized"
+    selected_device: Optional[str] = None
+    selected_compute_type: Optional[str] = None
+    model: Optional[str] = None
+    language: Optional[str] = None
+    ready: bool = False
+    fallback_used: bool = False
+    fallback_reason: Optional[str] = None
+    initialization_error: Optional[str] = None
+    supported_cuda_compute_types: List[str] = None
+    supported_cpu_compute_types: List[str] = None
+    initialized_at_unix: Optional[float] = None
+    last_transcription_ms: Optional[float] = None
+    last_transcription_error: Optional[str] = None
+    lowend_mode: bool = False
+
+    def __post_init__(self) -> None:
+        if self.supported_cuda_compute_types is None:
+            self.supported_cuda_compute_types = []
+        if self.supported_cpu_compute_types is None:
+            self.supported_cpu_compute_types = []
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# -----------------------
+# Backend base
+# -----------------------
+
+class BaseTranscriptionBackend:
+    """Common synchronous interface used by app.py through asyncio.to_thread."""
+
+    backend_name = "base"
+
+    def __init__(self, config: TranscriptionConfig) -> None:
+        self.config = config
+
+    def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
+        raise NotImplementedError
+
+
+# -----------------------
+# Faster-Whisper backend
+# -----------------------
+
+class FasterWhisperBackend(BaseTranscriptionBackend):
+    """CTranslate2-backed faster-whisper implementation."""
+
+    backend_name = "faster_whisper"
+
+    def __init__(
+        self,
+        config: TranscriptionConfig,
+        device: str,
+        compute_type: str,
+    ) -> None:
+        super().__init__(config)
+
+        from faster_whisper import WhisperModel  # type: ignore
+
+        model_kwargs: Dict[str, Any] = {
+            "device": device,
+            "compute_type": compute_type,
+            "cpu_threads": config.faster_whisper_cpu_threads,
+            "num_workers": config.faster_whisper_num_workers,
+        }
+
+        if config.faster_whisper_download_root:
+            Path(config.faster_whisper_download_root).mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            model_kwargs["download_root"] = config.faster_whisper_download_root
+
+        self.device = device
+        self.compute_type = compute_type
+        self.model_name = config.faster_whisper_model
+        self.model = WhisperModel(config.faster_whisper_model, **model_kwargs)
+
+        print(
+            "[TRANSCRIBE] Faster-Whisper init: "
+            f"device={self.device} compute_type={self.compute_type} "
+            f"model={self.model_name} cpu_threads={config.faster_whisper_cpu_threads} "
+            f"workers={config.faster_whisper_num_workers} "
+            f"beam_size={config.faster_whisper_beam_size} "
+            f"vad_filter={int(config.faster_whisper_vad_filter)} "
+            f"lang={config.language} temp={config.temperature:.2f} "
+            f"min_sec={config.min_seconds:.2f} min_peak={config.min_peak:.4f} "
+            f"no_speech_thr={config.no_speech_threshold} "
+            f"logprob_thr={config.logprob_threshold} "
+            f"cond_prev={int(config.condition_on_previous_text)}"
+        )
+
+    def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
+        audio = _prepare_audio(
+            samples=samples,
+            sample_rate=sample_rate,
+            min_seconds=self.config.min_seconds,
+        )
+        if audio.size == 0:
+            return ""
+
+        # Determine effective language at runtime:
+        hint_lang = (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip().lower() or None
+        conf_lang = self.config.language or None
+        eff_lang = conf_lang or hint_lang or None
+
+        kwargs: Dict[str, Any] = dict(
+            language=eff_lang,  # None enables auto-detect
+            beam_size=self.config.faster_whisper_beam_size,
+            temperature=self.config.temperature,
+            vad_filter=self.config.faster_whisper_vad_filter,
+            condition_on_previous_text=self.config.condition_on_previous_text,
+            word_timestamps=False,
+            without_timestamps=True,
+        )
+
+        if self.config.no_speech_threshold is not None:
+            kwargs["no_speech_threshold"] = self.config.no_speech_threshold
+        if self.config.logprob_threshold is not None:
+            kwargs["log_prob_threshold"] = self.config.logprob_threshold
+
+        segments, _info = self.model.transcribe(audio, **kwargs)
+
+        text_parts: List[str] = []
+        for segment in segments:
+            text = getattr(segment, "text", "")
+            if isinstance(text, str) and text.strip():
+                text_parts.append(text.strip())
+
+        return clean_transcript(" ".join(text_parts))
+
+
+# -----------------------
+# pywhispercpp backend
+# -----------------------
+
+class PyWhisperCppBackend(BaseTranscriptionBackend):
+    """whisper.cpp-based fallback implementation using pywhispercpp.model.Model."""
+
+    backend_name = "pywhispercpp"
+
+    def __init__(self, config: TranscriptionConfig) -> None:
+        super().__init__(config)
+
+        model_path = Path(config.pywhispercpp_model_path)
+        if not config.pywhispercpp_model_path or not model_path.is_file():
+            raise FileNotFoundError(
+                "pywhispercpp model is unavailable. Set APP_WHISPER_MODEL_PATH "
+                "to an existing ggml model file."
+            )
+
+        from pywhispercpp.model import Model as WhisperModel  # type: ignore
+
+        self.model_path = model_path.resolve()
+        self.model = WhisperModel(
+            str(self.model_path),
+            n_threads=config.threads,
+            print_progress=False,
+            print_realtime=False,
+            # Force auto-detect to avoid re-init on runtime hint changes:
+            language=None,
+            translate=False,
+            temperature=config.temperature,
+        )
+
+        print(
+            "[TRANSCRIBE] pywhispercpp init: "
+            f"model={self.model_path.name} threads={config.threads} "
+            f"lang={self.config.language} temp={self.config.temperature:.2f} "
+            f"min_sec={self.config.min_seconds:.2f} min_peak={self.config.min_peak:.4f}"
+        )
+
+    def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
+        audio = _prepare_audio(
+            samples=samples,
+            sample_rate=sample_rate,
+            min_seconds=self.config.min_seconds,
+        )
+        if audio.size == 0:
+            return ""
+
+        # Prefer float32 path if available
+        if hasattr(self.model, "transcribe_float32"):
+            raw = self.model.transcribe_float32(audio)
+        elif hasattr(self.model, "transcribe"):
+            raw = self.model.transcribe(audio)
+        else:
+            raw = self.model.transcribe_pcm16(_to_int16(audio))
+
+        return clean_transcript(_parse_pywhispercpp_output(raw))
+
+
+# -----------------------
+# Parakeet backend (optional; only if installed/enabled)
+# -----------------------
+
+class ParakeetBackend(BaseTranscriptionBackend):
+    """
+    Minimal Parakeet TDT backend adapter.
+    This assumes an optional 'parakeet' package that provides:
+      - load_model(name: str, device: str) -> object
+      - model.transcribe_float32(audio: np.ndarray, sample_rate: int, language: Optional[str]) -> str
+    This is a conservative adapter; if imports fail it should never crash initialization elsewhere.
+    """
+
+    backend_name = "parakeet"
+
+    def __init__(self, config: TranscriptionConfig, device: str, model_name: str) -> None:
+        super().__init__(config)
+        try:
+            import parakeet  # type: ignore  # optional
+        except Exception as exc:
+            raise RuntimeError(f"Parakeet runtime not available: {exc}")
+
+        dev = device
+        if dev == "auto":
+            # 6GB-first: default to CPU unless explicitly set to cuda
+            dev = "cpu"
+
+        self.device = dev
+        self.model_name = model_name
+
+        # Create models dir under /app/models by convention if adapter loads local weights
+        # Keep it minimal; rely on parakeet to manage cache if any
+        self.model = None
+        try:
+            if hasattr(parakeet, "load_model"):
+                # Hypothetical API. If different, adjust here with env flags later.
+                self.model = parakeet.load_model(self.model_name, device=self.device)
+            else:
+                raise RuntimeError("parakeet.load_model not found")
+        except Exception as exc:
+            raise RuntimeError(f"Parakeet model load failed: {exc}")
+
+        print(
+            "[TRANSCRIBE] Parakeet init: "
+            f"device={self.device} model={self.model_name} "
+            f"lang={self.config.language} temp={self.config.temperature:.2f} "
+            f"min_sec={self.config.min_seconds:.2f} min_peak={self.config.min_peak:.4f}"
+        )
+
+    def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
+        if self.model is None:
+            return ""
+        audio = _prepare_audio(
+            samples=samples,
+            sample_rate=sample_rate,
+            min_seconds=self.config.min_seconds,
+        )
+        if audio.size == 0:
+            return ""
+
+        # Language selection similar to faster-whisper
+        hint_lang = (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip().lower() or None
+        eff_lang = (self.config.language or hint_lang or None)
+
+        try:
+            # Hypothetical stable call; fallbacks if API differs
+            if hasattr(self.model, "transcribe_float32"):
+                txt = self.model.transcribe_float32(audio, sample_rate=16000, language=eff_lang)
+            elif hasattr(self.model, "transcribe"):
+                txt = self.model.transcribe(audio, sample_rate=16000, language=eff_lang)
+            else:
+                # bytes path as last resort
+                txt = self.model.transcribe(audio.astype(np.float32, copy=False).tobytes(), sample_rate=16000, language=eff_lang)
+        except Exception as exc:
+            print(f"[TRANSCRIBE] Parakeet transcribe failed: {exc}")
+            return ""
+
+        return clean_transcript(str(txt or "").strip())
+
+
+# -----------------------
+# Manager and initialization
+# -----------------------
+
+class TranscriptionManager:
+    """
+    Owns one selected backend for the process lifetime.
+
+    The manager deliberately does not switch implementations during an active
+    recording session. A stable backend avoids model reloading, inconsistent
+    latency, and surprise CUDA/VRAM contention while ComfyUI is generating.
+    """
+
+    def __init__(self) -> None:
+        self.config = TranscriptionConfig.from_environment()
+        self.backend: Optional[BaseTranscriptionBackend] = None
+        self.status = TranscriptionStatus(
+            requested_backend=self.config.requested_backend,
+            language=self.config.language,
+            lowend_mode=_env_bool("APP_LOWEND_MODE", False),
+        )
+
+    def set_lowend_mode(self, enable: bool) -> Dict[str, Any]:
+        """
+        Atomically set/clear APP_LOWEND_MODE, reinitialize manager under a lock,
+        and return the authoritative status dict.
+
+        This method is synchronous and may perform blocking work (model loads).
+        Callers running in async handlers should execute it inside a worker thread:
+            st = await asyncio.to_thread(get_transcription_manager().set_lowend_mode, True)
+
+        Returns:
+            status dict (same shape as get_status()) after attempted reinit.
+        """
+        # Use a reentrant threading lock to serialize initialize / setter.
+        import threading
+        if not hasattr(self, "_init_lock"):
+            # Lazily create to avoid adding threading import at module top-level changes.
+            self._init_lock = threading.RLock()
+
+        with self._init_lock:
+            # Update environment deterministically
+            if enable:
+                os.environ["APP_LOWEND_MODE"] = "1"
+            else:
+                with contextlib.suppress(Exception):
+                    if "APP_LOWEND_MODE" in os.environ:
+                        del os.environ["APP_LOWEND_MODE"]
+
+            print(f"[LOWEND][TM] set_lowend_mode called -> {'ENABLED' if enable else 'DISABLED'}")
+
+            try:
+                # Reinitialize synchronously while holding the lock to provide
+                # a consistent state to callers.
+                self.initialize()
+            except Exception as exc:
+                tb = traceback.format_exc()
+                print(f"[LOWEND][TM] set_lowend_mode: initialize() failed: {exc}\n{tb}")
+                # On failure return the best-effort current status for diagnostics.
+                return self.get_status()
+
+            # Ensure returned status reflects env flag
+            self.status.lowend_mode = _env_bool("APP_LOWEND_MODE", False)
+            return self.get_status()
+
+    def initialize(self) -> None:
+        """Initialize the best permitted backend according to configuration."""
+
+        # Always re-read ENV and (re)initialize to reflect lowend toggle
+
+        self.config = TranscriptionConfig.from_environment()
+        print(
+            "[LOWEND][TM] initialize with: "
+            f"lowend_mode={_env_bool('APP_LOWEND_MODE', False)} "
+            f"requested_backend={self.config.requested_backend} "
+            f"faster_device={self.config.faster_whisper_device} "
+            f"compute_type={self.config.faster_whisper_compute_type} "
+            f"model={self.config.faster_whisper_model} "
+            f"parakeet_enable={int(self.config.parakeet_enable)} "
+            f"parakeet_device={self.config.parakeet_device} "
+            f"parakeet_model={self.config.parakeet_model}"
+        )
+        self.status = TranscriptionStatus(
+            requested_backend=self.config.requested_backend,
+            language=self.config.language,
+            lowend_mode=_env_bool("APP_LOWEND_MODE", False),
+        )
+
+        # CRITICAL: Ensure status reflects current ENV immediately after rebuild (runtime toggle safe)
+        self.status.lowend_mode = _env_bool("APP_LOWEND_MODE", False)
+        print(f"[LOWEND][TM] initialize(): status.lowend_mode={int(self.status.lowend_mode)}")
+
+        attempts: List[str] = []
+
+        if self.config.requested_backend == "pywhispercpp":
+            self._initialize_pywhispercpp_or_fail(attempts)
+            return
+
+        if self.config.requested_backend == "faster_whisper":
+            self._initialize_explicit_faster_whisper_or_fail(attempts)
+            return
+
+        if self.config.requested_backend == "parakeet":
+            self._initialize_explicit_parakeet_or_fail(attempts)
+            return
+
+        self._initialize_auto(attempts)
+
+    def _initialize_auto(self, attempts: List[str]) -> None:
+        """Try faster-whisper CUDA, then CPU, then Parakeet (if enabled), then pywhispercpp."""
+        faster_error: Optional[str] = None
+        para_error: Optional[str] = None
+
+        try:
+            if self.config.faster_whisper_device in {"auto", "cuda"}:
+                self._initialize_faster_whisper_cuda()
+                return
+        except Exception as exc:
+            faster_error = f"CUDA faster-whisper unavailable: {exc}"
+            attempts.append(faster_error)
+            print(f"[TRANSCRIBE] {faster_error}")
+
+        try:
+            if self.config.faster_whisper_device in {"auto", "cpu"}:
+                self._initialize_faster_whisper_cpu()
+                if faster_error:
+                    self.status.fallback_used = True
+                    self.status.fallback_reason = faster_error
+                return
+        except Exception as exc:
+            cpu_error = f"CPU faster-whisper unavailable: {exc}"
+            attempts.append(cpu_error)
+            print(f"[TRANSCRIBE] {cpu_error}")
+
+        # Optional Parakeet in auto only if enabled
+        if self.config.parakeet_enable:
+            try:
+                self._initialize_parakeet_auto()
+                # mark previous attempts as reasons for fallback, if any
+                if attempts:
+                    self.status.fallback_used = True
+                    self.status.fallback_reason = "; ".join(attempts)
+                return
+            except Exception as exc:
+                para_error = f"Parakeet unavailable: {exc}"
+                attempts.append(para_error)
+                print(f"[TRANSCRIBE] {para_error}")
+
+        try:
+            self._initialize_pywhispercpp()
+            self.status.fallback_used = True
+            self.status.fallback_reason = (
+                "; ".join(attempts)
+                if attempts
+                else "preferred backends could not be initialized"
+            )
+            return
+        except Exception as exc:
+            fallback_error = f"pywhispercpp fallback unavailable: {exc}"
+            attempts.append(fallback_error)
+            print(f"[TRANSCRIBE] {fallback_error}")
+
+        self.backend = None
+        self.status.selected_backend = "unavailable"
+        self.status.ready = False
+        self.status.initialization_error = " | ".join(attempts)
+        print(
+            "[TRANSCRIBE] No transcription backend is available. "
+            f"Details: {self.status.initialization_error}"
+        )
+
+    def _initialize_explicit_faster_whisper_or_fail(
+        self,
+        attempts: List[str],
+    ) -> None:
+        """
+        Explicit faster_whisper never silently switches to pywhispercpp.
+
+        With device=auto, CUDA is attempted first and CPU/int8 is a valid
+        faster-whisper fallback.
+        """
+
+        try:
+            if self.config.faster_whisper_device in {"auto", "cuda"}:
+                self._initialize_faster_whisper_cuda()
+                return
+        except Exception as exc:
+            message = f"CUDA faster-whisper unavailable: {exc}"
+            attempts.append(message)
+            print(f"[TRANSCRIBE] {message}")
+
+        try:
+            if self.config.faster_whisper_device in {"auto", "cpu"}:
+                self._initialize_faster_whisper_cpu()
+                if attempts:
+                    self.status.fallback_used = True
+                    self.status.fallback_reason = "; ".join(attempts)
+                return
+        except Exception as exc:
+            message = f"CPU faster-whisper unavailable: {exc}"
+            attempts.append(message)
+            print(f"[TRANSCRIBE] {message}")
+
+        self.backend = None
+        self.status.selected_backend = "unavailable"
+        self.status.ready = False
+        self.status.initialization_error = " | ".join(attempts)
+        print(
+            "[TRANSCRIBE] Explicit faster-whisper selection failed. "
+            f"Details: {self.status.initialization_error}"
+        )
+
+    def _initialize_explicit_parakeet_or_fail(self, attempts: List[str]) -> None:
+        try:
+            self._initialize_parakeet_auto()
+            return
+        except Exception as exc:
+            message = f"Parakeet explicit unavailable: {exc}"
+            attempts.append(message)
+            print(f"[TRANSCRIBE] {message}")
+
+        self.backend = None
+        self.status.selected_backend = "unavailable"
+        self.status.ready = False
+        self.status.initialization_error = " | ".join(attempts)
+        print(
+            "[TRANSCRIBE] Explicit parakeet selection failed. "
+            f"Details: {self.status.initialization_error}"
+        )
+
+    def _initialize_parakeet_auto(self) -> None:
+        # Device selection: default CPU on 6GB to avoid CUDA contention
+        dev = self.config.parakeet_device
+        if dev == "auto":
+            # Respect VRAM tiers via existing vram scheduler outside; here pick CPU by default
+            dev = "cpu"
+        backend = ParakeetBackend(
+            config=self.config,
+            device=dev,
+            model_name=self.config.parakeet_model,
+        )
+        self.backend = backend
+        self.status.selected_backend = backend.backend_name
+        self.status.selected_device = getattr(backend, "device", "cpu")
+        self.status.selected_compute_type = None
+        self.status.model = getattr(backend, "model_name", self.config.parakeet_model)
+        self.status.ready = True
+        self.status.initialized_at_unix = time.time()
+        self.status.initialization_error = None
+        self.status.lowend_mode = _env_bool("APP_LOWEND_MODE", False)
+
+        print(
+            "[TRANSCRIBE] Ready: backend=parakeet "
+            f"device={self.status.selected_device} model={self.status.model} "
+            f"language={self.config.language} lowend_mode={int(self.status.lowend_mode)}"
+        )
+
+    def _initialize_faster_whisper_cuda(self) -> None:
+        supported = _get_supported_compute_types("cuda")
+        self.status.supported_cuda_compute_types = sorted(supported)
+
+        if not supported:
+            raise RuntimeError(
+                "CTranslate2 reports no usable CUDA compute types. "
+                "CUDA/cuDNN may be missing, incompatible, or unavailable."
+            )
+
+        compute_type = _select_compute_type(
+            requested=self.config.faster_whisper_compute_type,
+            supported=supported,
+            preferred=["float16", "int8_float16", "int8", "float32"],
+        )
+
+        if compute_type is None:
+            raise RuntimeError(
+                "No requested or compatible CUDA compute type was found. "
+                f"Supported: {sorted(supported)}"
+            )
+
+        backend = FasterWhisperBackend(
+            config=self.config,
+            device="cuda",
+            compute_type=compute_type,
+        )
+
+        # Mark ready and synchronize low-end mode from ENV at the success point
+        self.backend = backend
+        self.status.selected_backend = backend.backend_name
+        self.status.selected_device = backend.device
+        self.status.selected_compute_type = backend.compute_type
+        self.status.model = backend.model_name
+        self.status.ready = True
+        self.status.initialized_at_unix = time.time()
+        self.status.initialization_error = None
+
+        # CRITICAL: ensure runtime low-end toggle is reflected in status immediately
+        self.status.lowend_mode = _env_bool("APP_LOWEND_MODE", False)
+
+        print(
+            "[TRANSCRIBE] Ready: backend=faster_whisper "
+            f"device={backend.device} compute_type={backend.compute_type} "
+            f"model={backend.model_name} language={self.config.language} "
+            f"lowend_mode={int(self.status.lowend_mode)}"
+        )
+
+    def _initialize_faster_whisper_cpu(self) -> None:
+        supported = _get_supported_compute_types("cpu")
+        self.status.supported_cpu_compute_types = sorted(supported)
+
+        if not supported:
+            raise RuntimeError("CTranslate2 reports no usable CPU compute types.")
+
+        compute_type = _select_compute_type(
+            requested=self.config.faster_whisper_compute_type,
+            supported=supported,
+            preferred=["int8", "int8_float32", "float32"],
+        )
+
+        if compute_type is None:
+            raise RuntimeError(
+                "No requested or compatible CPU compute type was found. "
+                f"Supported: {sorted(supported)}"
+            )
+
+        backend = FasterWhisperBackend(
+            config=self.config,
+            device="cpu",
+            compute_type=compute_type,
+        )
+
+        # Mark ready and synchronize low-end mode from ENV at the success point
+        self.backend = backend
+        self.status.selected_backend = backend.backend_name
+        self.status.selected_device = backend.device
+        self.status.selected_compute_type = backend.compute_type
+        self.status.model = backend.model_name
+        self.status.ready = True
+        self.status.initialized_at_unix = time.time()
+        self.status.initialization_error = None
+
+        # CRITICAL: ensure runtime low-end toggle is reflected in status immediately
+        self.status.lowend_mode = _env_bool("APP_LOWEND_MODE", False)
+
+        print(
+            "[TRANSCRIBE] Ready: backend=faster_whisper "
+            f"device={backend.device} compute_type={backend.compute_type} "
+            f"model={backend.model_name} language={self.config.language} "
+            f"lowend_mode={int(self.status.lowend_mode)}"
+        )
+
+    def _initialize_pywhispercpp(self) -> None:
+        backend = PyWhisperCppBackend(config=self.config)
+        self.backend = backend
+        self.status.selected_backend = backend.backend_name
+        self.status.selected_device = "cpu"
+        self.status.selected_compute_type = None
+        self.status.model = str(backend.model_path)
+        self.status.ready = True
+        self.status.initialized_at_unix = time.time()
+        self.status.initialization_error = None
+
+        # CRITICAL: ensure runtime low-end toggle is reflected in status immediately
+        self.status.lowend_mode = _env_bool("APP_LOWEND_MODE", False)
+
+        print(
+            "[TRANSCRIBE] Ready: backend=pywhispercpp "
+            f"model={backend.model_path.name} threads={self.config.threads} "
+            f"language={self.config.language} lowend_mode={int(self.status.lowend_mode)}"
+        )
+
+    def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
+        """Transcribe one audio segment and record operational timing."""
+
+        if not self.status.ready or self.backend is None:
+            return ""
+
+        if samples.size == 0:
+            return ""
+
+        peak = float(np.max(np.abs(samples)))
+        if peak < self.config.min_peak:
+            print(
+                "[TRANSCRIBE] below_min_peak "
+                f"peak={peak:.4f} threshold={self.config.min_peak:.4f}"
+            )
+            return ""
+
+        started = time.perf_counter()
+        try:
+            text = self.backend.transcribe(samples, sample_rate)
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            self.status.last_transcription_ms = round(elapsed_ms, 2)
+            self.status.last_transcription_error = None
+
+            if text:
+                print(
+                    "[TRANSCRIBE] "
+                    f"backend={self.status.selected_backend} "
+                    f"device={self.status.selected_device} "
+                    f"elapsed_ms={elapsed_ms:.1f} text={text}"
+                )
+            else:
+                print(
+                    "[TRANSCRIBE] "
+                    f"backend={self.status.selected_backend} "
+                    f"elapsed_ms={elapsed_ms:.1f} raw_to_empty"
+                )
+
+            return text
+        except KeyboardInterrupt:
+            return ""
+        except Exception as exc:
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            self.status.last_transcription_ms = round(elapsed_ms, 2)
+            self.status.last_transcription_error = str(exc)
+            print(
+                "[TRANSCRIBE] transcription failed: "
+                f"{exc}\n{traceback.format_exc()}"
+            )
+            return ""
+
+    def get_status(self) -> Dict[str, Any]:
+        return self.status.to_dict()
+
+    # Convenience to preserve previous behavior
+    def _initialize_pywhispercpp_or_fail(self, attempts: List[str]) -> None:
+        try:
+            self._initialize_pywhispercpp()
+        except Exception as exc:
+            msg = f"pywhispercpp unavailable: {exc}"
+            attempts.append(msg)
+            print(f"[TRANSCRIBE] {msg}")
+            self.backend = None
+            self.status.selected_backend = "unavailable"
+            self.status.ready = False
+            self.status.initialization_error = " | ".join(attempts)
+
+
+# -----------------------
+# Capability helpers
+# -----------------------
+
+def _get_supported_compute_types(device: str) -> Set[str]:
+    """
+    Query CTranslate2 capabilities without relying on torch.cuda.is_available().
+
+    Importing CTranslate2 can succeed even if CUDA is not usable. The later
+    WhisperModel constructor remains the final device readiness check.
+    """
+
+    try:
+        import ctranslate2  # type: ignore
+
+        supported = ctranslate2.get_supported_compute_types(device)
+        return {str(item).lower() for item in supported}
+    except Exception as exc:
+        print(
+            "[TRANSCRIBE] CTranslate2 capability query failed "
+            f"for device={device}: {exc}"
+        )
+        return set()
+
+
+def _select_compute_type(
+    requested: str,
+    supported: Set[str],
+    preferred: List[str],
+) -> Optional[str]:
+    """Return the requested type when valid, otherwise use a safe preference."""
+
+    normalized_requested = (requested or "auto").strip().lower()
+
+    if normalized_requested != "auto":
+        if normalized_requested in supported:
+            return normalized_requested
+
+        print(
+            "[TRANSCRIBE] Requested compute type "
+            f"{normalized_requested!r} is unsupported; "
+            f"available={sorted(supported)}."
+        )
+        return None
+
+    for candidate in preferred:
+        if candidate in supported:
+            return candidate
+
+    return None
+
+
+# -----------------------
+# Audio preparation (preserved)
+# -----------------------
+
+def _prepare_audio(
+    samples: np.ndarray,
+    sample_rate: int,
+    min_seconds: float,
+) -> np.ndarray:
+    """Convert arbitrary mono float samples to padded 16 kHz float32 audio."""
+
+    audio = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if audio.size == 0:
+        return np.array([], dtype=np.float32)
+
+    minimum_frames = int(max(0.0, min_seconds) * max(1, sample_rate))
+    if audio.size < minimum_frames:
+        audio = np.pad(
+            audio,
+            (0, minimum_frames - audio.size),
+            mode="constant",
+        )
+
+    if sample_rate != 16000:
+        audio = _resample_to_16k(audio, sample_rate)
+
+    return np.ascontiguousarray(audio, dtype=np.float32)
+
+
+def _resample_to_16k(samples: np.ndarray, sample_rate: int) -> np.ndarray:
+    """Dependency-free linear resampling for short live microphone segments."""
+
+    if sample_rate == 16000:
+        return samples.astype(np.float32, copy=False)
+
+    if sample_rate <= 0 or samples.size == 0:
+        return np.array([], dtype=np.float32)
+
+    target_length = int(samples.shape[0] * (16000.0 / float(sample_rate)))
+    if target_length <= 0:
+        return np.array([], dtype=np.float32)
+
+    source_positions = np.linspace(
+        0.0,
+        1.0,
+        num=samples.shape[0],
+        endpoint=False,
+        dtype=np.float64,
+    )
+    target_positions = np.linspace(
+        0.0,
+        1.0,
+        num=target_length,
+        endpoint=False,
+        dtype=np.float64,
+    )
+
+    return np.interp(
+        target_positions,
+        source_positions,
+        samples.astype(np.float64, copy=False),
+    ).astype(np.float32, copy=False)
+
+
+def _to_int16(samples: np.ndarray) -> np.ndarray:
+    """Convert normalized float audio for old pywhispercpp fallback APIs."""
+
+    clipped = np.clip(samples, -1.0, 1.0)
+    return (clipped * 32767.0).astype(np.int16, copy=False)
+
+
+# -----------------------
+# Output parsing/cleaning (preserved)
+# -----------------------
+
+def _parse_pywhispercpp_output(raw: object) -> str:
+    """Normalize several pywhispercpp return shapes into a text string."""
+
+    if raw is None:
+        return ""
+
+    if isinstance(raw, dict):
+        direct_text = raw.get("text")
+        if isinstance(direct_text, str):
+            return direct_text
+
+        segments = raw.get("segments")
+        if isinstance(segments, list):
+            return " ".join(
+                str(segment.get("text", "")).strip()
+                for segment in segments
+                if isinstance(segment, dict)
+            ).strip()
+
+        return ""
+
+    text = str(raw).strip()
+    if not text or text == "[]":
+        return ""
+
+    if text.startswith("[") and "text=" in text:
+        parts = TEXT_FIELD_RE.findall(text)
+        if parts:
+            cleaned: List[str] = []
+            for part in parts:
+                value = part.strip()
+                if (
+                    len(value) >= 2
+                    and value[0] == value[-1]
+                    and value[0] in "\"'"
+                ):
+                    value = value[1:-1]
+                if value.strip():
+                    cleaned.append(value.strip())
+            return " ".join(cleaned).strip()
+
+    return text
+
+
+def clean_transcript(raw: str) -> str:
+    """
+    Remove empty, whitespace-only, and obvious non-speech fillers.
+    Keep short but plausible sentence starts (avoid over-filtering).
+    """
+
+    if not raw:
+        return ""
+
+    text = " ".join(raw.split()).strip()
+    if not text:
+        return ""
+
+    # Filter single-word trivial fillers only (more permissive than before)
+    single = text.lower()
+    if len(text.split()) == 1 and single in {
+        "ja",
+        "und",
+        "also",
+        "äh",
+        "oh",
+        "ähm",
+        "hm",
+        "hmm",
+    }:
+        return ""
+
+    # Remove meta/fx-only very short lines like "(Applaus)"
+    if META_RE.search(text) and len(text.split()) <= 3:
+        return ""
+
+    return text
+
+
+# -----------------------
+# Public API (preserved)
+# -----------------------
+
+_MANAGER: Optional[TranscriptionManager] = None
+
+
+def get_transcription_manager() -> TranscriptionManager:
+    """Return the process-wide manager without initializing model weights."""
+    global _MANAGER
+    if _MANAGER is None:
+        _MANAGER = TranscriptionManager()
+    return _MANAGER
+
+
+def init_transcription_backend() -> TranscriptionManager:
+    """Initialize the configured backend once during FastAPI lifespan startup."""
+    manager = get_transcription_manager()
+    manager.initialize()
+    return manager
+
+
+def transcribe_chunk(samples: np.ndarray, sample_rate: int) -> str:
+    """Application-facing synchronous transcription function."""
+    return get_transcription_manager().transcribe(samples, sample_rate)
+
+
+def get_transcription_status() -> Dict[str, Any]:
+    """Application-facing status payload for API/UI diagnostics."""
+    return get_transcription_manager().get_status()
+
+
+# -----------------------
+# Realtime Transcriber (preserved + worker utilities)
+# -----------------------
+
+RealtimeEvent = Dict[str, Any]
+RealtimeCallback = Callable[[RealtimeEvent], None]
+
+
+
+# --- BEGIN injected: Async buffer worker + Parakeet adapter (kept, inert unless used) ---
+import asyncio as _rt_asyncio
+import time as _rt_time
+from collections import deque
+from typing import Optional as _rt_Optional, Deque as _rt_Deque, Any as _rt_Any, Tuple as _rt_Tuple
+
+class AudioBufferWorker:
+    """
+    Receives PCM chunks (bytes) via .enqueue(pcm_bytes, sr)
+    and periodically flushes aggregated audio to a transcribe callback so
+    that capture loop remains smooth. Uses a background asyncio task.
+    """
+    def __init__(self, transcribe_callback, flush_interval: float = 0.5,
+                 max_buffer_sec: float = 30.0, sample_rate: int = 16000):
+        self._cb = transcribe_callback
+        self._flush_interval = flush_interval
+        self._max_buffer_sec = max_buffer_sec
+        self._sr = sample_rate
+        self._dq: _rt_Deque[bytes] = deque()
+        self._dq_bytes = 0
+        self._task: _rt_Optional[_rt_asyncio.Task] = None
+        self._closed = False
+        self._lock = _rt_asyncio.Lock()
+        self._last_flush = _rt_time.time()
+
+    async def start(self):
+        if self._task is None:
+            self._task = _rt_asyncio.create_task(self._runner())
+
+    async def stop(self):
+        self._closed = True
+        if self._task:
+            await self._task
+            self._task = None
+
+    async def enqueue(self, pcm_bytes: bytes):
+        async with self._lock:
+            self._dq.append(pcm_bytes)
+            self._dq_bytes += len(pcm_bytes)
+            max_bytes = int(self._sr * 2 * self._max_buffer_sec)
+            if self._dq_bytes > max_bytes:
+                while self._dq and self._dq_bytes > max_bytes:
+                    b = self._dq.popleft()
+                    self._dq_bytes -= len(b)
+
+    async def _runner(self):
+        try:
+            while not self._closed:
+                await _rt_asyncio.sleep(self._flush_interval)
+                await self._maybe_flush()
+        except _rt_asyncio.CancelledError:
+            pass
+        finally:
+            await self._maybe_flush(finalize=True)
+
+    async def _maybe_flush(self, finalize: bool = False):
+        async with self._lock:
+            if not self._dq:
+                return
+            bytes_ready = self._dq_bytes
+            threshold = int(self._sr * 2 * 0.5)
+            if bytes_ready < threshold and not finalize:
+                return
+            parts = list(self._dq)
+            self._dq.clear()
+            self._dq_bytes = 0
+            aggregated = b''.join(parts)
+        try:
+            result = self._cb(aggregated, self._sr, finalize)
+            if _rt_asyncio.iscoroutine(result):
+                _rt_asyncio.create_task(result)
+        except Exception:
+            import traceback as _rt_tb; _rt_tb.print_exc()
+
+class ParakeetAdapter:
+    """
+    Minimal parakeet adapter. Not used by main flow; kept for future direct stream integrations.
+    """
+    def __init__(self):
+        self._loaded = False
+        self._model = None
+
+    def load(self):
+        try:
+            import parakeet  # pragma: no cover - optional dependency
+            self._loaded = True
+            if hasattr(parakeet, "load_model"):
+                self._model = parakeet.load_model("tdt_0.6b_v3")
+            else:
+                self._loaded = False
+        except Exception:
+            self._loaded = False
+
+    async def transcribe_bytes(self, pcm_bytes: bytes, sr: int) -> str:
+        if not self._loaded or self._model is None:
+            raise RuntimeError("Parakeet not loaded")
+        if hasattr(self._model, "transcribe"):
+            return self._model.transcribe(pcm_bytes, sample_rate=sr)
+        return ""
+# --- END injected ---
+
+class RealtimeTranscriber:
+    """
+    Low-latency realtime transcriber that reuses the already-initialized backend via
+    TranscriptionManager. Feed frames (float32 mono), receive 'partial' and 'final' events.
+
+    Events:
+      - {"type":"partial", "text": str, "process_ms": int, "record_ms": int}
+      - {"type":"final", "text": str, "process_ms": int, "record_ms": int, "fallback_used": bool}
+    """
+
+    def __init__(self, sample_rate: int, config: Optional[TranscriptionConfig] = None) -> None:
+        self.sample_rate = int(sample_rate)
+        self.manager = get_transcription_manager()
+        self.config = config or self.manager.config
+
+        # Rolling buffer and queue
+        self._queue: "asyncio.Queue[Optional[np.ndarray]]" = asyncio.Queue(maxsize=128)
+        self._subs: List[RealtimeCallback] = []
+        self._task: Optional[asyncio.Task] = None
+        self._stop_evt = asyncio.Event()
+
+        # Timers
+        self._started_ms: int = 0
+        self._last_voice_ms: int = 0
+
+        # Rolling audio
+        self._rolling = np.zeros(0, dtype=np.float32)
+
+        # Recording for file fallback
+        self._record_bytes: Optional[io.BytesIO] = None
+
+        # Running merged text and finalize debounce
+        self._cur_utt: str = ""
+        self._finalize_task: Optional[asyncio.Task] = None
+
+        # Base finalize delay (kept for backward-compat but adaptive delays will be used)
+        self._finalize_delay_sec: float = _env_float("APP_FINALIZE_BASE_DELAY_SEC", 0.35)
+
+        # Final "meaningfulness" thresholds
+        self._min_chars: int = _env_int("APP_TEXT_MIN_CHARS", 12)
+        self._min_words: int = _env_int("APP_TEXT_MIN_WORDS", 3)
+
+        # Partial emit debouncing and tail-window decode
+        self._last_partial_emit_ms: int = 0
+        self._last_emitted_partial_norm: str = ""
+        self._min_partial_emit_interval_ms: int = _env_int("APP_MIN_PARTIAL_EMIT_MS", 600)
+        self._partial_min_growth_chars: int = _env_int("APP_PARTIAL_MIN_GROWTH_CHARS", 3)
+        self._partial_min_growth_words: int = _env_int("APP_PARTIAL_MIN_GROWTH_WORDS", 1)
+        self._partial_min_chars: int = _env_int("APP_PARTIAL_MIN_CHARS", 10)  # meaningful-light
+        self._partial_min_words: int = _env_int("APP_PARTIAL_MIN_WORDS", 2)   # meaningful-light
+
+        # Decode ticker for partials (deterministic cadence, avoids bursty re-decodes)
+        self._min_partial_decode_interval_ms: int = _env_int("APP_MIN_PARTIAL_DECODE_MS", 350)
+
+        # Tail decode windows
+        self._tail_decode_sec: float = _env_float("APP_RT_TAIL_DECODE_SEC", 10.0)
+        self._tail_min_sec: float = _env_float("APP_RT_TAIL_MIN_SEC", 6.0)   # reserved for future dynamic tail
+        self._tail_max_sec: float = _env_float("APP_RT_TAIL_MAX_SEC", 12.0)  # reserved for future dynamic tail
+
+        # Adaptive finalize delays depending on sentence-end detection
+        self._finalize_base_delay_sec: float = _env_float("APP_FINALIZE_BASE_DELAY_SEC", 0.35)
+        self._finalize_nosent_delay_sec: float = _env_float("APP_FINALIZE_NOSENT_DELAY_SEC", 0.85)
+
+        # File fallback minimum record time (ms) to avoid over-triggering on tiny utterances
+        self._fallback_min_record_ms: int = _env_int("APP_RT_FALLBACK_MIN_RECORD_MS", 1500)
+
+        # Prepare fallback dir if needed
+
+    def subscribe(self, cb: RealtimeCallback) -> None:
+        self._subs.append(cb)
+
+    async def start(self) -> None:
+        if self._task is not None:
+            return
+        # Ensure backend initialized lazily
+        self.manager.initialize()
+        self._started_ms = _now_ms()
+        self._last_voice_ms = self._started_ms
+        if self.config.rt_fallback_record:
+            self._record_bytes = io.BytesIO()
+        self._task = asyncio.create_task(self._worker())
+
+        self._task.add_done_callback(_recording_repair_log_task_exception)
+
+    async def stop(self) -> None:
+        if self._task is None:
+            return
+        self._stop_evt.set()
+        with contextlib.suppress(Exception):
+            self._queue.put_nowait(None)
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+        self._task = None
+
+        # Cancel pending finalize task
+        if self._finalize_task and not self._finalize_task.done():
+            self._finalize_task.cancel()
+            self._finalize_task = None
+
+        # Flush a meaningful remainder if present
+        if _is_meaningful(self._cur_utt, min_chars=self._min_chars, min_words=self._min_words):
+            self._emit({
+                "type": "final",
+                "text": self._cur_utt.strip(),
+                "process_ms": 0,
+                "record_ms": _now_ms() - self._started_ms if self._started_ms else 0,
+                "fallback_used": False,
+            })
+        self._cur_utt = ""
+
+    async def feed(self, frames: np.ndarray) -> None:
+        if self._task is None:
+            await self.start()
+        a = _float32_mono(frames)
+        if a.size == 0:
+            return
+        try:
+            self._queue.put_nowait(a)
+        except asyncio.QueueFull:
+            # Drop the oldest to keep latency low
+            with contextlib.suppress(Exception):
+                _ = self._queue.get_nowait()
+            with contextlib.suppress(Exception):
+                self._queue.put_nowait(a)
+
+    # -----------------------
+    # Internal worker
+    # -----------------------
+
+    async def _worker(self) -> None:
+        sr = self.sample_rate
+        slice_len = max(1, int(sr * float(self.config.rt_slice_sec)))
+        max_keep = max(1, int(sr * float(self.config.rt_window_sec)))
+
+        buf = self._rolling
+        last_decode_ms = _now_ms()
+
+        while not self._stop_evt.is_set():
+            try:
+                item = await asyncio.wait_for(self._queue.get(), timeout=0.25)
+            except asyncio.TimeoutError:
+                item = None
+
+            if isinstance(item, np.ndarray):
+                buf = np.concatenate([buf, item], axis=0)
+
+                if self.config.rt_fallback_record and self._record_bytes is not None:
+                    self._record_bytes.write(item.astype(np.float32, copy=False).tobytes())
+
+                    if self._record_bytes.tell() > sr * 30 * 4:
+                        self._record_bytes.seek(-sr * 30 * 4, io.SEEK_END)
+                        self._record_bytes = io.BytesIO(self._record_bytes.read())
+
+                if self.config.vad_enabled:
+                    if _rms(item) >= float(self.config.vad_rms_threshold):
+                        self._last_voice_ms = _now_ms()
+
+            # Truncate rolling buffer (keep up to 2x max_keep to avoid growth bursts)
+            if buf.size > (max_keep * 2):
+                buf = buf[-max_keep:]
+
+            now = _now_ms()
+            elapsed_ms = now - self._started_ms
+            since_last_voice = now - self._last_voice_ms
+
+            # Deterministic partial decode ticker
+            should_decode = False
+            if buf.size >= slice_len:
+                if (now - last_decode_ms) >= self._min_partial_decode_interval_ms:
+                    should_decode = True
+
+            # End-of-utterance detection via silence debounce
+            should_finalize = since_last_voice >= int(self.config.rt_end_debounce_ms)
+
+            if should_decode:
+                # Use only the last tail window for decoding (stable partials)
+                tail_frames = int(self.sample_rate * max(2.5, min(self._tail_decode_sec, self.config.rt_window_sec)))
+                audio_for_decode = buf[-tail_frames:] if buf.size > tail_frames else buf
+                txt, proc_ms = await self._decode_partial(audio_for_decode)
+                last_decode_ms = _now_ms()
+                if txt:
+                    merged = _merge_overlap(self._cur_utt, txt, min_overlap=5, max_overlap=18)
+                    # Debounce and dedupe partials
+                    now_ms = _now_ms()
+                    merged_norm = re.sub(r"\s+", " ", merged).strip().lower()
+
+                    # Require growth
+                    growth_chars = len(merged_norm) - len(self._last_emitted_partial_norm)
+                    growth_words = max(0, len(merged_norm.split()) - len(self._last_emitted_partial_norm.split()))
+                    interval_ok = (now_ms - self._last_partial_emit_ms) >= self._min_partial_emit_interval_ms
+                    growth_ok = (growth_chars >= self._partial_min_growth_chars) or (growth_words >= self._partial_min_growth_words)
+                    changed_ok = merged_norm != self._last_emitted_partial_norm
+
+                    # Light meaningfulness on partials to reduce 1-word flicker
+                    meaningful_light = (len(merged_norm) >= self._partial_min_chars) or (len(merged_norm.split()) >= self._partial_min_words)
+
+                    # Skip punct-only terminal changes (reduce flicker)
+                    if _is_punct_only_change(self._last_emitted_partial_norm, merged_norm):
+                        changed_ok = False
+
+                    self._cur_utt = merged
+                    if interval_ok and changed_ok and growth_ok and meaningful_light:
+                        self._emit({
+                            "type": "partial",
+                            "text": self._cur_utt,
+                            "process_ms": proc_ms,
+                            "record_ms": elapsed_ms,
+                        })
+                        self._last_partial_emit_ms = now_ms
+                        self._last_emitted_partial_norm = merged_norm
+
+            if should_finalize and buf.size > 0:
+                # Use a slightly longer tail for finalize than for partial
+                tail_frames = int(self.sample_rate * max(3.0, min(self._tail_decode_sec, self.config.rt_window_sec)))
+                audio_for_decode = buf[-tail_frames:] if buf.size > tail_frames else buf
+                candidate_txt, proc_ms = await self._decode_partial(audio_for_decode, finalize=True)
+                candidate_txt = clean_transcript(candidate_txt)
+
+                fallback_used = False
+
+                # If empty AND recording was sufficiently long, try file fallback
+                if (not candidate_txt) and self.config.rt_fallback_record and (elapsed_ms >= self._fallback_min_record_ms):
+                    try:
+                        import sys
+                        pcm = (np.frombuffer(self._record_bytes.getvalue(), dtype=np.float32).copy() if self._record_bytes is not None else np.empty(0, dtype=np.float32))
+                        if pcm.size:
+                            fb_txt, _ = await self._decode_partial(pcm, finalize=True)
+                            fb_txt = clean_transcript(fb_txt)
+                            if fb_txt:
+                                candidate_txt = fb_txt
+                                fallback_used = True
+                            else:
+                                print('realtime fallback returned empty transcript', file=sys.stderr)
+                    except Exception:
+                        import traceback as _rt_traceback
+                        print('realtime fallback failed:\n' + _rt_traceback.format_exc(), file=sys.stderr)
+
+                # Merge into running utterance (dedupe)
+                if candidate_txt:
+                    self._cur_utt = _merge_overlap(self._cur_utt, candidate_txt, min_overlap=5, max_overlap=18)
+
+                # Adaptive finalize scheduling
+                if self._cur_utt:
+                    if SENTENCE_END_RE.search(self._cur_utt):
+                        # If a clear sentence end exists, shorten delay
+                        delay = max(0.2, self._finalize_base_delay_sec * 0.6)
+                    else:
+                        # No obvious sentence end, wait a bit longer
+                        delay = self._finalize_nosent_delay_sec
+
+                    self._schedule_finalize(delay=delay,
+                                            process_ms=proc_ms,
+                                            record_ms=elapsed_ms,
+                                            fallback_used=fallback_used)
+
+                # Reset raw rolling buffer for next turn of speech
+                buf = np.zeros(0, dtype=np.float32)
+                self._last_voice_ms = _now_ms()
+                if self.config.rt_fallback_record:
+                    self._record_bytes = io.BytesIO()
+
+        # Optionally flush on shutdown (non-critical)
+
+    async def _decode_partial(self, audio: np.ndarray, finalize: bool = False) -> Tuple[str, int]:
+        """
+        Decode current rolling window using the already-selected backend.
+        Returns (text, process_ms).
+        """
+        start_ms = _now_ms()
+
+        backend = self.manager.backend
+        if backend is None:
+            # Should not happen; ensure initialized
+            self.manager.initialize()
+            backend = self.manager.backend
+        txt = ""
+        try:
+            txt = backend.transcribe(audio, sample_rate=self.sample_rate) if backend else ""
+        except Exception as e:
+            print(f"[RT] decode error: {e}")
+
+        end_ms = _now_ms()
+        return clean_transcript(txt), (end_ms - start_ms)
+
+    def _schedule_finalize(self, delay: float, process_ms: int, record_ms: int, fallback_used: bool) -> None:
+        """
+        Debounced scheduling of final emit. Cancels any pending finalize task.
+        """
+        if self._finalize_task and not self._finalize_task.done():
+            self._finalize_task.cancel()
+        loop = asyncio.get_running_loop()
+        self._finalize_task = loop.create_task(
+            self._delayed_finalize(delay, process_ms, record_ms, fallback_used)
+        )
+
+    async def _delayed_finalize(self, delay: float, process_ms: int, record_ms: int, fallback_used: bool) -> None:
+        """
+        Wait a short delay; if the accumulated utterance is still meaningful, emit final.
+        """
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        text = re.sub(r"\s+", " ", (self._cur_utt or "")).strip()
+        if not _is_meaningful(text, min_chars=self._min_chars, min_words=self._min_words):
+            return
+        self._emit({
+            "type": "final",
+            "text": text,
+            "process_ms": process_ms,
+            "record_ms": record_ms,
+            "fallback_used": bool(fallback_used),
+        })
+        self._cur_utt = ""
+        self._last_emitted_partial_norm = ""
+               self._last_partial_emit_ms = _now_ms()
+
+    def _emit(self, evt: RealtimeEvent) -> None:
+        for cb in list(self._subs):
+            try:
+                cb(evt)
+            except Exception as e:
+                print(f"[RT] subscriber error: {e}")
+
+
+
+# -----------------------
+# Helpers for realtime
+# -----------------------
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _float32_mono(arr: np.ndarray) -> np.ndarray:
+    if arr is None:
+        return np.zeros(0, dtype=np.float32)
+    a = np.asarray(arr)
+    if a.dtype != np.float32:
+        a = a.astype(np.float32, copy=False)
+    if a.ndim == 2 and a.shape[1] > 1:
+        a = a[:, 0]
+    return a
+
+
+def _rms(frame: np.ndarray) -> float:
+    if frame.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(np.square(frame, dtype=np.float32), dtype=np.float64)))
+
+
+# -----------------------
+# File transcription fallback (reuses existing backends)
+# -----------------------
+
+async def transcribe_file_for_fallback(path: Union[str, Path]) -> str:
+    """
+    Transcribe an audio file using the already-initialized backend.
+    For faster-whisper we can pass a path. For pywhispercpp, we decode to float32 16k first.
+    For parakeet we decode to float32 16k and pass buffer.
+    """
+    manager = get_transcription_manager()
+    manager.initialize()
+    backend = manager.backend
+    if backend is None:
+        return ""
+
+    # If faster-whisper backend is active, try path directly via its .transcribe by loading file
+    if isinstance(backend, FasterWhisperBackend):
+        try:
+            hint_lang = (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip().lower() or None
+            conf_lang = manager.config.language or None
+            eff_lang = conf_lang or hint_lang or None
+
+            kwargs: Dict[str, Any] = dict(
+                language=eff_lang,  # None enables auto-detect
+                beam_size=manager.config.faster_whisper_beam_size,
+                temperature=manager.config.temperature,
+                vad_filter=manager.config.faster_whisper_vad_filter,
+                condition_on_previous_text=manager.config.condition_on_previous_text,
+                word_timestamps=False,
+                without_timestamps=True,
+            )
+            if manager.config.no_speech_threshold is not None:
+                kwargs["no_speech_threshold"] = manager.config.no_speech_threshold
+            if manager.config.logprob_threshold is not None:
+                kwargs["log_prob_threshold"] = manager.config.logprob_threshold
+
+            segments, _info = backend.model.transcribe(str(path), **kwargs)  # type: ignore
+
+            parts: List[str] = []
+            for seg in segments:
+                t = getattr(seg, "text", "")
+                if isinstance(t, str) and t.strip():
+                    parts.append(t.strip())
+            return clean_transcript(" ".join(parts))
+        except Exception as e:
+            print(f"[FALLBACK] faster-whisper file transcribe failed: {e}")
+            return ""
+
+    # Parakeet: decode file and pass as float32
+    if isinstance(backend, ParakeetBackend):
+        try:
+            data, sr = _load_audio_as_f32_mono(path, target_sr=16000)
+            return backend.transcribe(data, sr)
+        except Exception as e:
+            print(f"[FALLBACK] parakeet file transcribe failed: {e}")
+            return ""
+
+    # For pywhispercpp backend: decode file to float32 mono 16k and pass into backend.transcribe
+    try:
+        data, sr = _load_audio_as_f32_mono(path, target_sr=16000)
+        return backend.transcribe(data, sr)  # type: ignore
+    except Exception as e:
+        print(f"[FALLBACK] pywhispercpp file transcribe failed: {e}")
+        return ""
+
+
+def _load_audio_as_f32_mono(path: Union[str, Path], target_sr: int = 16000) -> Tuple[np.ndarray, int]:
+    """
+    Load arbitrary audio file and return float32 mono resampled to target_sr.
+    Uses soundfile; keeps dependencies minimal.
+    """
+    import soundfile as sf  # type: ignore
+
+    data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+    if data.shape[1] > 1:
+        data = data[:, 0:1]
+    data = data[:, 0]
+    if sr != target_sr:
+        ratio = float(target_sr) / float(sr)
+        x_idx = np.arange(0, data.size) * ratio
+        data = np.interp(x_idx, np.arange(data.size), data).astype(np.float32)
+        sr = target_sr
+    return data, sr
+
+# RECORDING_PATCH_V1: in-memory realtime fallback
+
+
+def _recording_repair_log_task_exception(task):
+    import sys
+    try:
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                import traceback
+                print('realtime worker crashed:\n' + ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)), file=sys.stderr)
+    except Exception:
+        pass
+```
+
+---
+
+### utils/ComfyUI_QuickTunnel/.env.example
+
+```example
+FTPS_ENABLE=true
+FTPS_HOST=web8.greensta.de
+FTPS_USER=
+FTPS_PASS=
+FTPS_DIR=
+COMFY_URL=http://127.0.0.1:8188
+HTTP_HOST=0.0.0.0
+HTTP_PORT=8799
+HTTP_CORS=true
+```
+
+---
+
+### utils/ComfyUI_QuickTunnel/.gitignore
+
+```
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Cloudflared executable
+cloudflared-windows-amd64.exe
+```
+
+---
+
+### utils/ComfyUI_QuickTunnel/README.txt
+
+```txt
+### Cloudflared Quick Tunnel URL Bridge
+
+I build this tool to get a cloudflared quicktunnel URL to use ComfyUI from my local network.
+
+-------------------------
+
+It'a s small, stdlib-only Python tool to expose ComfyUI with Cloudflared Quick Tunnel, write the current URL to files/HTTP, and upload to web space via FTPS.:
+
+- Starts a Cloudflared Quick Tunnel to expose a local ComfyUI (or any HTTP service).
+- Detects the rotating Quick Tunnel URL from Cloudflared logs.
+- Writes the current public URL to local files (tunnel_url.json/txt).
+- Optionally uploads those files via FTPS to a stable web space, so other devices can fetch the active URL.
+- Serves a tiny HTTP endpoint for LAN clients to read the current URL.
+- Supports configuration via a .env file (no extra dependencies).
+
+This helps bypass CGNAT and router port forwarding by providing a stable location (your public web space) where your other device(s) can pull the current tunnel URL.
+
+#### Features
+
+- Stdlib only (no external Python deps).
+- Cloudflared subprocess management with auto-restart/backoff.
+- Robust URL detection (trycloudflare.com).
+- Atomic local file writes.
+- Optional FTPS upload (FTP over TLS) with retries and auto-directory creation.
+- Lightweight HTTP pull server with:
+  - GET /bridge/tunnel_url.json
+  - GET /bridge/tunnel_url.txt
+  - GET /health
+  - GET /
+
+#### Requirements
+
+- Python 3.8+
+- Cloudflared binary available on PATH or alongside the script
+- Optional: FTPS-capable hosting (explicit TLS)
+
+#### Quick Start
+
+1) Install Cloudflared:
+- https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+- Place cloudflared.exe next to the script or ensure it’s on PATH.
+
+----------------------
+-> Specify your cloudflared binary via .env or CLI (no need to edit the script):
+
+In .env:
+
+    CLOUDFLARED=.\cloudflared-windows-amd64.exe (Windows) or CLOUDFLARED=/usr/local/bin/cloudflared (Linux/macOS)
+
+Or via CLI:
+
+    --cloudflared "<path-to-cloudflared>"
+
+If unset, the script auto-discovers cloudflared next to the script or on PATH
+
+----------------------
+
+Create a .env file next to the script (recommended):
+
+    COMFY_URL=http://127.0.0.1:8188 # ComfyUI (or any local HTTP service you want to expose)
+    OUT_DIR=./bridge_output  # Output directory for local copies of tunnel_url.json/txt
+    HTTP_HOST=0.0.0.0 # HTTP pull endpoint (LAN)
+    HTTP_PORT=8799
+    HTTP_CORS=false
+    EDGE_PROTOCOL=http2 # Cloudflared edge protocol
+    CLOUDFLARED=cloudflared # Optional: explicit cloudflared path/name
+    FTPS_ENABLE=false # enable to upload URL files to your web space
+    FTPS_HOST=
+    FTPS_USER=
+    FTPS_PASS=
+    FTPS_DIR=
+    FTPS_RETRIES=5 # optional
+
+
+#### Run:
+
+    python cf_quicktunnel_writer.py
+
+The script auto-discovers .env next to the script. You can also pass a custom file:
+
+    python cf_quicktunnel_writer.py --env-file ./.env
+
+4) Check the local health endpoint:
+
+- http://127.0.0.1:8799/health
+- http://127.0.0.1:8799/bridge/tunnel_url.json
+
+When Cloudflared prints the public URL (e.g., https://abc123.trycloudflare.com), the script writes:
+- OUT_DIR/tunnel_url.json
+- OUT_DIR/tunnel_url.txt
+
+If FTPS is enabled and configured, those files are uploaded to FTPS_DIR as tunnel_url.json and tunnel_url.txt.
+
+#### CLI Overrides
+
+CLI arguments override .env values. Examples:
+
+Use a specific cloudflared binary:
+
+    python cf_quicktunnel_writer.py --cloudflared ".\cloudflared-windows-amd64.exe"
+
+Change the HTTP port temporarily:
+
+    python cf_quicktunnel_writer.py --http-port 8800
+
+Enable FTPS for this run (assuming the rest is in .env):
+
+    python cf_quicktunnel_writer.py --ftps-enable
+
+Full set of flags is available via:
+
+    python cf_quicktunnel_writer.py --help
+
+
+
+#### Endpoints (local pull)
+
+- GET /bridge/tunnel_url.json → {"url":"https://...trycloudflare.com","updated_at":"...Z"}
+- GET /bridge/tunnel_url.txt → plain URL text
+- GET /health → {"status":"ok","cloudflared_running":true,"url":"...","updated_at":"...Z"}
+- GET / → brief info page
+
+These endpoints are served by a simple threaded HTTP server for LAN consumption. CORS can be enabled with HTTP_CORS=true or --http-cors.
+
+#### FTPS Upload
+
+When FTPS_ENABLE=true (or --ftps-enable), the script uploads both files to your FTPS host and directory every time the tunnel URL changes.
+
+- FTPS (explicit TLS) via Python’s ftplib.FTP_TLS
+- Auto-creates nested directories best-effort
+- Retries with exponential backoff on failures
+- Password is never printed in logs
+
+Ensure your hosting supports FTPS (AUTH TLS) and that your credentials and directory are correct.
+
+#### Security
+
+Never commit credentials. Keep .env out of version control:
+
+    echo ".env" >> .gitignore
+
+If a file is already tracked, run `git rm --cached .env` and commit.
+
+The script masks FTPS_PASS in logs. Review your hosting’s certificate and trust settings if needed.
+
+#### Windows Notes
+
+Prefer launching with the Python you expect:
+
+    py -3 cf_quicktunnel_writer.py
+
+If cloudflared.exe is in the same folder, no extra flag is needed. Otherwise pass --cloudflared with the path.
+
+#### Troubleshooting
+
+- cloudflared not found:
+- Put the binary next to the script or set CLOUDFLARED in .env, or install on PATH.
+- No URL detected:
+- Check that Cloudflared prints a trycloudflare.com URL in stdout.
+- Verify COMFY_URL is reachable (e.g., http://127.0.0.1:8188).
+- FTPS upload failing:
+- Confirm FTPS host, user, pass, and dir.
+- Verify FTPS (AUTH TLS) support.
+- Check server logs for permissions.
+- Port in use:
+- Change HTTP_PORT or stop the conflicting service.
+
+
+
+#### License
+
+MIT
+
+#### Disclaimer
+
+Use responsibly and according to your Cloudflare and hosting provider terms. This tool is provided “as is,” without warranty of any kind.
+
+Contact: dev@betakontext.de | https://dev.betakontext.de
+
+If you like it and want to support further developments, feel free to fork and buy me a coffee: https://buymeacoffee.com/betakontext
+
+```
+
+---
+
+### utils/ComfyUI_QuickTunnel/cf_quicktunnel_writer.py
+
+```py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+r"""
+Cloudflared Quick Tunnel URL Writer with:
+- built-in stdlib HTTP pull endpoint (for LAN pull)
+- optional FTPS upload to stable public web space (Greensta) for Internet pull
+- .env support (stdlib-only) for credentials and configuration
+
+Why:
+- Quick Tunnels rotate hostnames. To provide a stable pull URL for slAIdshow,
+  we additionally upload tunnel_url.json/txt to a fixed HTTPS location on your web host.
+- This bypasses CGNAT and avoids router port forwards.
+
+Endpoints served locally (optional for LAN):
+  GET /bridge/tunnel_url.json
+  GET /bridge/tunnel_url.txt
+  GET /health
+  GET /
+
+FTPS upload (optional, stdlib-only via ftplib.FTP_TLS):
+  - When enabled, after each URL change, upload JSON and TXT to the remote dir.
+  - Creates subdirectories if missing (best-effort).
+
+.env usage:
+
+- Place a .env file next to this script (or provide --env-file) with lines like:
+    FTPS_ENABLE=true
+    FTPS_HOST=
+    FTPS_USER=
+    FTPS_PASS=
+    FTPS_DIR=
+    COMFY_URL=http://127.0.0.1:8188
+    HTTP_HOST=0.0.0.0
+    HTTP_PORT=8799
+    HTTP_CORS=false
+    CLOUDFLARED=cloudflared
+    OUT_DIR=./bridge_output
+    EDGE_PROTOCOL=http2
+
+- Values may be quoted: KEY="value with spaces"
+
+Priority:
+- CLI arguments override environment variables.
+- .env is loaded into os.environ before full CLI parsing.
+- If --env-file is omitted, the loader auto-discovers .env next to the script,
+  then in current working directory.
+
+Prerequisites:
+
+-> Place this file and the .env.example into the folder where you have your cloudflared.exe
+-> Fill .env.example with your host adress and keys and save it as .env
+
+Typical start:
+
+with .env in the same directory:
+
+    python cf_quicktunnel_writer.py
+
+without .env:
+
+  python cf_quicktunnel_writer.py ^
+    --cloudflared "cloudflared-windows-amd64.exe" ^
+    --comfy-url "http://127.0.0.1:8188" ^
+    --out-dir "C:\Users\Administrator\Documents\Arbeiten\0000_DEV\ComfyUI\output" ^
+    --http-host 0.0.0.0 --http-port 8799 ^
+    --ftps-enable ^
+    --ftps-host "*****" ^
+    --ftps-user "********" ^
+    --ftps-dir "*****"
+
+Security tips:
+- Do NOT commit credentials. Prefer the .env file excluded via .gitignore, or use process env vars.
+- FTPS uses TLS but still verify you trust the hosting.
+
+Test checklist:
+1) Start cloudflared binary is reachable (or specify --cloudflared).
+2) Start the script without FTPS to verify local endpoints:
+   - curl http://127.0.0.1:8799/health
+   - curl http://127.0.0.1:8799/bridge/tunnel_url.json
+3) Enable FTPS and check uploads on URL change. Ensure remote path is correct.
+4) Try with .env only (no CLI), then override one value via CLI to confirm priority.
+"""
+
+import argparse
+import io
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from datetime import datetime, timezone
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Optional, Tuple
+
+# ========== Cloudflared URL detection ==========
+TRYCF_RE = re.compile(r"https://[a-z0-9\-]+\.trycloudflare\.com", re.IGNORECASE)
+
+# ========== .env loader (stdlib-only) ==========
+
+def _strip_quotes(value: str) -> str:
+    """Strip wrapping single or double quotes if present."""
+    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+        return value[1:-1]
+    return value
+
+def load_env_file(path: str, overwrite: bool = False) -> int:
+    """
+    Load KEY=VALUE pairs from a .env file into os.environ.
+    - Supports comments (#), blank lines, quoted values.
+    - overwrite=False means: do not override existing environment keys.
+    Returns number of keys set/updated.
+    """
+    set_count = 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # Allow inline comments only if preceded by a space
+                # but keep it simple and only support full-line comments.
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip()
+                val = _strip_quotes(val)
+                if not key:
+                    continue
+                if overwrite or (key not in os.environ):
+                    os.environ[key] = val
+                    set_count += 1
+        return set_count
+    except FileNotFoundError:
+        return 0
+    except Exception as e:
+        print(f"[env] failed to load {path}: {e}", flush=True)
+        return 0
+
+def auto_discover_env_file(script_dir: str, cwd: str) -> Optional[str]:
+    """
+    Returns the first existing .env path among:
+      1) script_dir/.env
+      2) cwd/.env (if different from script_dir)
+    """
+    candidates = [
+        os.path.join(script_dir, ".env"),
+    ]
+    if os.path.abspath(cwd) != os.path.abspath(script_dir):
+        candidates.append(os.path.join(cwd, ".env"))
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return None
+
+def env_flag_truthy(value: str) -> bool:
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+# ========== Helpers ==========
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def atomic_write(path: str, data: bytes):
+    """Atomically write bytes to a file path (safe replace)."""
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    base = os.path.basename(path)
+    fd, tmppath = tempfile.mkstemp(prefix=base + ".", suffix=".tmp", dir=d)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmppath, path)
+    except Exception:
+        try:
+            os.unlink(tmppath)
+        except Exception:
+            pass
+        raise
+
+
+def read_json_file(path: str) -> Optional[dict]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def read_text_file(path: str) -> Optional[str]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+
+def parse_url_parts(url: str) -> Tuple[str, str, int]:
+    """Parse scheme, host, port with stdlib only."""
+    scheme = "https" if url.lower().startswith("https://") else "http"
+    rest = url.split("://", 1)[1] if "://" in url else url
+    hostport = rest.split("/", 1)[0]
+    if ":" in hostport:
+        host, port_s = hostport.rsplit(":", 1)
+        try:
+            port = int(port_s)
+        except ValueError:
+            port = 443 if scheme == "https" else 80
+    else:
+        host = hostport
+        port = 443 if scheme == "https" else 80
+    return scheme, host, port
+
+
+# ========== FTPS Upload (stdlib: ftplib) ==========
+from ftplib import FTP_TLS, error_perm, all_errors as ftplib_errors
+from contextlib import contextmanager
+
+@contextmanager
+def ftps_connect(host: str, user: str, password: str, timeout: float = 20.0):
+    """
+    Context manager to connect/login to FTPS (explicit TLS).
+    Performs PROT P to encrypt data channel.
+    """
+    ftps = FTP_TLS()
+    ftps.connect(host=host, timeout=timeout)
+    ftps.auth()  # upgrade control connection to TLS
+    ftps.prot_p()  # protect data channel
+    ftps.login(user=user, passwd=password)
+    try:
+        yield ftps
+    finally:
+        try:
+            ftps.quit()
+        except Exception:
+            try:
+                ftps.close()
+            except Exception:
+                pass
+
+
+def _ftps_mkdirs(ftps: FTP_TLS, remote_dir: str):
+    """
+    Create remote_dir and parents if missing. Tries to CWD stepwise and MKD on failure.
+    Works for typical FTP servers; silently continues if dirs exist.
+    """
+    if not remote_dir or remote_dir == "/":
+        return
+    parts = [p for p in remote_dir.strip("/").split("/") if p]
+    path_so_far = ""
+    try:
+        ftps.cwd("/")
+    except Exception:
+        pass
+    for p in parts:
+        path_so_far = path_so_far + "/" + p
+        try:
+            ftps.cwd(path_so_far)
+        except Exception:
+            try:
+                ftps.mkd(path_so_far)
+            except ftplib_errors as e:
+                msg = str(e).lower()
+                if "exists" not in msg and "file unavailable" not in msg:
+                    raise
+            ftps.cwd(path_so_far)
+
+
+def ftps_upload_file(host: str, user: str, password: str, local_path: str, remote_dir: str, remote_filename: Optional[str] = None, timeout: float = 20.0):
+    """
+    Upload local_path to host:/remote_dir/remote_filename via FTPS with binary transfer.
+    Ensures remote_dir exists (best-effort).
+    """
+    if remote_filename is None:
+        remote_filename = os.path.basename(local_path)
+    with ftps_connect(host, user, password, timeout=timeout) as ftps:
+        _ftps_mkdirs(ftps, remote_dir)
+        if remote_dir and remote_dir != "/":
+            ftps.cwd(remote_dir)
+        with open(local_path, "rb") as lf:
+            ftps.storbinary(f"STOR {remote_filename}", lf)
+
+
+def upload_with_retries(host: str, user: str, password: str, local_path: str, remote_dir: str, remote_filename: Optional[str] = None, retries: int = 5, base_delay: float = 1.0):
+    """
+    Retry FTPS upload with exponential backoff.
+    """
+    attempt = 0
+    last_exc = None
+    while attempt < retries:
+        try:
+            ftps_upload_file(host, user, password, local_path, remote_dir, remote_filename)
+            print(f"[ftps] uploaded {local_path} -> {host}:{remote_dir}/{remote_filename or os.path.basename(local_path)}", flush=True)
+            return True
+        except Exception as e:
+            last_exc = e
+            delay = base_delay * (1.7 ** attempt)
+            print(f"[ftps] upload failed (attempt {attempt+1}/{retries}): {e}; retrying in {delay:.1f}s", flush=True)
+            time.sleep(delay)
+            attempt += 1
+    print(f"[ftps] upload permanently failed: {last_exc}", flush=True)
+    return False
+
+
+# ========== Cloudflared writer ==========
+
+class TunnelWriter:
+    """
+    Manage cloudflared subprocess, detect public URL, persist JSON/TXT, and optionally FTPS-upload.
+    """
+
+    def __init__(self, cf_bin: str, comfy_url: str, out_dir: str, protocol: str = "http2",
+                 ftps_enable: bool = False, ftps_host: str = "", ftps_user: str = "", ftps_pass: str = "",
+                 ftps_dir: str = "", ftps_retries: int = 5):
+        self.cf_bin = cf_bin
+        self.comfy_url = comfy_url
+        self.out_dir = out_dir
+        self.protocol = protocol
+        self.proc: Optional[subprocess.Popen] = None
+        self.stop_evt = threading.Event()
+        self.current_url = ""
+        self.backoff = 2.0
+
+        # FTPS config
+        self.ftps_enable = ftps_enable
+        self.ftps_host = ftps_host
+        self.ftps_user = ftps_user
+        self.ftps_pass = ftps_pass
+        self.ftps_dir = ftps_dir.rstrip("/") if ftps_dir else ""
+        self.ftps_retries = ftps_retries
+
+        os.makedirs(self.out_dir, exist_ok=True)
+        self.json_path = os.path.join(self.out_dir, "tunnel_url.json")
+        self.txt_path = os.path.join(self.out_dir, "tunnel_url.txt")
+
+    def write_urls_local(self, url: str):
+        """Persist URL to .json and .txt atomically (local)."""
+        payload = {"url": url, "updated_at": utc_now_iso()}
+        data_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        data_txt = (url or "").encode("utf-8")
+        atomic_write(self.json_path, data_json)
+        atomic_write(self.txt_path, data_txt)
+        print(f"[writer] wrote {self.json_path} and {self.txt_path}", flush=True)
+
+    def upload_remote_if_enabled(self):
+        """Upload local JSON and TXT to FTPS target when enabled."""
+        if not self.ftps_enable:
+            return
+        if not (self.ftps_host and self.ftps_user and self.ftps_pass and self.ftps_dir):
+            print("[ftps] missing credentials or remote dir; skipping upload", flush=True)
+            return
+        # Upload JSON
+        upload_with_retries(self.ftps_host, self.ftps_user, self.ftps_pass,
+                            self.json_path, self.ftps_dir, remote_filename="tunnel_url.json",
+                            retries=self.ftps_retries)
+        # Upload TXT
+        upload_with_retries(self.ftps_host, self.ftps_user, self.ftps_pass,
+                            self.txt_path, self.ftps_dir, remote_filename="tunnel_url.txt",
+                            retries=self.ftps_retries)
+
+    def run_once(self):
+        cmd = [
+            self.cf_bin,
+            "tunnel",
+            "--no-autoupdate",
+            "--protocol",
+            self.protocol,
+            "--url",
+            self.comfy_url,
+        ]
+        print(f"[cloudflared] starting: {' '.join(cmd)}", flush=True)
+        try:
+            self.proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+                text=True,
+                universal_newlines=True,
+            )
+        except Exception as e:
+            print(f"[cloudflared] spawn error: {e}", flush=True)
+            return False
+
+        assert self.proc.stdout is not None
+        try:
+            for line in self.proc.stdout:
+                if self.stop_evt.is_set():
+                    break
+                line = line.rstrip("\r\n")
+                print(f"[cloudflared] {line}", flush=True)
+                m = TRYCF_RE.search(line)
+                if m:
+                    url = m.group(0)
+                    if url != self.current_url:
+                        self.current_url = url
+                        print(f"[cloudflared] detected tunnel URL: {url}", flush=True)
+                        try:
+                            self.write_urls_local(url)
+                            # Attempt FTPS upload after local write
+                            self.upload_remote_if_enabled()
+                        except Exception as we:
+                            print(f"[writer] error after detection: {we}", flush=True)
+        except Exception as e:
+            print(f"[cloudflared] read error: {e}", flush=True)
+
+        # Wait for exit
+        try:
+            rc = self.proc.wait(timeout=2)
+        except Exception:
+            rc = None
+        print(f"[cloudflared] exited rc={rc}", flush=True)
+        return True
+
+    def run_forever(self):
+        while not self.stop_evt.is_set():
+            started = self.run_once()
+            if self.stop_evt.is_set():
+                break
+            # Backoff and retry on crash/failure
+            t = self.backoff
+            self.backoff = min(self.backoff * 1.5, 30.0)
+            for _ in range(int(t / 0.1)):
+                if self.stop_evt.is_set():
+                    break
+                time.sleep(0.1)
+
+    def is_running(self) -> bool:
+        try:
+            return self.proc is not None and self.proc.poll() is None
+        except Exception:
+            return False
+
+    def stop(self):
+        self.stop_evt.set()
+        try:
+            if self.proc and self.proc.poll() is None:
+                self.proc.terminate()
+        except Exception:
+            pass
+
+
+# ========== HTTP server for LAN pull ==========
+
+class BridgeRequestHandler(BaseHTTPRequestHandler):
+    """
+    Serves minimal endpoints from local files:
+      - GET /bridge/tunnel_url.json
+      - GET /bridge/tunnel_url.txt
+      - GET /health
+      - GET /
+    """
+
+    out_dir: str = "."
+    json_path: str = "tunnel_url.json"
+    txt_path: str = "tunnel_url.txt"
+    enable_cors: bool = False
+    writer_ref: Optional[TunnelWriter] = None
+
+    server_version = "BridgeServer/1.2"
+    sys_version = ""
+
+    def _set_common_headers(self, status: int, content_type: str):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        if self.enable_cors:
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(HTTPStatus.NO_CONTENT)
+        if self.enable_cors:
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_GET(self):
+        try:
+            if self.path == "/":
+                self._set_common_headers(HTTPStatus.OK, "text/plain; charset=utf-8")
+                body = (
+                    "Cloudflared Quick Tunnel Bridge\n"
+                    "Endpoints:\n"
+                    "  GET /bridge/tunnel_url.json\n"
+                    "  GET /bridge/tunnel_url.txt\n"
+                    "  GET /health\n"
+                )
+                self.wfile.write(body.encode("utf-8"))
+                return
+
+            if self.path == "/bridge/tunnel_url.json":
+                data = read_json_file(self.json_path)
+                if data is None:
+                    self._set_common_headers(HTTPStatus.NOT_FOUND, "application/json")
+                    self.wfile.write(b'{"error":"not_found"}')
+                    return
+                payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                self._set_common_headers(HTTPStatus.OK, "application/json")
+                self.wfile.write(payload)
+                return
+
+            if self.path == "/bridge/tunnel_url.txt":
+                txt = read_text_file(self.txt_path)
+                if txt is None:
+                    self._set_common_headers(HTTPStatus.NOT_FOUND, "text/plain; charset=utf-8")
+                    self.wfile.write(b"")
+                    return
+                self._set_common_headers(HTTPStatus.OK, "text/plain; charset=utf-8")
+                self.wfile.write(txt.encode("utf-8"))
+                return
+
+            if self.path == "/health":
+                data = read_json_file(self.json_path) or {}
+                url = data.get("url") if isinstance(data, dict) else None
+                running = False
+                if self.writer_ref is not None:
+                    running = self.writer_ref.is_running()
+                resp = {
+                    "status": "ok",
+                    "cloudflared_running": bool(running),
+                    "url": url or "",
+                    "updated_at": data.get("updated_at") if isinstance(data, dict) else None,
+                }
+                payload = json.dumps(resp, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                self._set_common_headers(HTTPStatus.OK, "application/json")
+                self.wfile.write(payload)
+                return
+
+            self._set_common_headers(HTTPStatus.NOT_FOUND, "application/json")
+            self.wfile.write(b'{"error":"not_found"}')
+        except BrokenPipeError:
+            pass
+        except Exception as e:
+            try:
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, explain=str(e))
+            except Exception:
+                pass
+
+    def log_message(self, fmt, *args):
+        sys.stdout.write("[http] " + (fmt % args) + "\n")
+
+
+class HttpServerThread(threading.Thread):
+    def __init__(self, host: str, port: int, handler_cls: type):
+        super().__init__(daemon=True)
+        self.host = host
+        self.port = port
+        self.handler_cls = handler_cls
+        self.httpd: Optional[ThreadingHTTPServer] = None
+        self._stopped = threading.Event()
+
+    def run(self):
+        try:
+            ThreadingHTTPServer.allow_reuse_address = True
+            self.httpd = ThreadingHTTPServer((self.host, self.port), self.handler_cls)
+            sa = self.httpd.socket.getsockname()
+            print(f"[http] serving on {sa[0]}:{sa[1]}", flush=True)
+            self.httpd.serve_forever(poll_interval=0.5)
+        except OSError as e:
+            print(f"[http] failed to bind {self.host}:{self.port} -> {e}", flush=True)
+        except Exception as e:
+            print(f"[http] server error: {e}", flush=True)
+        finally:
+            self._stopped.set()
+            print("[http] server thread exited", flush=True)
+
+    def stop(self):
+        try:
+            if self.httpd:
+                self.httpd.shutdown()
+                self.httpd.server_close()
+        except Exception:
+            pass
+        try:
+            with socket.create_connection((self.host, self.port), timeout=0.2):
+                pass
+        except Exception:
+            pass
+        self._stopped.wait(timeout=3.0)
+
+
+# ========== Utilities ==========
+
+def find_default_cloudflared(script_path: str) -> str:
+    base = os.path.dirname(os.path.abspath(script_path))
+    candidates = [
+        os.path.join(base, "cloudflared-windows-amd64.exe"),
+        os.path.join(base, "cloudflared.exe"),
+        "cloudflared",
+    ]
+    for c in candidates:
+        if c == "cloudflared":
+            return c
+        if os.path.isfile(c):
+            return c
+    return "cloudflared"
+
+
+# ========== Main ==========
+
+def parse_stage1_args(argv=None):
+    """Parse minimal args to control .env loading."""
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--env-file", type=str, default="", help="Path to .env file to load before full parsing")
+    p.add_argument("--no-auto-env", action="store_true", help="Disable auto-discovery of .env")
+    return p.parse_known_args(argv)
+
+def parse_stage2_args(argv=None):
+    """Full parser using environment defaults (possibly populated from .env)."""
+    p = argparse.ArgumentParser(description="Cloudflared Quick Tunnel URL Writer with LAN HTTP endpoint, optional FTPS upload, and .env support")
+    # Primary settings
+    p.add_argument("--cloudflared", type=str, default=os.getenv("CLOUDFLARED", ""), help="Path to cloudflared binary (auto-discover if empty or 'cloudflared')")
+    p.add_argument("--comfy-url", type=str, default=os.getenv("COMFY_URL", "http://127.0.0.1:8188"), help="Local ComfyUI URL to expose")
+    p.add_argument("--out-dir", type=str, default=os.getenv("OUT_DIR", ""), help="Directory to write tunnel_url.json and tunnel_url.txt")
+    p.add_argument("--protocol", type=str, default=os.getenv("EDGE_PROTOCOL", "http2"), choices=["quic", "http2"], help="Cloudflared edge protocol")
+
+    # HTTP endpoint (LAN)
+    p.add_argument("--http-host", type=str, default=os.getenv("HTTP_HOST", "0.0.0.0"), help="HTTP bind host for pull endpoint")
+    p.add_argument("--http-port", type=int, default=int(os.getenv("HTTP_PORT", "8799")), help="HTTP bind port for pull endpoint")
+    default_cors_env = os.getenv("HTTP_CORS", "false")
+    p.add_argument("--http-cors", action="store_true", default=env_flag_truthy(default_cors_env), help="Enable CORS (Access-Control-Allow-Origin: *)")
+
+    # FTPS upload options
+    default_ftps_enable = env_flag_truthy(os.getenv("FTPS_ENABLE", "false"))
+    p.add_argument("--ftps-enable", action="store_true", default=default_ftps_enable, help="Enable FTPS upload on URL changes")
+    p.add_argument("--ftps-host", type=str, default=os.getenv("FTPS_HOST", ""), help="FTPS host (e.g., web8.greensta.de)")
+    p.add_argument("--ftps-user", type=str, default=os.getenv("FTPS_USER", ""), help="FTPS username")
+    p.add_argument("--ftps-pass", type=str, default=os.getenv("FTPS_PASS", ""), help="FTPS password")
+    p.add_argument("--ftps-dir", type=str, default=os.getenv("FTPS_DIR", ""), help="Remote directory path (e.g., /dev.betakontext.de/slAIdshow/bridge)")
+    p.add_argument("--ftps-retries", type=int, default=int(os.getenv("FTPS_RETRIES", "5")), help="Retry count for FTPS uploads")
+
+    # Keep stage1 flags too for help visibility
+    p.add_argument("--env-file", type=str, default=os.getenv("ENV_FILE", ""), help="Path to .env file (already loaded if provided earlier)")
+    p.add_argument("--no-auto-env", action="store_true", default=env_flag_truthy(os.getenv("NO_AUTO_ENV", "false")), help="Disable auto-discovery of .env")
+
+    return p.parse_args(argv)
+
+def main():
+    # Stage 1: early parse for .env loading controls
+    stage1_args, remaining = parse_stage1_args()
+
+    # Load .env if provided, else auto-discover unless disabled
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    cwd = os.getcwd()
+    env_loaded_from = None
+
+    if stage1_args.env_file:
+        count = load_env_file(stage1_args.env_file, overwrite=False)
+        env_loaded_from = stage1_args.env_file if count >= 0 else None
+        print(f"[env] loaded {count} keys from {stage1_args.env_file}", flush=True)
+    elif not stage1_args.no_auto_env:
+        auto_env = auto_discover_env_file(script_dir, cwd)
+        if auto_env:
+            count = load_env_file(auto_env, overwrite=False)
+            env_loaded_from = auto_env if count >= 0 else None
+            print(f"[env] auto-loaded {count} keys from {auto_env}", flush=True)
+        else:
+            print("[env] no .env discovered", flush=True)
+    else:
+        print("[env] auto-discovery disabled", flush=True)
+
+    # Stage 2: full parse with defaults from os.environ (potentially populated)
+    args = parse_stage2_args(remaining)
+
+    # Resolve cloudflared binary and out dir
+    cf_bin = (args.cloudflared or "").strip() or find_default_cloudflared(__file__)
+    out_dir = (args.out_dir or "").strip() or (os.path.dirname(os.path.abspath(__file__)) or ".")
+
+    # Mask sensitive info for logs
+    masked_pass = "****" if args.ftps_pass else ""
+
+    print(
+        f"[main] cloudflared={cf_bin}, comfy={args.comfy_url}, out_dir={out_dir}, "
+        f"http={args.http_host}:{args.http_port}, protocol={args.protocol}, cors={args.http_cors}, "
+        f"ftps_enable={args.ftps_enable}, ftps_host={args.ftps_host}, ftps_user={args.ftps_user}, "
+        f"ftps_pass={masked_pass}, ftps_dir={args.ftps_dir}, ftps_retries={args.ftps_retries}, "
+        f"env_file={(env_loaded_from or 'none')}",
+        flush=True,
+    )
+
+    # Validate FTPS config if enabled
+    if args.ftps_enable:
+        missing = []
+        if not args.ftps_host:
+            missing.append("FTPS_HOST/--ftps-host")
+        if not args.ftps_user:
+            missing.append("FTPS_USER/--ftps-user")
+        if not args.ftps_pass:
+            missing.append("FTPS_PASS/--ftps-pass")
+        if not args.ftps_dir:
+            missing.append("FTPS_DIR/--ftps-dir")
+        if missing:
+            print(f"[main] error: --ftps-enable requires: {', '.join(missing)}", flush=True)
+            sys.exit(2)
+
+    # Prepare writer
+    tw = TunnelWriter(
+        cf_bin=cf_bin,
+        comfy_url=args.comfy_url,
+        out_dir=out_dir,
+        protocol=args.protocol,
+        ftps_enable=bool(args.ftps_enable),
+        ftps_host=args.ftps_host.strip(),
+        ftps_user=args.ftps_user.strip(),
+        ftps_pass=args.ftps_pass,  # keep as-is
+        ftps_dir=args.ftps_dir.strip(),
+        ftps_retries=args.ftps_retries,
+    )
+
+    # Prepare HTTP handler class with shared config
+    BridgeRequestHandler.out_dir = out_dir
+    BridgeRequestHandler.json_path = os.path.join(out_dir, "tunnel_url.json")
+    BridgeRequestHandler.txt_path = os.path.join(out_dir, "tunnel_url.txt")
+    BridgeRequestHandler.enable_cors = bool(args.http_cors)
+    BridgeRequestHandler.writer_ref = tw
+
+    # Start HTTP server thread (so LAN pull works even before URL appears)
+    http_thread = HttpServerThread(args.http_host, args.http_port, BridgeRequestHandler)
+    http_thread.start()
+
+    def handle_signal(signum, frame):
+        print("[main] shutdown requested", flush=True)
+        try:
+            tw.stop()
+        except Exception:
+            pass
+        try:
+            http_thread.stop()
+        except Exception:
+            pass
+
+    # Register signal handlers (best effort on Windows)
+    try:
+        signal.signal(signal.SIGINT, handle_signal)
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, handle_signal)
+    except Exception:
+        pass
+
+    # Run writer loop (blocking)
+    try:
+        tw.run_forever()
+    finally:
+        try:
+            tw.stop()
+        except Exception:
+            pass
+        try:
+            http_thread.stop()
+        except Exception:
+            pass
+        print("[main] stopped", flush=True)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+### utils/dev_check.py
+
+```py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+dev_check.py
+
+Purpose:
+- Quick local health check: ensure Ollama and ComfyUI are reachable on localhost.
+
+Safety:
+- Enforces localhost-only connections via assert_local().
+- Short timeouts.
+
+Env:
+- APP_OLLAMA_HOST (default 127.0.0.1)
+- APP_OLLAMA_PORT (default 11434)
+- APP_COMFY_HOST  (default 127.0.0.1)
+- APP_COMFY_PORT  (default 8188)
+- DEV_CHECK_JSON=1 for JSON output
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+from typing import Any, Dict, Tuple
+from pathlib import Path
+
+import httpx
+
+# ---------- .env loader and helpers (shared logic) ----------
+
+def _strip_inline_comment(s: str) -> str:
+    """Strip inline comments after '#', unless inside quotes."""
+    s = s.strip()
+    out = []
+    in_single = False
+    in_double = False
+    for ch in s:
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        if ch == "#" and not in_single and not in_double:
+            break
+        out.append(ch)
+    return "".join(out).strip()
+
+
+def _load_dotenv_inline(p: Path) -> None:
+    """
+    Load .env safely:
+    - Supports 'export KEY=VALUE'
+    - Strips inline comments after '#'
+    - Does not override already-set env vars
+    """
+    if not p.is_file():
+        return
+    for raw in p.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.lower().startswith("export "):
+            line = line[7:].strip()
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = _strip_inline_comment(v).strip().strip("'").strip('"')
+        if k and v != "":
+            os.environ.setdefault(k, v)
+
+
+def env_str(k: str, default: str) -> str:
+    v = os.getenv(k)
+    return v.strip() if v is not None else default
+
+
+def env_int(k: str, default: int) -> int:
+    v = os.getenv(k)
+    if v is None:
+        return default
+    try:
+        vv = _strip_inline_comment(v)
+        return int(vv)
+    except Exception:
+        return default
+
+
+# Load .env from current working directory
+_load_dotenv_inline(Path(".env"))
+
+# ---------- Config ----------
+
+OLLAMA_HOST = env_str("APP_OLLAMA_HOST", "127.0.0.1")
+OLLAMA_PORT = env_int("APP_OLLAMA_PORT", 11434)
+COMFY_HOST = env_str("APP_COMFY_HOST", "127.0.0.1")
+COMFY_PORT = env_int("APP_COMFY_PORT", 8188)
+WANT_JSON = env_str("DEV_CHECK_JSON", "0").lower() in {"1", "true", "yes"}
+
+
+# ---------- Networking helpers ----------
+
+def assert_local(host: str) -> None:
+    """Only allow 127.0.0.1 for safety."""
+    if host != "127.0.0.1":
+        raise AssertionError(f"Localhost only (got: {host})")
+
+
+def default_client() -> httpx.AsyncClient:
+    """Preconfigured async client with short timeouts."""
+    timeout = httpx.Timeout(3.0, connect=2.0)
+    return httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+
+
+async def check_ollama() -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    Check Ollama via /api/tags.
+    Returns (ok, message, details)
+    """
+    assert_local(OLLAMA_HOST)
+    url = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/tags"
+    details: Dict[str, Any] = {"host": OLLAMA_HOST, "port": OLLAMA_PORT, "url": url}
+    try:
+        async with default_client() as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json()
+            models = [m.get("name") for m in data.get("models", []) if isinstance(m, dict)]
+            msg = "Ollama OK. Models: " + (", ".join(models) if models else "none")
+            details.update({"ok": True, "models": models})
+            return True, msg, details
+    except Exception as e:
+        msg = f"Ollama NOT reachable: {e}"
+        details.update({"ok": False, "error": str(e)})
+        return False, msg, details
+
+
+async def check_comfy() -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    Check ComfyUI on localhost.
+    Prefer GET /system_stats; fallback to GET /.
+    Returns (ok, message, details)
+    """
+    assert_local(COMFY_HOST)
+    base = f"http://{COMFY_HOST}:{COMFY_PORT}"
+    details: Dict[str, Any] = {"host": COMFY_HOST, "port": COMFY_PORT, "base": base}
+    try:
+        async with default_client() as client:
+            try:
+                r = await client.get(f"{base}/system_stats")
+                if r.status_code == 200:
+                    try:
+                        info = r.json()
+                    except Exception:
+                        info = {"raw": r.text[:200]}
+                    details.update({"ok": True, "endpoint": "/system_stats", "info": info})
+                    return True, "ComfyUI OK (/system_stats)", details
+            except Exception:
+                pass
+
+            r = await client.get(base)
+            if r.status_code == 200:
+                details.update({"ok": True, "endpoint": "/", "title_hint": r.text[:80]})
+                return True, "ComfyUI OK (root reachable)", details
+
+            details.update({"ok": False, "status": r.status_code})
+            return False, f"ComfyUI unexpected status: {r.status_code}", details
+    except Exception as e:
+        msg = f"ComfyUI NOT reachable: {e}"
+        details.update({"ok": False, "error": str(e)})
+        return False, msg, details
+
+
+# ---------- Main ----------
+
+async def main() -> None:
+    o_ok, o_msg, o_det = await check_ollama()
+    c_ok, c_msg, c_det = await check_comfy()
+
+    print(o_msg)
+    print(c_msg)
+
+    if WANT_JSON:
+        print(json.dumps({
+            "ollama": o_det,
+            "comfyui": c_det,
+            "ok": bool(o_ok and c_ok)
+        }, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        sys.exit(0)
+```
+
+---
+
+### utils/mic_check_whisper.py
+
+```py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+mic_check_whisper.py
+
+- Robust .env parsing that strips inline comments after '#'
+- Safe int/float parsing from ENV
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Optional, Tuple
+
+import numpy as np
+import sounddevice as sd
+
+
+def _strip_inline_comment(s: str) -> str:
+    """
+    Strip inline comments starting with '#', unless inside quotes.
+    Handles simple cases: 'value # comment' -> 'value'
+    """
+    s = s.strip()
+    out = []
+    in_single = False
+    in_double = False
+    for ch in s:
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        if ch == "#" and not in_single and not in_double:
+            break
+        out.append(ch)
+    return "".join(out).strip()
+
+
+def _load_dotenv_inline(p: Path) -> None:
+    """
+    Load .env file:
+    - Supports 'export KEY=VALUE'
+    - Strips inline comments after '#'
+    - Does not override already-set environment variables
+    """
+    if not p.is_file():
+        return
+    for raw in p.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.lower().startswith("export "):
+            line = line[7:].strip()
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = _strip_inline_comment(v).strip().strip("'").strip('"')
+        if k and v != "":
+            os.environ.setdefault(k, v)
+
+
+def env_str(k: str, default: str) -> str:
+    v = os.getenv(k)
+    return v.strip() if v is not None else default
+
+
+def env_int(k: str, default: int) -> int:
+    v = os.getenv(k)
+    if v is None:
+        return default
+    try:
+        # also allow values like "2   # comment"
+        vv = _strip_inline_comment(v)
+        return int(vv)
+    except Exception:
+        return default
+
+
+def env_float(k: str, default: float) -> float:
+    v = os.getenv(k)
+    if v is None:
+        return default
+    try:
+        vv = _strip_inline_comment(v)
+        return float(vv)
+    except Exception:
+        return default
+
+
+# Load .env first
+_load_dotenv_inline(Path(".env"))
+
+# Read env using robust helpers
+MODEL = env_str("APP_WHISPER_MODEL_PATH", "").strip()
+LANG = env_str("APP_WHISPER_LANGUAGE", "de").strip()
+THR = env_int("APP_WHISPER_THREADS", 4)
+SR = env_int("APP_SAMPLE_RATE", 48000)
+DUR = env_float("APP_CHECK_DURATION", 6.0)
+WANT_JSON = env_str("MIC_CHECK_JSON", "0").lower() in {"1", "true", "yes"}
+WAV_OUT = env_str("MIC_CHECK_SAVE_WAV", "").strip()
+
+# Fallback to ./models/ggml-base.bin if not set
+if not MODEL:
+    candidate = Path("models/ggml-base.bin")
+    MODEL = str(candidate) if candidate.is_file() else "ggml-base.bin"
+
+
+def pick_input_device(prefer_name: Optional[str] = None) -> Tuple[int, str]:
+    devs = sd.query_devices()
+    if prefer_name:
+        for i, d in enumerate(devs):
+            if d.get("name") == prefer_name and d.get("max_input_channels", 0) > 0:
+                return i, d.get("name", str(i))
+        pl = prefer_name.lower()
+        for i, d in enumerate(devs):
+            if pl in (d.get("name", "").lower()) and d.get("max_input_channels", 0) > 0:
+                return i, d.get("name", str(i))
+    for i, d in enumerate(devs):
+        nm = (d.get("name") or "").lower()
+        if ("pulse" in nm or "pipewire" in nm) and d.get("max_input_channels", 0) > 0:
+            return i, d.get("name", str(i))
+    for i, d in enumerate(devs):
+        if d.get("max_input_channels", 0) > 0:
+            return i, d.get("name", str(i))
+    raise RuntimeError("No input device with input channels found")
+
+
+def resample_to_16k(x: np.ndarray, sr: int) -> np.ndarray:
+    if x.size == 0:
+        return np.array([], dtype=np.float32)
+    if sr == 16000:
+        return x.astype(np.float32, copy=False)
+    tgt = int(round(x.shape[0] * (16000.0 / float(sr))))
+    if tgt <= 0:
+        return np.array([], dtype=np.float32)
+    t_in = np.linspace(0.0, 1.0, num=x.shape[0], endpoint=False, dtype=np.float64)
+    t_out = np.linspace(0.0, 1.0, num=tgt, endpoint=False, dtype=np.float64)
+    y = np.interp(t_out, t_in, x.astype(np.float64, copy=False))
+    return y.astype(np.float32, copy=False)
+
+
+def save_wav_int16_mono(path: Path, x: np.ndarray, sr: int) -> None:
+    import wave
+    x16 = np.clip(x, -1.0, 1.0)
+    x16 = (x16 * 32767.0).astype(np.int16, copy=False)
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(int(sr))
+        wf.writeframes(x16.tobytes())
+
+
+def main() -> None:
+    prefer = env_str("APP_AUDIO_DEVICE", "").strip() or None
+    try:
+        dev_index, dev_name = pick_input_device(prefer)
+    except Exception as e:
+        print(f"[ERR] Could not select an input device: {e}")
+        if WANT_JSON:
+            print(json.dumps({"ok": False, "stage": "pick_device", "error": str(e)}))
+        sys.exit(2)
+
+    print(f"[INFO] Using input device #{dev_index}: {dev_name}")
+    if not Path(MODEL).is_file():
+        msg = f"Whisper model not found: {MODEL}"
+        print(f"[ERR] {msg}")
+        if WANT_JSON:
+            print(json.dumps({"ok": False, "stage": "model_check", "error": msg}))
+        sys.exit(3)
+
+    sd.default.device = (dev_index, None)
+    print(f"[AUDIO] Recording @ {SR} Hz for {DUR:.1f}s … please speak clearly")
+    try:
+        audio = sd.rec(int(DUR * SR), samplerate=SR, channels=1, dtype="float32")
+        sd.wait()
+    except Exception as e:
+        print(f"[ERR] Recording failed: {e}")
+        if WANT_JSON:
+            print(json.dumps({"ok": False, "stage": "record", "error": str(e)}))
+        sys.exit(4)
+
+    x = audio[:, 0] if audio.size else np.array([], dtype=np.float32)
+    if x.size == 0:
+        print("[ERR] Empty buffer recorded.")
+        if WANT_JSON:
+            print(json.dumps({"ok": False, "stage": "record", "error": "empty_buffer"}))
+        sys.exit(5)
+
+    peak = float(np.max(np.abs(x)))
+    rms = float(np.sqrt(np.mean(x * x)))
+    print(f"[AUDIO] Peak={peak:.3f}, RMS={rms:.3f}, samples={x.shape[0]}")
+
+    x16 = resample_to_16k(x, SR)
+    if x16.size == 0 or float(np.max(np.abs(x16))) < 0.01:
+        print("[ERR] Audio empty or too quiet after resampling. Increase mic gain / speak louder.")
+        if WANT_JSON:
+            print(json.dumps({"ok": False, "stage": "resample", "error": "too_quiet_or_empty"}))
+        sys.exit(6)
+
+    try:
+        from pywhispercpp.model import Model as WhisperModel
+    except Exception as e:
+        print(f"[ERR] pywhispercpp import failed: {e}")
+        if WANT_JSON:
+            print(json.dumps({"ok": False, "stage": "import", "error": str(e)}))
+        sys.exit(7)
+
+    print("[WHISPER] Loading model …")
+    try:
+        model = WhisperModel(
+            MODEL,
+            n_threads=THR,
+            print_realtime=False,
+            print_progress=False,
+            language=LANG,
+            translate=False,
+        )
+    except Exception as e:
+        print(f"[ERR] Model load failed: {e}")
+        if WANT_JSON:
+            print(json.dumps({"ok": False, "stage": "load_model", "error": str(e)}))
+        sys.exit(8)
+
+    print("[WHISPER] Transcribing …")
+    try:
+        if hasattr(model, "transcribe_float32"):
+            out = model.transcribe_float32(x16)
+        elif hasattr(model, "transcribe"):
+            out = model.transcribe(x16)
+        else:
+            x16i = (np.clip(x16, -1.0, 1.0) * 32767.0).astype(np.int16, copy=False)
+            out = model.transcribe_pcm16(x16i)
+    except Exception as e:
+        print(f"[ERR] Transcription failed: {e}")
+        if WANT_JSON:
+            print(json.dumps({"ok": False, "stage": "transcribe", "error": str(e)}))
+        sys.exit(9)
+
+    text = out if isinstance(out, str) else (out.get("text", "") if isinstance(out, dict) else str(out))
+    text = (text or "").strip()
+    print(f"[WHISPER] text: {text}")
+
+    if WANT_JSON:
+        print(json.dumps({
+            "ok": True,
+            "device": {"index": dev_index, "name": dev_name},
+            "sr": SR,
+            "duration": DUR,
+            "peak": peak,
+            "rms": rms,
+            "text": text
+        }, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+### utils/os_open.py
+
+```py
+# utils/os_open.py
+import os
+import platform
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Dict
+
+
+class OpenDirError(RuntimeError):
+    pass
+
+
+def _clean_env_for_gui() -> Dict[str, str]:
+    """
+    Return a copy of os.environ with Qt-related variables stripped to avoid
+    accidental plugin loading from OpenCV/Qt in virtualenvs.
+    """
+    env = dict(os.environ)
+    for var in (
+        "QT_QPA_PLATFORM",
+        "QT_PLUGIN_PATH",
+        "QT_QPA_PLATFORM_PLUGIN_PATH",
+        "QT_DEBUG_PLUGINS",
+        "QTWEBENGINE_CHROMIUM_FLAGS",
+        "QT_DIR",
+    ):
+        env.pop(var, None)
+    # Also avoid PYTHONPATH bleeding into spawned GUI apps
+    env.pop("PYTHONPATH", None)
+    return env
+
+
+def open_folder_os(path: Path) -> None:
+    """
+    Open a folder in the native file explorer safely.
+    - Windows: explorer / os.startfile (WSL via powershell.exe)
+    - macOS: open
+    - Linux: xdg-open (fallbacks: nautilus, dolphin, thunar, pcmanfm, nemo)
+    Notes:
+    - Uses a scrubbed environment to avoid Qt plugin poisoning from venvs.
+    - Treats xdg-open timeout as success (GUI takes over asynchronously).
+    Raises OpenDirError on hard failures only.
+    """
+    p = Path(path).expanduser().resolve()
+    if not p.exists():
+        p.mkdir(parents=True, exist_ok=True)
+
+    system = platform.system()
+    env = _clean_env_for_gui()
+
+    try:
+        if system == "Windows":
+            if "WSL_DISTRO_NAME" in os.environ:
+                win_path = subprocess.check_output(["wslpath", "-w", str(p)], text=True, env=env).strip()
+                subprocess.Popen(
+                    ["powershell.exe", "-NoProfile", "-Command", f"Start-Process '{win_path}'"],
+                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                return
+            else:
+                try:
+                    os.startfile(str(p))  # type: ignore[attr-defined]
+                    return
+                except Exception:
+                    subprocess.Popen(["explorer", str(p)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return
+
+        if system == "Darwin":
+            proc = subprocess.Popen(["open", str(p)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            rc = proc.wait(timeout=5)
+            if rc != 0:
+                err = (proc.stderr.read() or b"").decode("utf-8", "ignore")
+                raise OpenDirError(f"open failed (rc={rc}): {err.strip()}")
+            return
+
+        # Linux and others
+        xdg = shutil.which("xdg-open")
+        if xdg:
+            proc = subprocess.Popen([xdg, str(p)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                rc = proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # Consider success: the desktop handler should take over
+                return
+            if rc != 0:
+                # Try explicit file managers as fallback before raising
+                for fm in ("nautilus", "dolphin", "thunar", "pcmanfm", "nemo"):
+                    fm_path = shutil.which(fm)
+                    if fm_path:
+                        subprocess.Popen([fm_path, str(p)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        return
+                err = (proc.stderr.read() or b"").decode("utf-8", "ignore")
+                raise OpenDirError(f"xdg-open failed (rc={rc}): {err.strip()}")
+            return
+
+        # Final fallback when xdg-open is missing
+        for fm in ("nautilus", "dolphin", "thunar", "pcmanfm", "nemo"):
+            fm_path = shutil.which(fm)
+            if fm_path:
+                subprocess.Popen([fm_path, str(p)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+
+        raise OpenDirError("No GUI file manager found (xdg-open and common FMs are missing).")
+
+    except OpenDirError:
+        raise
+    except Exception as e:
+        raise OpenDirError(f"Failed to open folder: {e}") from e
+```
+
+---
+
+### utils/style_features.py
+
+```py
+# style_features.py
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Tuple, Dict
+
+import cv2
+import numpy as np
+from skimage.feature import canny
+from skimage.color import rgb2gray
+
+try:
+    from sklearn.metrics import silhouette_score  # type: ignore
+    _HAVE_SKLEARN = True
+except Exception:
+    _HAVE_SKLEARN = False
+
+
+@dataclass
+class StyleAnalysis:
+    edge_density: float
+    edge_coherence: float
+    edge_thickness_score: float
+    saturation_mean: float
+    saturation_std: float
+    color_clusters: int
+    color_silhouette: float
+    contrast: float
+    grayscale_ratio: float
+    grain_score: float
+    hf_ratio: float
+    dot_pattern_score: float
+    straight_line_score: float
+    brush_texture_score: float
+    bokeh_score: float
+    class_scores: Dict[str, float]
+    primary_class: str
+
+
+def _load_bgr(path: Path) -> np.ndarray:
+    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if img is None:
+        raise FileNotFoundError(f"cannot read image: {path}")
+    return img
+
+def _downscale(img: np.ndarray, max_side: int = 640) -> np.ndarray:
+    h, w = img.shape[:2]
+    ms = max(h, w)
+    if ms <= max_side:
+        return img
+    s = max_side / ms
+    return cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+
+def _edge_metrics(bgr: np.ndarray) -> Tuple[float, float, float]:
+    # Kanten-Dichte, Orientierungs-Kohärenz (Proxy), und Kanten-"Dicke"
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    gray = _downscale(gray, 640)
+    edges = canny(gray.astype(np.float32) / 255.0, sigma=1.2)
+    edge_density = float(edges.mean())
+
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.hypot(gx, gy) + 1e-6
+    ori = np.arctan2(gy, gx)
+
+    mask = (mag > (mag.mean() + mag.std()))
+    if int(mask.sum()) > 100:
+        ori_edges = ori[mask]
+        var_ori = float(np.var(np.sin(ori_edges)) + np.var(np.cos(ori_edges)))
+        edge_coherence = max(0.0, 1.0 - min(1.0, var_ori / 1.0))
+    else:
+        edge_coherence = 0.0
+
+    edges_u = (edges.astype(np.uint8) * 255)
+    dil = cv2.dilate(edges_u, np.ones((3, 3), np.uint8), 1)
+    thickness_score = float((dil > 0).mean() - edge_density)
+    return edge_density, edge_coherence, thickness_score
+
+def _estimate_silhouette_fallback(X: np.ndarray, labels: np.ndarray) -> float:
+    # Lightweight Silhouette-Approximation ohne sklearn
+    try:
+        labs = labels.reshape(-1)
+        ks = np.unique(labs)
+        if ks.size < 2:
+            return -0.05
+        cents = []
+        intras = []
+        for k in ks:
+            pts = X[labs == k]
+            if pts.size == 0:
+                continue
+            c = pts.mean(axis=0)
+            cents.append(c)
+            d = np.linalg.norm(pts - c, axis=1).mean()
+            intras.append(d if np.isfinite(d) else 0.0)
+        if len(cents) < 2:
+            return -0.03
+        cents = np.vstack(cents)
+        dsum = 0.0
+        cnt = 0
+        for i in range(len(cents)):
+            for j in range(i + 1, len(cents)):
+                dsum += float(np.linalg.norm(cents[i] - cents[j]))
+                cnt += 1
+        inter = (dsum / cnt) if cnt else 0.0
+        intra = float(np.mean(intras)) if intras else 0.0
+        if intra <= 1e-6:
+            return 0.2
+        ratio = inter / intra
+        val = (ratio - 1.0) * 0.15
+        return float(np.clip(val, -0.1, 0.5))
+    except Exception:
+        return -0.05
+
+def _color_metrics(bgr: np.ndarray) -> Tuple[float, float, int, float]:
+    # Sättigungs-Statistik + einfache KMeans-Paletten-Clustering-Qualität
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    s = hsv[:, :, 1].astype(np.float32) / 255.0
+    s_mean = float(s.mean())
+    s_std = float(s.std())
+
+    sample = _downscale(bgr, 480)
+    flat = sample.reshape(-1, 3).astype(np.float32)
+    if flat.shape[0] > 40000:
+        idx = np.random.choice(flat.shape[0], 40000, replace=False)
+        flat = flat[idx]
+
+    best_k = 3
+    best_sil = -1.0
+    prev_compact = None
+    for k in range(3, 9):
+        criteria = (cv2.TERM_CRITERIA_MAX_ITER + cv2.TERM_CRITERIA_EPS, 20, 1.0)
+        compactness, labels, _ = cv2.kmeans(flat, k, None, criteria, 2, cv2.KMEANS_PP_CENTERS)
+        if _HAVE_SKLEARN:
+            try:
+                if flat.shape[0] > 2000:
+                    idx = np.random.choice(flat.shape[0], 2000, replace=False)
+                    sil = silhouette_score(flat[idx], labels[idx].ravel(), metric='euclidean')  # type: ignore
+                else:
+                    sil = silhouette_score(flat, labels.ravel(), metric='euclidean')  # type: ignore
+            except Exception:
+                sil = -1.0
+        else:
+            sil = _estimate_silhouette_fallback(flat, labels)
+
+        if sil > best_sil:
+            best_sil = sil
+            best_k = k
+
+        if prev_compact is None:
+            prev_compact = compactness
+        else:
+            if compactness > prev_compact * 0.98:
+                break
+            prev_compact = compactness
+
+    return s_mean, s_std, int(best_k), float(best_sil)
+
+def _contrast_metric(bgr: np.ndarray) -> float:
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    return float(gray.std())
+
+def _grayscale_ratio(bgr: np.ndarray) -> float:
+    b, g, r = cv2.split(bgr.astype(np.float32))
+    diff = (np.abs(r - g) + np.abs(g - b) + np.abs(r - b)) / (3.0 * 255.0)
+    return float((diff < 0.03).mean())
+
+def _grain_and_hf(bgr: np.ndarray) -> Tuple[float, float]:
+    # Korn/Noise via Laplacian-Varianz; HF/LF Spektrum via FFT-Ringe
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+
+    g_small = _downscale((gray * 255).astype(np.uint8), 512).astype(np.float32) / 255.0
+    lap = cv2.Laplacian(g_small, cv2.CV_32F)
+    grain = float(lap.var())
+
+    G = _downscale(gray, 512)
+    F = np.fft.fftshift(np.fft.fft2(G))
+    mag = np.log1p(np.abs(F))
+    H, W = mag.shape
+    yy, xx = np.ogrid[:H, :W]
+    cy, cx = H // 2, W // 2
+    r = np.hypot(yy - cy, xx - cx)
+    hf_mask = (r > min(H, W) * 0.22) & (r < min(H, W) * 0.48)
+    lf_mask = (r < min(H, W) * 0.12)
+    hf_ratio = float(mag[hf_mask].mean() / (mag[lf_mask].mean() + 1e-6))
+    return grain, hf_ratio
+
+def _dot_pattern_score(bgr: np.ndarray) -> float:
+    # Halftone-Ring-Detektor (Frequenzbereich)
+    gray = rgb2gray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    gray = _downscale((gray * 255).astype(np.uint8), 512).astype(np.float32) / 255.0
+    F = np.fft.fftshift(np.fft.fft2(gray))
+    mag = np.log1p(np.abs(F))
+    H, W = mag.shape
+    yy, xx = np.ogrid[:H, :W]
+    cy, cx = H // 2, W // 2
+    r = np.hypot(yy - cy, xx - cx)
+    ring = (r > 26) & (r < 46)
+    neigh = ((r > 18) & (r < 24)) | ((r > 48) & (r < 56))
+    ring_mean = float(mag[ring].mean())
+    neigh_mean = float(mag[neigh].mean() + 1e-6)
+    z = (ring_mean - neigh_mean) / (neigh_mean + 1e-6)
+    return float(max(0.0, z * 3.0))
+
+def _straight_line_score(bgr: np.ndarray) -> float:
+    # Hough-Linienlänge relativ zum Umfang
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    gray = _downscale(gray, 800)
+    edges = cv2.Canny(gray, 80, 160, apertureSize=3, L2gradient=True)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=80, minLineLength=40, maxLineGap=3)
+    if lines is None or len(lines) == 0:
+        return 0.0
+    h, w = gray.shape
+    per = float(h + w)
+    total_len = 0.0
+    for l in lines:
+        x1, y1, x2, y2 = l[0]
+        total_len += float(np.hypot(x2 - x1, y2 - y1))
+    return float(min(1.0, total_len / (per * 15.0)))
+
+def _brush_texture_score(bgr: np.ndarray) -> float:
+    # DoG-Varianz als grober Pinseltextur-Hinweis
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
+    L = lab[:, :, 0].astype(np.float32) / 255.0
+    Ls = _downscale(L, 512)
+    g1 = cv2.GaussianBlur(Ls, (0, 0), 1.0)
+    g2 = cv2.GaussianBlur(Ls, (0, 0), 3.0)
+    dog = cv2.absdiff(g1, g2)
+    mean = cv2.blur(dog, (9, 9))
+    sq = cv2.blur(dog * dog, (9, 9))
+    var = sq - mean * mean
+    return float(np.clip(var.mean() * 50.0, 0.0, 1.0))
+
+def _bokeh_score(bgr: np.ndarray) -> float:
+    # Varianz lokaler Schärfe → Hinweis auf DoF/Bokeh
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    gs = _downscale(gray, 512)
+    lap = cv2.Laplacian(gs, cv2.CV_32F)
+    sharp = cv2.GaussianBlur(lap * lap, (0, 0), 1.0)
+    h, w = sharp.shape
+    tiles = 6
+    th, tw = h // tiles, w // tiles
+    vals = []
+    for i in range(tiles):
+        for j in range(tiles):
+            patch = sharp[i*th:(i+1)*th, j*tw:(j+1)*tw]
+            if patch.size > 0:
+                vals.append(float(patch.mean()))
+    vals = np.array(vals, dtype=np.float32)
+    if vals.size < 4:
+        return 0.0
+    v = float(np.std(vals))
+    return float(np.clip(v * 10.0, 0.0, 1.5))
+
+
+def analyze_style(path: Path) -> StyleAnalysis:
+    bgr = _load_bgr(path)
+
+    ed, ecoh, th = _edge_metrics(bgr)
+    s_mean, s_std, k, sil = _color_metrics(bgr)
+    contr = _contrast_metric(bgr)
+    gray_ratio = _grayscale_ratio(bgr)
+    grain, hf_ratio = _grain_and_hf(bgr)
+    dots = _dot_pattern_score(bgr)
+    straight_score = _straight_line_score(bgr)
+    brush_score = _brush_texture_score(bgr)
+    bokeh = _bokeh_score(bgr)
+
+    # Photo
+    photo = 0.0
+    if hf_ratio > 1.15:
+        photo += 0.55
+    if bokeh > 0.26:
+        photo += 0.30
+    if s_mean > 0.20 and s_std > 0.09:
+        photo += 0.18
+    if k >= 7:
+        photo += 0.12
+    if sil < 0.05:
+        photo += 0.08
+    if (hf_ratio > 1.15) and (bokeh > 0.26):
+        photo += 0.12
+    if contr > 0.17:
+        photo += 0.07
+    if grain > 80.0:
+        photo += 0.05
+
+    # Photo-like gate (moderate HF, natural palette, low line structure)
+    photo_like_gate = (
+        (1.07 <= hf_ratio <= 1.15) and
+        (bokeh >= 0.18 or contr >= 0.15) and
+        ((k >= 6) or (sil <= 0.08)) and
+        (straight_score < 0.18) and
+        not (ecoh > 0.28 and 0.012 < th < 0.060) and
+        (dots < 0.8)
+    )
+    if photo_like_gate:
+        photo += 0.20
+
+    # Relaxed photo-like gate (Policy): bestimmte posterartige Fälle als "photo"
+    photo_like_gate_relaxed = (
+        (hf_ratio < 1.00) and
+        (bokeh < 0.12) and
+        (k <= 4) and (sil >= 0.45) and
+        (s_mean >= 0.32) and (s_std >= 0.18) and
+        (straight_score < 0.12) and
+        (ecoh <= 0.06) and
+        (th >= 0.10) and
+        (dots < 0.6)
+    )
+    if photo_like_gate_relaxed:
+        photo += 0.32  # starker Boost, damit "photo" gewinnt
+
+    # Anti-photo Penalties
+    if ecoh > 0.32 and 0.012 < th < 0.050 and bokeh < 0.22 and hf_ratio < 1.14:
+        photo -= 0.35
+    if (ecoh <= 0.06 and th >= 0.10 and hf_ratio < 0.95 and k <= 4 and sil >= 0.45):
+        photo -= 0.05
+    if dots > 1.1 and gray_ratio > 0.45:
+        photo -= 0.20
+
+    photo = max(0.0, photo)
+
+    # Comic (UNVERÄNDERT LASSEN)
+    comic = 0.0
+    if ecoh >= 0.20 and 0.012 < th < 0.060 and hf_ratio < 1.12:
+        comic += 0.50
+    if bokeh < 0.22:
+        comic += 0.12
+    if k <= 7 and sil > 0.06:
+        comic += 0.10
+    if ed > 0.040:
+        comic += 0.06
+    if dots > 0.9:
+        comic += 0.08
+    if (ecoh <= 0.05 and k <= 4 and sil >= 0.45 and th >= 0.10 and hf_ratio < 0.95):
+        comic -= 0.16
+    if (hf_ratio > 1.15 and bokeh > 0.26) or (s_mean > 0.22 and s_std > 0.10 and k >= 7):
+        comic -= 0.08
+    if s_mean > 0.28 and s_std > 0.12 and k >= 7:
+        comic -= 0.10
+    if (0.16 <= s_mean <= 0.42) and (0.12 <= s_std <= 0.35) and (4 <= k <= 7) \
+       and (th >= 0.10) and (ecoh <= 0.10) and (bokeh < 0.24) and (hf_ratio < 1.10) \
+       and (straight_score < 0.10) and (dots < 1.1):
+        comic += 0.24
+    comic = max(0.0, comic)
+
+    # Colored cartoon guard (tightened)
+    if (0.16 <= s_mean <= 0.42) and (0.12 <= s_std <= 0.35) and (4 <= k <= 7) \
+       and (th >= 0.10) and (ecoh <= 0.10) and (bokeh < 0.24) and (hf_ratio < 1.10) \
+       and (straight_score < 0.10) and (dots < 1.1):
+        comic += 0.24
+
+    comic = max(0.0, comic)
+
+    # Manga
+    manga = 0.0
+    if gray_ratio > 0.60 and ed > 0.032 and ecoh > 0.24 and hf_ratio < 1.08:
+        manga += 0.60
+    if dots > 1.0:
+        manga += 0.15
+    if s_mean > 0.15:
+        manga -= 0.10
+    manga = max(0.0, manga)
+
+    # Children sketches
+    child_sketch = 0.0
+    if s_mean < 0.16:
+        child_sketch += 0.20
+    else:
+        child_sketch -= 0.15
+    if k <= 4:
+        child_sketch += 0.15
+    else:
+        child_sketch -= 0.10
+    if hf_ratio < 1.06:
+        child_sketch += 0.15
+    else:
+        child_sketch -= 0.15
+    if th < 0.016:
+        child_sketch += 0.15
+    else:
+        child_sketch -= 0.10
+    if ed > 0.030 and ecoh < 0.18:
+        child_sketch += 0.20
+    else:
+        child_sketch -= 0.10
+    if bokeh > 0.22 or (s_mean > 0.18 and s_std > 0.08):
+        child_sketch -= 0.25
+    child_sketch = max(0.0, child_sketch)
+
+    # Classical oil painting
+    oil = 0.0
+    if brush_score > 0.46:
+        oil += 0.30
+    if hf_ratio < 1.26 and s_std > 0.06:
+        oil += 0.18
+    if contr > 0.12:
+        oil += 0.10
+    if sil < 0.07 and k >= 5:
+        oil += 0.12
+    if hf_ratio > 1.18:
+        oil -= 0.14
+    if bokeh > 0.30:
+        oil -= 0.12
+    if s_mean > 0.20 and s_std > 0.09:
+        oil -= 0.08
+    if k >= 7:
+        oil -= 0.08
+    oil = max(0.0, oil)
+
+    # Science infographic / poster-like graphics
+    sci_infog = 0.0
+    if ecoh > 0.36:
+        sci_infog += 0.30
+    if sil > 0.12 and k <= 6:
+        sci_infog += 0.20
+    if straight_score > 0.28:
+        sci_infog += 0.35
+    if s_std < 0.09:
+        sci_infog += 0.15
+
+    poster_like = (
+        (ecoh <= 0.06) and
+        (th >= 0.10) and
+        (hf_ratio < 0.90) and
+        (k <= 4) and
+        (sil >= 0.45) and
+        (s_mean >= 0.32) and
+        (s_std >= 0.18) and
+        (straight_score < 0.12) and
+        (dots < 0.6)
+    )
+    if poster_like:
+        sci_infog += 0.28
+        comic = max(0.0, comic - 0.12)
+
+    sci_infog = max(0.0, sci_infog)
+
+    # Watercolor
+    watercolor = 0.0
+    if s_mean < 0.22 and s_std < 0.07:
+        watercolor += 0.30
+    if th < 0.018 and ed < 0.04:
+        watercolor += 0.25
+    if hf_ratio < 1.12:
+        watercolor += 0.20
+    if sil < 0.08 and k <= 6:
+        watercolor += 0.25
+    watercolor = max(0.0, watercolor)
+
+    # Technical drawing
+    technical = 0.0
+    if straight_score > 0.32:
+        technical += 0.45
+    if ecoh > 0.32:
+        technical += 0.25
+    if gray_ratio > 0.45 or s_std < 0.06:
+        technical += 0.20
+    if ed > 0.028 and th < 0.02:
+        technical += 0.10
+    technical = max(0.0, technical)
+
+    # Scribble/sketches
+    scribble = 0.0
+    if s_mean < 0.14 and s_std < 0.055 and k <= 4:
+        scribble += 0.22
+    if ed > 0.052 and ecoh < 0.18 and th < 0.018:
+        scribble += 0.20
+    if hf_ratio < 1.06:
+        scribble += 0.15
+    if bokeh < 0.16:
+        scribble += 0.08
+
+    photo_like = int(hf_ratio > 1.15) + int(bokeh > 0.26) + int(s_mean > 0.20 and s_std > 0.09) + int(k >= 7)
+    comic_like = int(ecoh >= 0.20) + int(0.012 < th < 0.060) + int(hf_ratio < 1.12) + int(bokeh < 0.22)
+    if photo_like >= 2:
+        scribble -= 0.30
+    if comic_like >= 3 and s_mean >= 0.16:
+        scribble -= 0.25
+    scribble = max(0.0, scribble)
+
+    scores = {
+        "comic": float(min(1.0, comic)),
+        "manga": float(min(1.0, manga)),
+        "photo": float(min(1.0, photo)),
+        "science illustration/infographic": float(min(1.0, sci_infog)),
+        "classical oil painting": float(min(1.0, oil)),
+        "watercolor": float(min(1.0, watercolor)),
+        "children sketches": float(min(1.0, child_sketch)),
+        "technical drawing/technical sketch": float(min(1.0, technical)),
+        "scribble/sketches": float(min(1.0, scribble)),
+    }
+    primary = max(scores, key=scores.get)
+
+    return StyleAnalysis(
+        edge_density=ed,
+        edge_coherence=ecoh,
+        edge_thickness_score=th,
+        saturation_mean=s_mean,
+        saturation_std=s_std,
+        color_clusters=k,
+        color_silhouette=sil,
+        contrast=contr,
+        grayscale_ratio=gray_ratio,
+        grain_score=grain,
+        hf_ratio=hf_ratio,
+        dot_pattern_score=dots,
+        straight_line_score=straight_score,
+        brush_texture_score=brush_score,
+        bokeh_score=bokeh,
+        class_scores=scores,
+        primary_class=primary,
+    )
+
+
+def _base_descriptors_for_class(a: StyleAnalysis) -> List[str]:
+    c = a.primary_class
+    d: List[str] = []
+
+    if c == "comic":
+        d.append("clear line art" if a.edge_coherence < 0.34 or a.edge_thickness_score < 0.03 else "bold outlines")
+        d.append("flat colors" if a.saturation_mean < 0.18 and a.saturation_std < 0.06 and a.color_clusters <= 5 else "balanced palette")
+        if a.contrast > 0.16:
+            d.append("high contrast")
+        if a.dot_pattern_score > 0.9:
+            d.append("screen-tone dots")
+        if a.hf_ratio < 1.1 and a.grain_score < 70.0:
+            d.append("clean finish")
+
+    elif c == "manga":
+        d += ["monochrome", "clear line art"]
+        if a.dot_pattern_score > 0.8:
+            d.append("halftone shading")
+        if a.contrast > 0.15:
+            d.append("high contrast")
+        if a.hf_ratio < 1.15:
+            d.append("clean finish")
+
+    elif c == "photo":
+        d.append("natural lighting")
+        if a.hf_ratio > 1.20:
+            d.append("fine detail")
+        d.append("smooth gradients")
+        if a.saturation_std > 0.1:
+            d.append("rich colors")
+        if a.bokeh_score > 0.30:
+            d.append("shallow depth of field")
+
+    elif c == "science illustration/infographic":
+        d += ["thin precise lines", "flat colors", "clean layout"]
+        if a.straight_line_score > 0.35:
+            d.append("geometric accuracy")
+        if a.saturation_std < 0.08:
+            d.append("limited palette")
+
+    elif c == "classical oil painting":
+        d += ["brush textures", "rich tones", "soft transitions"]
+        if a.brush_texture_score > 0.45:
+            d.append("impasto strokes")
+
+    elif c == "watercolor":
+        d += ["soft washes", "bleeding edges", "delicate tones"]
+        if a.saturation_mean < 0.2:
+            d.append("pastel palette")
+
+    elif c == "children sketches":
+        d += ["simple shapes", "thin uneven lines", "playful composition"]
+
+    elif c == "technical drawing/technical sketch":
+        d += ["precise straight lines", "monochrome", "high clarity"]
+
+    else:
+        d += ["loose strokes", "expressive lines", "dynamic texture"]
+
+    out: List[str] = []
+    for x in d:
+        if x not in out:
+            out.append(x)
+    return out[:5]
+
+
+def extract_style_descriptors(image_path: Path, debug: bool = False) -> List[str]:
+    a = analyze_style(image_path)
+    desc = _base_descriptors_for_class(a)
+    if debug:
+        print("[style:debug] primary_class:", a.primary_class)
+        print("[style:debug] class_scores:", a.class_scores)
+        print(
+            "[style:debug] metrics:",
+            f"ed={a.edge_density:.3f}",
+            f"ecoh={a.edge_coherence:.3f}",
+            f"th={a.edge_thickness_score:.3f}",
+            f"s_mean={a.saturation_mean:.3f}",
+            f"s_std={a.saturation_std:.3f}",
+            f"k={a.color_clusters}",
+            f"sil={a.color_silhouette:.3f}",
+            f"contrast={a.contrast:.3f}",
+            f"gray_ratio={a.grayscale_ratio:.3f}",
+            f"grain={a.grain_score:.1f}",
+            f"hf_ratio={a.hf_ratio:.2f}",
+            f"dots={a.dot_pattern_score:.2f}",
+            f"straight={a.straight_line_score:.2f}",
+            f"brush={a.brush_texture_score:.2f}",
+            f"bokeh={a.bokeh_score:.2f}",
+        )
+        print("[style:debug] descriptors:", desc)
+    return desc
+
+def detect_primary_style_label(image_path: Path) -> str:
+    return analyze_style(image_path).primary_class
+
+def extract_style_with_label(image_path: Path, debug: bool = False) -> Tuple[str, List[str]]:
+    a = analyze_style(image_path)
+    desc = _base_descriptors_for_class(a)
+    if debug:
+        print("[style:debug] primary_class:", a.primary_class)
+        print("[style:debug] class_scores:", a.class_scores)
+        print("[style:debug] descriptors:", desc)
+    return a.primary_class, desc
+```
+
+---
+
+### utils/test_comfy_local.py
+
+```py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Testskript für comfyui.py
+- Prüft ComfyUI-Verfügbarkeit auf localhost
+- Lädt optional ein exportiertes ComfyUI-Workflow-JSON und überschreibt dynamische Felder
+- Startet den Job, pollt /history und lädt die erzeugten Bilder herunter
+- Speichert in APP_OUTPUT_DIR (Default: ./outputs/images)
+
+Voraussetzungen:
+- ComfyUI läuft lokal auf 127.0.0.1:8188
+- APP_DISABLE_COMFYUI=0 gesetzt (sonst bricht comfyui.py ab)
+- comfyui.py liegt im gleichen Verzeichnis oder ist importierbar (PYTHONPATH anpassen)
+
+Beispiele:
+  APP_DISABLE_COMFYUI=0 python test_comfy_local.py --prompt "Ein ruhiger See bei Sonnenuntergang" --width 512 --height 512 --steps 20
+  APP_DISABLE_COMFYUI=0 python test_comfy_local.py --workflow ./workflows/text2img.json --prompt "Illustration eines Roboters im Klassenzimmer" --seed 1234
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+# Import des lokalen comfyui-Moduls
+try:
+    import comfyui  # type: ignore
+except Exception as e:
+    print(f"[ERR] Konnte 'comfyui' nicht importieren: {e}")
+    print("       Stelle sicher, dass comfyui.py im selben Ordner liegt, oder setze PYTHONPATH korrekt.")
+    sys.exit(2)
+
+
+def _env_str(k: str, d: str) -> str:
+    return (os.getenv(k, d) or "").strip()
+
+
+def _coalesce_int(a: Optional[int], b: Optional[int], default: int) -> int:
+    for v in (a, b, default):
+        if v is not None:
+            return int(v)
+    return default
+
+
+def _coalesce_float(a: Optional[float], b: Optional[float], default: float) -> float:
+    for v in (a, b, default):
+        if v is not None:
+            return float(v)
+    return default
+
+
+def _load_workflow(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Workflow-Datei nicht gefunden: {path}")
+    with path.open("r", encoding="utf-8") as f:
+        try:
+            data = json.load(f)
+        except Exception as e:
+            raise ValueError(f"Ungültiges Workflow-JSON ({path}): {e}")
+    if not isinstance(data, dict):
+        raise ValueError("Workflow-JSON hat kein Dict als Wurzel.")
+    return data
+
+
+def _try_patch_workflow(
+    wf: Dict[str, Any],
+    prompt: str,
+    *,
+    negative_prompt: Optional[str],
+    seed: Optional[int],
+    width: Optional[int],
+    height: Optional[int],
+    steps: Optional[int],
+    cfg: Optional[float],
+    sampler_name: Optional[str],
+) -> Dict[str, Any]:
+    """
+    Versucht, die üblichen Felder in einem exportierten ComfyUI-Workflow zu überschreiben.
+    Diese Funktion ist defensiv: existieren Knoten/Felder nicht, wird leise übersprungen.
+    """
+    # Häufiger Aufbau: Root-Key "prompt" mit Node-IDs als Strings
+    root = wf.get("prompt", wf)
+    if not isinstance(root, dict):
+        root = wf
+
+    # Hilfsfunktion: Finde alle Nodes eines Typs
+    def nodes_of(class_type: str):
+        for node_id, desc in root.items():
+            if isinstance(desc, dict) and desc.get("class_type") == class_type:
+                yield node_id, desc
+
+    # Positive Prompt (CLIPTextEncode)
+    for node_id, desc in nodes_of("CLIPTextEncode"):
+        try:
+            inputs = desc.get("inputs", {})
+            if isinstance(inputs, dict) and "text" in inputs:
+                inputs["text"] = prompt
+                print(f"[PATCH] CLIPTextEncode@{node_id}.inputs.text gesetzt.")
+                break
+        except Exception:
+            pass
+
+    # Negative Prompt (zweiter CLIPTextEncode oder expliziter negativer Encoder)
+    if negative_prompt:
+        patched = False
+        for node_id, desc in nodes_of("CLIPTextEncode"):
+            try:
+                inputs = desc.get("inputs", {})
+                if isinstance(inputs, dict) and "text" in inputs:
+                    # Heuristik: Negative Prompt in den zweiten Encode schreiben, wenn es >1 gibt
+                    inputs["text"] = negative_prompt
+                    print(f"[PATCH] (neg) CLIPTextEncode@{node_id}.inputs.text gesetzt.")
+                    patched = True
+                    break
+            except Exception:
+                pass
+        if not patched:
+            print("[PATCH] Hinweis: Kein separater negativer Prompt-Knoten erkannt; Überschreibung übersprungen.")
+
+    # Seed, Steps, CFG, Sampler am KSampler
+    for node_id, desc in nodes_of("KSampler"):
+        try:
+            inputs = desc.get("inputs", {})
+            if not isinstance(inputs, dict):
+                continue
+            if seed is not None:
+                inputs["seed"] = int(seed)
+                print(f"[PATCH] KSampler@{node_id}.inputs.seed={seed}")
+            if steps is not None:
+                inputs["steps"] = int(steps)
+                print(f"[PATCH] KSampler@{node_id}.inputs.steps={steps}")
+            if cfg is not None:
+                inputs["cfg"] = float(cfg)
+                print(f"[PATCH] KSampler@{node_id}.inputs.cfg={cfg}")
+            if sampler_name:
+                inputs["sampler_name"] = sampler_name
+                print(f"[PATCH] KSampler@{node_id}.inputs.sampler_name={sampler_name}")
+        except Exception:
+            pass
+
+    # Größe am EmptyLatentImage
+    for node_id, desc in nodes_of("EmptyLatentImage"):
+        try:
+            inputs = desc.get("inputs", {})
+            if not isinstance(inputs, dict):
+                continue
+            if width is not None:
+                inputs["width"] = int(width)
+                print(f"[PATCH] EmptyLatentImage@{node_id}.inputs.width={width}")
+            if height is not None:
+                inputs["height"] = int(height)
+                print(f"[PATCH] EmptyLatentImage@{node_id}.inputs.height={height}")
+            if "batch_size" in inputs and not inputs.get("batch_size"):
+                inputs["batch_size"] = 1
+        except Exception:
+            pass
+
+    return wf
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Lokaler Test für comfyui.py gegen ComfyUI auf localhost.")
+    parser.add_argument("--workflow", type=str, default="", help="Pfad zu einem exportierten ComfyUI-Workflow-JSON")
+    parser.add_argument("--prompt", type=str, required=False, default="A serene landscape lake at sunset, golden hour, high detail, photorealistic",
+                        help="Bildbeschreibung (Prompt)")
+    parser.add_argument("--neg", type=str, default="text, watermark, logo, low quality, bad anatomy, blurry", help="Negativer Prompt")
+    parser.add_argument("--seed", type=int, default=None, help="Seed (optional)")
+    parser.add_argument("--width", type=int, default=512, help="Bildbreite")
+    parser.add_argument("--height", type=int, default=512, help="Bildhöhe")
+    parser.add_argument("--steps", type=int, default=20, help="Sampling-Schritte")
+    parser.add_argument("--cfg", type=float, default=6.0, help="CFG Scale")
+    parser.add_argument("--sampler", type=str, default="dpmpp_2m", help="Sampler-Name (z. B. euler, dpmpp_2m)")
+    parser.add_argument("--timeout", type=float, default=300.0, help="Max. Wartezeit in Sekunden (History Polling)")
+    args = parser.parse_args()
+
+    # ENV-Sanity: APP_DISABLE_COMFYUI
+    disabled = (os.getenv("APP_DISABLE_COMFYUI", "1") or "1").strip()
+    if disabled in {"1", "true", "yes", "on"}:
+        print("[ERR] APP_DISABLE_COMFYUI=1 → ComfyUI ist deaktiviert. Setze APP_DISABLE_COMFYUI=0 und starte erneut.")
+        return 3
+
+    # Verfügbarkeit prüfen
+    import asyncio
+    ok = asyncio.run(comfyui.comfy_available())
+    if not ok:
+        print("[ERR] ComfyUI nicht erreichbar auf 127.0.0.1:8188. Starte ComfyUI und versuche es erneut.")
+        return 4
+
+    # Workflow laden/erstellen
+    wf: Optional[Dict[str, Any]] = None
+    if args.workflow:
+        try:
+            wf = _load_workflow(Path(args.workflow))
+            wf = _try_patch_workflow(
+                wf,
+                prompt=args.prompt,
+                negative_prompt=args.neg or None,
+                seed=args.seed,
+                width=args.width,
+                height=args.height,
+                steps=args.steps,
+                cfg=args.cfg,
+                sampler_name=args.sampler,
+            )
+        except Exception as e:
+            print(f"[ERR] Workflow konnte nicht geladen/gepatcht werden: {e}")
+            return 5
+    else:
+        # Fallback: Verwende den Default-Workflow aus comfyui.py (benötigt passendes SDXL-Checkpoint!)
+        print("[INFO] Kein Workflow-JSON angegeben. Verwende build_default_text2img_workflow() aus comfyui.py.")
+        wf = comfyui.build_default_text2img_workflow(
+            prompt=args.prompt,
+            seed=args.seed,
+            width=args.width,
+            height=args.height,
+            steps=args.steps,
+            cfg=args.cfg,
+            sampler_name=args.sampler,
+        )
+
+    # Job starten
+    print("[RUN] Sende Prompt an ComfyUI…")
+    try:
+        pid = asyncio.run(comfyui.post_prompt(wf))
+        print(f"[RUN] prompt_id = {pid}")
+    except Exception as e:
+        print(f"[ERR] /prompt fehlgeschlagen: {e}")
+        return 6
+
+    # History pollen
+    try:
+        print("[RUN] Pollen von /history …")
+        hist = asyncio.run(comfyui.poll_history_until_done(pid, poll_interval=1.0, max_wait_sec=float(args.timeout)))
+    except Exception as e:
+        print(f"[ERR] Polling fehlgeschlagen/Timeout: {e}")
+        return 7
+
+    # Downloads
+    try:
+        out_dir = Path(_env_str("APP_OUTPUT_DIR", "./outputs/images")).resolve()
+        paths = asyncio.run(comfyui.download_outputs(hist, out_dir))
+        print("[OK] Bilder gespeichert:")
+        for p in paths:
+            print(f" - {p}")
+        return 0
+    except Exception as e:
+        print(f"[ERR] Download der Outputs fehlgeschlagen: {e}")
+        return 8
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+---
+
+### utils/test_pollinations_style_ref_auto_style.py
+
+```py
+# test_pollinations_style_ref_auto_style.py
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+import asyncio
+import base64
+import os
+from pathlib import Path
+from typing import Optional, Dict, Any, Tuple, List
+
+import httpx
+from pydantic import BaseModel, HttpUrl, ValidationError
+
+# We import the analyzer so we can print a consistent "metrics" line.
+# If your style_features.py exposes `analyze_style`, we will use it to print metrics.
+# Otherwise, we still call extract_style_with_label(debug=True), which prints basic logs.
+try:
+    from style_features import analyze_style, extract_style_with_label  # type: ignore
+    _HAVE_ANALYZE = True
+except Exception:
+    from style_features import extract_style_with_label  # type: ignore
+    analyze_style = None  # type: ignore
+    _HAVE_ANALYZE = False
+
+
+def load_dotenv_inline(dotenv_path: Optional[str] = None) -> None:
+    """
+    Minimal .env loader to avoid extra dependencies.
+    Loads key=value pairs unless key already exists in environment.
+    """
+    candidates: List[Path] = []
+    if dotenv_path:
+        candidates.append(Path(dotenv_path))
+    else:
+        candidates.append(Path(".env").resolve())
+        here = Path(__file__).resolve().parent
+        candidates.append(here / ".env")
+        candidates.append(here.parent / ".env")
+    chosen: Optional[Path] = None
+    for p in candidates:
+        if p.exists():
+            chosen = p
+            break
+    if not chosen:
+        return
+    try:
+        for raw in chosen.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if " #" in val:
+                val = val.split(" #", 1)[0].strip()
+            if key and key not in os.environ:
+                os.environ[key] = val
+    except Exception:
+        # Keep silent on dotenv parse errors to avoid breaking tests
+        pass
+
+
+load_dotenv_inline()
+
+# Pollinations API configuration (read from .env when available)
+POLL_BASE = (os.getenv("POLLINATIONS_API_BASE", "https://gen.pollinations.ai") or "").rstrip("/")
+POLL_KEY = (os.getenv("POLLINATIONS_SECRET", "") or "").strip()
+V1_EDITS_PATH = os.getenv("POLLINATIONS_V1_IMAGES_EDITS_PATH", "/v1/images/edits")
+IMAGE_MODEL = (os.getenv("POLLINATIONS_IMAGE_MODEL", os.getenv("POLLINATIONS_MODEL", "flux")) or "flux").strip()
+
+# Render dimensions and seed
+APP_IMAGE_WIDTH = int(os.getenv("APP_IMAGE_WIDTH", "1280") or "1280")
+APP_IMAGE_HEIGHT = int(os.getenv("APP_IMAGE_HEIGHT", "720") or "720")
+SEED = int(os.getenv("TEST_SEED", "1234") or "1234")
+
+# I/O locations
+STYLE_REFS_DIR = Path(os.getenv("APP_INPUT_DIR", "./outputs/images/refs")).resolve()
+STYLE_FILENAME = os.getenv("TEST_STYLE_REFERENCE", "./donald-duck-102-768x576.jpg")
+STYLE_FILE = (STYLE_REFS_DIR / STYLE_FILENAME).resolve()
+
+OUTPUT_DIR = Path(os.getenv("APP_OUTPUT_DIR", "./outputs/images")).resolve()
+
+# Prompts
+CONTENT_PROMPT = os.getenv("TEST_CONTENT_PROMPT", "Hunde im Weltall").strip()
+NEG_PROMPT = os.getenv("TEST_NEG_PROMPT", "").strip()
+
+# Optional: inject explicit primary style name in the prompt (use responsibly)
+ENABLE_EXPLICIT_STYLE_NAME = os.getenv("TEST_ENABLE_EXPLICIT_STYLE_NAME", "0").strip() not in {"0", "false", "False", ""}
+
+
+class V1ImagesItem(BaseModel):
+    url: Optional[HttpUrl] = None
+    b64_json: Optional[str] = None
+
+
+class V1ImagesResp(BaseModel):
+    data: List[V1ImagesItem] = []
+
+
+def _headers() -> Dict[str, str]:
+    """
+    Build authorization headers for Pollinations.
+    """
+    if not POLL_KEY:
+        raise RuntimeError("POLLINATIONS_SECRET missing (ENV)")
+    return {"Authorization": f"Bearer {POLL_KEY}"}
+
+
+async def _client() -> httpx.AsyncClient:
+    """
+    Create a tuned AsyncClient with HTTP/2, limits, and timeouts.
+    """
+    limits = httpx.Limits(max_connections=8, max_keepalive_connections=8, keepalive_expiry=30.0)
+    timeout = httpx.Timeout(connect=8.0, read=90.0, write=30.0, pool=8.0)
+    return httpx.AsyncClient(limits=limits, timeout=timeout, follow_redirects=True, http2=True)
+
+
+def _edits_endpoint() -> str:
+    """
+    Build full /v1/images/edits endpoint.
+    """
+    path = V1_EDITS_PATH if V1_EDITS_PATH.startswith("/") else "/" + V1_EDITS_PATH
+    return f"{POLL_BASE}{path}"
+
+
+def _mime_for(name: str) -> str:
+    """
+    Return a suitable MIME type for a given filename.
+    """
+    n = name.lower()
+    if n.endswith(".jpg") or n.endswith(".jpeg"):
+        return "image/jpeg"
+    if n.endswith(".png"):
+        return "image/png"
+    if n.endswith(".webp"):
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def _parse_v1_images_response(resp: httpx.Response) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Parse the Pollinations V1 images response. Prefer Pydantic parsing, but
+    handle relaxed shapes as well.
+    """
+    try:
+        js = resp.json()
+        parsed = V1ImagesResp(**js)
+        if parsed.data:
+            return (str(parsed.data[0].url) if parsed.data[0].url else None, parsed.data[0].b64_json)
+    except ValidationError:
+        try:
+            js = resp.json()
+            image_url = js.get("url") or ((js.get("data") or [{}])[0] or {}).get("url")
+            b64 = ((js.get("data") or [{}])[0] or {}).get("b64_json") or js.get("b64_json")
+            return (image_url, b64)
+        except Exception:
+            pass
+    return (None, None)
+
+
+def _ensure_dir(p: Path) -> None:
+    """
+    Ensure the directory exists (mkdir -p).
+    """
+    p.mkdir(parents=True, exist_ok=True)
+
+
+async def save_result(image_url: Optional[str], b64: Optional[str], out_dir: Path) -> Path:
+    """
+    Save the generated image from either a URL or a base64 payload. Returns output path.
+    """
+    _ensure_dir(out_dir)
+    if image_url:
+        async with await _client() as client:
+            r = await client.get(image_url)
+            r.raise_for_status()
+            data = r.content
+    elif b64:
+        data = base64.b64decode(b64.split(",", 1)[1] if "," in b64 else b64, validate=True)
+    else:
+        raise RuntimeError("No image_url or b64_json returned")
+
+    import hashlib
+    digest = hashlib.sha1(data).hexdigest()
+    out_path = out_dir / f"{digest}.png"
+    out_path.write_bytes(data)
+    print(f"[save] wrote {out_path}")
+    return out_path
+
+
+async def call_v1_images_edits_multipart(
+    prompt: str,
+    image_file: Path,
+    *,
+    width: int,
+    height: int,
+    negative_prompt: str = "",
+    seed: int = 1234,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Call the V1 /images/edits endpoint using multipart form data with the style reference image.
+    """
+    if not image_file.exists():
+        raise FileNotFoundError(image_file)
+    mime = _mime_for(image_file.name)
+    files: Dict[str, Any] = {
+        "prompt": (None, prompt),
+        "response_format": (None, "url"),
+        "n": (None, "1"),
+        "model": (None, IMAGE_MODEL),
+        "size": (None, f"{width}x{height}"),
+        "image": (image_file.name, image_file.read_bytes(), mime),
+        "seed": (None, str(seed)),
+    }
+    if negative_prompt:
+        files["negative_prompt"] = (None, negative_prompt)
+
+    async with await _client() as client:
+        print(f"[pollinations:mp] POST {_edits_endpoint()} model={IMAGE_MODEL} size={width}x{height}")
+        print(f"[pollinations:mp] prompt(content-only + auto-style)={prompt[:200]}")
+        resp = await client.post(_edits_endpoint(), headers=_headers(), files=files)
+        print(f"[pollinations:mp] status {resp.status_code}")
+        if resp.status_code >= 400:
+            raise RuntimeError(f"pollinations multipart error {resp.status_code}: {resp.text[:500]}")
+        return _parse_v1_images_response(resp)
+
+
+def _format_metrics_line(a: Any) -> str:
+    """
+    Format a compact metrics line from the StyleAnalysis dataclass.
+    Requires 'analyze_style' to be available and to return a StyleAnalysis.
+    """
+    return " ".join([
+        f"ed={a.edge_density:.3f}",
+        f"ecoh={a.edge_coherence:.3f}",
+        f"th={a.edge_thickness_score:.3f}",
+        f"s_mean={a.saturation_mean:.3f}",
+        f"s_std={a.saturation_std:.3f}",
+        f"k={a.color_clusters}",
+        f"sil={a.color_silhouette:.3f}",
+        f"contrast={a.contrast:.3f}",
+        f"gray_ratio={a.grayscale_ratio:.3f}",
+        f"grain={a.grain_score:.1f}",
+        f"hf_ratio={a.hf_ratio:.2f}",
+        f"dots={a.dot_pattern_score:.2f}",
+        f"straight={a.straight_line_score:.2f}",
+        f"brush={a.brush_texture_score:.2f}",
+        f"bokeh={a.bokeh_score:.2f}",
+    ])
+
+
+def build_auto_style_prompt(content: str, ref_path: Path) -> str:
+    """
+    Build the final prompt by combining content and detected style descriptors.
+    Also prints a consistent 'metrics' line when possible.
+    """
+    # If we have analyze_style, compute full metrics and print them in a single line
+    if _HAVE_ANALYZE and analyze_style is not None:
+        a = analyze_style(ref_path)
+        print("[style:debug] primary_class:", a.primary_class)
+        print("[style:debug] class_scores:", a.class_scores)
+        # Always print the compact metrics line for threshold tuning
+        print("[style:debug] metrics:", _format_metrics_line(a))
+        # Derive short descriptors mapped to class (re-use existing helper via label+descriptors)
+        # We still call extract_style_with_label for descriptor generation (and optional extra logs)
+        primary_label, desc = a.primary_class, []  # fill below
+        try:
+            # Call without debug spam to avoid duplicate lines; we already printed metrics above
+            from style_features import _base_descriptors_for_class  # type: ignore
+            desc = _base_descriptors_for_class(a)
+        except Exception:
+            # Fallback: use extract_style_with_label(debug=False) to obtain descriptors
+            try:
+                primary_label, desc = extract_style_with_label(ref_path, debug=False)
+            except Exception:
+                primary_label, desc = a.primary_class, []
+    else:
+        # Fallback: rely on extract_style_with_label to print basic logs
+        primary_label, desc = extract_style_with_label(ref_path, debug=True)
+
+    # Optionally inject explicit style name (use responsibly)
+    explicit_name = primary_label
+    parts: List[str] = [content]
+    if desc:
+        parts.append(", ".join(desc))
+    if explicit_name and ENABLE_EXPLICIT_STYLE_NAME:
+        parts.append(f"(style: {explicit_name})")
+    return ". ".join([p for p in parts if p])
+
+
+async def main() -> None:
+    """
+    Entrypoint: detect style, build prompt, call Pollinations, save result.
+    """
+    print("=== Pollinations V1 Auto-Style Test (multipart) ===")
+    print(f"- Using: MODEL={IMAGE_MODEL} ENDPOINT={_edits_endpoint()}")
+    print(f"- Ref: {STYLE_FILE}")
+    if not STYLE_FILE.exists():
+        raise FileNotFoundError(f"Style file not found at {STYLE_FILE}")
+    _ = _headers()
+
+    prompt = build_auto_style_prompt(CONTENT_PROMPT, STYLE_FILE)
+
+    img_url, b64 = await call_v1_images_edits_multipart(
+        prompt=prompt,
+        image_file=STYLE_FILE,
+        width=APP_IMAGE_WIDTH,
+        height=APP_IMAGE_HEIGHT,
+        negative_prompt=NEG_PROMPT,
+        seed=SEED,
+    )
+    print(f"[result] url={bool(img_url)} b64={bool(b64)}")
+    out = await save_result(img_url, b64, OUTPUT_DIR)
+    print(f"[result] saved: {out}")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
+```
+
+---
+
+### utils/verify_runtime.py
+
+```py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+verify_runtime.py
+
+Purpose:
+- Compare critical audio/Whisper settings between your UI (.env used by FastAPI app)
+  and this test script.
+- Perform a 3s probe recording using the configured device/sample rate.
+- Print recommended .env values to align the UI behavior with the test setup.
+
+Notes:
+- This script does not start any network services and stays local.
+- It is safe to run multiple times.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import json
+from pathlib import Path
+from typing import Dict, Any, Optional
+
+import numpy as np
+import sounddevice as sd
+
+
+def _env_load_dotenv_inline(dotenv_path: Path) -> None:
+    """
+    Lightweight .env loader:
+    - Reads KEY=VALUE pairs.
+    - Ignores comments and blank lines.
+    - Does not override values already set in the environment.
+    """
+    if not dotenv_path.is_file():
+        return
+    for raw in dotenv_path.read_text(encoding="utf-8").splitlines():
+        s = raw.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        # Support leading `export KEY=VALUE`
+        if s.lower().startswith("export "):
+            s = s[7:].strip()
+        k, v = s.split("=", 1)
+        k = k.strip()
+        v = v.strip().strip("'").strip('"')
+        os.environ.setdefault(k, v)
+
+
+def env_str(k: str, d: str) -> str:
+    """Read string from env with default."""
+    v = os.getenv(k)
+    return v.strip() if v is not None else d
+
+
+def env_int(k: str, d: int) -> int:
+    """Read int from env with default and safe casting."""
+    v = os.getenv(k)
+    try:
+        return int(v) if v is not None else d
+    except Exception:
+        return d
+
+
+def env_float(k: str, d: float) -> float:
+    """Read float from env with default and safe casting."""
+    v = os.getenv(k)
+    try:
+        return float(v) if v is not None else d
+    except Exception:
+        return d
+
+
+def resample_to_16k(x: np.ndarray, sr: int) -> np.ndarray:
+    """
+    Very simple linear resampler to 16 kHz mono float32.
+    - Assumes x is 1D float waveform in [-1, 1].
+    - For quick diagnostics (not high-fidelity SRC).
+    """
+    if x.size == 0:
+        return np.array([], dtype=np.float32)
+    if sr == 16000:
+        return x.astype(np.float32, copy=False)
+    # Compute target length proportional to sample rate ratio
+    tgt = int(round(x.shape[0] * (16000.0 / float(sr))))
+    if tgt <= 0:
+        return np.array([], dtype=np.float32)
+    # Map input to [0,1), then interpolate to new grid
+    t_in = np.linspace(0.0, 1.0, num=x.shape[0], endpoint=False, dtype=np.float64)
+    t_out = np.linspace(0.0, 1.0, num=tgt, endpoint=False, dtype=np.float64)
+    y = np.interp(t_out, t_in, x.astype(np.float64, copy=False))
+    return y.astype(np.float32, copy=False)
+
+
+def pick_input_device(prefer_name: Optional[str]) -> int:
+    """
+    Select a suitable input device index for recording.
+    Strategy:
+    1) Exact name match with input channels > 0.
+    2) Substring match (case-insensitive).
+    3) Prefer PulseAudio/PipeWire devices on Linux.
+    4) First device with input channels > 0.
+    Raises RuntimeError if none found.
+    """
+    devs = sd.query_devices()
+    if prefer_name:
+        for i, d in enumerate(devs):
+            if d.get("name") == prefer_name and d.get("max_input_channels", 0) > 0:
+                return i
+        pl = prefer_name.lower()
+        for i, d in enumerate(devs):
+            if pl in (d.get("name", "").lower()) and d.get("max_input_channels", 0) > 0:
+                return i
+    # Heuristics for Linux desktop
+    for i, d in enumerate(devs):
+        nm = (d.get("name") or "").lower()
+        if ("pulse" in nm or "pipewire" in nm) and d.get("max_input_channels", 0) > 0:
+            return i
+    # Any input-capable device
+    for i, d in enumerate(devs):
+        if d.get("max_input_channels", 0) > 0:
+            return i
+    raise RuntimeError("No input device with input channels found")
+
+
+def main() -> None:
+    # Try to load .env from current working directory if not already exported
+    dotenv = Path(".env")
+    _env_load_dotenv_inline(dotenv)
+
+    # Collect critical parameters (matching the UI/env expectations)
+    cfg: Dict[str, Any] = {
+        "APP_AUDIO_DEVICE": env_str("APP_AUDIO_DEVICE", ""),
+        "APP_SAMPLE_RATE": env_int("APP_SAMPLE_RATE", 48000),
+        "APP_FRAME_DURATION_MS": env_int("APP_FRAME_DURATION_MS", 20),
+        "APP_DISABLE_VAD": env_int("APP_DISABLE_VAD", 0),
+        "APP_RMS_VAD_THRESHOLD": env_float("APP_RMS_VAD_THRESHOLD", 0.035),
+        "APP_SNAPSHOT_SEC": env_float("APP_SNAPSHOT_SEC", 3.5),
+        "APP_MAX_SILENCE_MS": env_int("APP_MAX_SILENCE_MS", 300),
+        "APP_WHISPER_MODEL_PATH": env_str("APP_WHISPER_MODEL_PATH", ""),
+        "APP_WHISPER_LANGUAGE": env_str("APP_WHISPER_LANGUAGE", "de"),
+        "APP_WHISPER_THREADS": env_int("APP_WHISPER_THREADS", 4),
+        "APP_WHISPER_TEMPERATURE": env_float("APP_WHISPER_TEMPERATURE", 0.0),
+    }
+
+    print("[RUNTIME] Current .env / ENV values:")
+    for k, v in cfg.items():
+        print(f"  - {k} = {v}")
+
+    # Sanity check: whisper.cpp model file present?
+    mp = Path(cfg["APP_WHISPER_MODEL_PATH"])
+    if not mp.is_file():
+        print(f"[ERR] Whisper model not found: {mp}")
+        print("      Set APP_WHISPER_MODEL_PATH to a valid ggml/gguf model file (e.g., ggml-base.bin).")
+        return
+
+    # 3 s probe recording with the configured device and sample rate
+    prefer = cfg["APP_AUDIO_DEVICE"] or None
+
+    try:
+        idx = pick_input_device(prefer)
+    except Exception as e:
+        print(f"[ERR] Could not select an input device: {e}")
+        print("      Tip: Set APP_AUDIO_DEVICE to the exact device name from sounddevice.query_devices().")
+        return
+
+    try:
+        name = sd.query_devices()[idx]["name"]
+    except Exception:
+        name = f"idx:{idx}"
+
+    sd.default.device = (idx, None)
+    sr = int(cfg["APP_SAMPLE_RATE"])
+
+    print(f"[AUDIO] Probe record 3s @ {sr} Hz, device {idx}:{name!r}")
+    try:
+        rec = sd.rec(int(3.0 * sr), samplerate=sr, channels=1, dtype="float32")
+        sd.wait()
+    except Exception as e:
+        print(f"[ERR] Recording failed: {e}")
+        print("      Hints:")
+        print("       - Check microphone permissions (OS privacy settings).")
+        print("       - On Linux, ensure ALSA/PulseAudio/PipeWire is configured.")
+        print("       - Try a different device or sample rate (e.g., 16000 or 48000).")
+        return
+
+    x = rec[:, 0] if rec.size else np.array([], dtype=np.float32)
+    peak = float(np.max(np.abs(x))) if x.size else 0.0
+    rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
+    print(f"[AUDIO] Peak={peak:.3f} RMS={rms:.3f} samples={x.shape[0]}")
+
+    if peak < 0.01:
+        print("[HINT] Very low signal. Increase mic gain or lower APP_RMS_VAD_THRESHOLD (e.g., 0.02–0.03).")
+
+    # Quick resample to 16 kHz to emulate whisper.cpp input constraints
+    x16 = resample_to_16k(x, sr)
+    if x16.size == 0:
+        print("[ERR] Resampling produced an empty buffer.")
+        return
+
+    # Derive simple recommendations to align UI behavior to this recording
+    print("\n[RECOMMEND] Set these values to approximate UI ≈ test script behavior:")
+    recs: Dict[str, Any] = {
+        "APP_DISABLE_VAD": 0,
+        "APP_RMS_VAD_THRESHOLD": 0.035 if peak >= 0.1 else 0.02,
+        "APP_SNAPSHOT_SEC": 3.0,
+        "APP_MAX_SILENCE_MS": 300,
+        "APP_FRAME_DURATION_MS": 20,
+        "APP_WHISPER_TEMPERATURE": 0.0,
+    }
+    for k, v in recs.items():
+        print(f"  {k}={v}")
+
+    # Compact checklist to verify end-to-end audio path in the UI
+    print("\n[CHECKLIST]")
+    print("  1) UI logs should show: '[AUDIO] open OK' and NOT 'switching to polling read() loop'.")
+    print("  2) VAD active (disable_vad=False / webrtc_vad=True if installed).")
+    print("  3) '[WHISPER] text:' should emit only for segments with Peak>=0.01; quiet frames filtered.")
+    print("  4) SNAPSHOT_SEC 3.0–3.5; first snapshot deadline ~1.0–1.2s.")
+
+    # Optional: JSON summary for CI usage (enable with ENV VERIFY_JSON=1)
+    if os.getenv("VERIFY_JSON", "0").strip() in {"1", "true", "yes"}:
+        out: Dict[str, Any] = {
+            "config": cfg,
+            "audio": {"device_index": idx, "device_name": name, "sr": sr, "peak": peak, "rms": rms, "n": int(x.shape[0])},
+            "recommend": recs,
+        }
+        print(json.dumps(out, ensure_ascii=False))
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+### vram_scheduler.py
+
+```py
+# vram_scheduler.py
+
+
+import time
+import torch
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional
+
+from slaidshow.config_generator import TIERS
+
+
+class GpuState(Enum):
+    IDLE = "idle"
+    LLM_ACTIVE = "llm_active"
+    IMAGE_ACTIVE = "image_active"
+    TRANSITIONING = "transitioning"
+
+
+@dataclass
+class SchedulerConfig:
+    vram_budget_mb: int
+    parallel: bool
+    transition_timeout_s: float = 5.0
+
+
+class VramScheduler:
+    """
+    Steuert die GPU-Zuweisung zwischen LLM und ComfyUI.
+    Bei parallel=True (≥12GB) ist dies ein No-Op.
+    """
+
+    def __init__(self, config: SchedulerConfig):
+        self.config = config
+        self.state = GpuState.IDLE
+        self._llm_loaded = False
+        self._image_loaded = False
+
+    @property
+    def is_parallel(self) -> bool:
+        return self.config.parallel
+
+    async def acquire_llm(self) -> None:
+        """GPU für LLM-Inferenz reservieren."""
+        if self.is_parallel:
+            return
+        self._ensure_image_unloaded()
+        self.state = GpuState.LLM_ACTIVE
+        self._llm_loaded = True
+
+    async def release_llm(self) -> None:
+        """LLM-VRAM freigeben."""
+        if self.is_parallel:
+            return
+        self._llm_loaded = False
+        torch.cuda.empty_cache()
+        self.state = GpuState.IDLE
+
+    async def acquire_image(self) -> None:
+        """GPU für Bildgenerierung reservieren."""
+        if self.is_parallel:
+            return
+        self._ensure_llm_unloaded()
+        self.state = GpuState.IMAGE_ACTIVE
+        self._image_loaded = True
+
+    async def release_image(self) -> None:
+        """ComfyUI-VRAM freigeben."""
+        if self.is_parallel:
+            return
+        self._image_loaded = False
+        torch.cuda.empty_cache()
+        self.state = GpuState.IDLE
+
+    def _ensure_llm_unloaded(self) -> None:
+        if self._llm_loaded:
+            self.release_llm_sync()
+
+    def _ensure_image_unloaded(self) -> None:
+        if self._image_loaded:
+            self.release_image_sync()
+
+    def release_llm_sync(self) -> None:
+        self._llm_loaded = False
+        torch.cuda.empty_cache()
+
+    def release_image_sync(self) -> None:
+        self._image_loaded = False
+        torch.cuda.empty_cache()
+
+    def get_status(self) -> dict:
+        return {
+            "state": self.state.value,
+            "parallel": self.config.parallel,
+            "llm_loaded": self._llm_loaded,
+            "image_loaded": self._image_loaded,
+        }
+```
+
+---
+
+### web/index.html
+
+```html
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <title>slAIdshow | Local Speech-to-Image Pipeline</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --text: #e7eaf0;
+      --muted: #a9b2c3;
+      --accent: #5ac8fa;
+      --danger: #ff5f56;
+      --ok: #3ddc84;
+      --btn: #232734;
+      --border: #262b36;
+      --panel2: #1b202a;
+      --warn: #ffd966;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Inter, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 10;
+    }
+    .brand { font-weight: 600; letter-spacing: .2px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; }
+    button, .btn {
+      background: var(--btn); color: var(--text);
+      border: 1px solid #2c3140; padding: 8px 12px; border-radius: 8px;
+      cursor: pointer; display: inline-flex; align-items: center; gap: 8px;
+      transition: background .15s ease, border-color .15s ease, transform .02s;
+    }
+    button:hover { background: #2a3041; border-color: #3a4052; }
+    button:active { transform: translateY(1px); }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .btn-ok { border-color: #2d4a3b; }
+    .btn-danger { border-color: #5a2d2d; color: #ffdada; }
+    .status {
+      color: var(--muted); font-size: 13px; padding: 4px 8px; border-radius: 6px; background: #11141a; border: 1px solid var(--border);
+    }
+    main { padding: 16px; padding-bottom: 56px; display: grid; gap: 16px; grid-template-columns: 1fr; }
+    .grid {
+      display: grid; gap: 16px;
+      grid-template-columns: 1.3fr .7fr;
+    }
+    @media (max-width: 1000px) { .grid { grid-template-columns: 1fr; } }
+    .card {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+    }
+    .card h3 {
+      margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: 14px; color: #cfd6e6;
+      background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(0,0,0,0));
+      display: flex; align-items: center; gap: 8px;
+    }
+    .card .body { padding: 12px; }
+    #image-viewer {
+      background: #0c0e12; border: 1px solid #232838; border-radius: 12px;
+      min-height: 360px; display: grid; place-items: center; position: relative; overflow: hidden;
+    }
+    #current-image {
+      max-width: 100%; max-height: 80vh; object-fit: contain; display: block; width: auto; height: auto; cursor: zoom-in;
+      transition: opacity .2s ease; opacity: 0;
+    }
+    #current-image.loaded { opacity: 1; }
+    #image-viewer .caption {
+      position: absolute; left: 12px; bottom: 12px; padding: 6px 10px; background: rgba(0,0,0,0.45);
+      border-radius: 8px; color: #e6e6e6; font-size: 12px; backdrop-filter: blur(6px); max-width: calc(100% - 24px);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    #image-viewer:fullscreen { background: #000; }
+    #image-viewer:fullscreen #current-image { max-width: 100vw; max-height: 100vh; cursor: zoom-out; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    input[type="text"], input[type="number"], textarea, select, input[type="url"], input[type="file"] {
+      background: #0e1118; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; outline: none;
+    }
+    input[type="text"], input[type="url"], textarea { width: 100%; }
+    input[type="number"] { width: 110px; }
+    textarea { min-height: 80px; resize: vertical; }
+    .log {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px; color: #c5cad6; background: #0d1016; border: 1px solid var(--border);
+      padding: 8px; border-radius: 8px; max-height: 240px; overflow: auto; white-space: pre-wrap;
+    }
+    .inline-input-line{display:flex;gap:8px;align-items:center}
+    .inline-input-line input{flex:1}
+    .pill { font-size: 12px; color: #cfd6e6; background: #0e121a; border: 1px solid var(--border); padding: 4px 8px; border-radius: 999px; }
+    .right { margin-left: auto; }
+    select.lang {
+      background: var(--btn); color: var(--text); border: 1px solid #2c3140; border-radius: 8px; padding: 6px 10px;
+    }
+    .warn { color: var(--warn); }
+    .mono { font-family: ui-monospace; font-size: 11px; }
+    .subtle { color: var(--muted); font-size: 12px; }
+    .footer-hud {
+      position: fixed; left: 10px; bottom: 10px; z-index: 20; font-size: 12px; color: var(--muted);
+      background: rgba(0,0,0,0.35); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+      backdrop-filter: blur(6px); display: flex; gap: 10px; align-items: center; pointer-events: auto;
+    }
+    .footer-hud a { color: #9ecbff; text-decoration: none; }
+    .footer-hud a:hover { text-decoration: underline; }
+
+    .remote-block {
+      background: var(--panel2);
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      margin: 8px 0 2px 0;
+    }
+    .remote-grid {
+      display: grid;
+      grid-template-columns: 2fr 0.7fr 1fr auto;
+      gap: 8px;
+      align-items: end;
+    }
+    .hidden { display: none !important; }
+    #vision-hint { color: var(--warn); }
+    .bridge-status { font-size:12px; color: var(--muted); }
+
+    .remote-head {
+      display:flex; align-items:center; justify-content: space-between;
+      gap: 8px; margin-bottom: 6px;
+    }
+    .remote-head .title {
+      display:flex; align-items:center; gap:8px; font-weight:600; color:#cfd6e6;
+    }
+    .remote-head .actions {
+      display:flex; align-items:center; gap:8px;
+    }
+
+    /* inline toggle look (used by existing Direct live and the new Low-End toggle) */
+    .toggle {
+      display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+      padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: #10141b;
+    }
+    .toggle input { transform: scale(1.05); }
+    .muted { color: var(--muted); }
+
+    /* Gallery styles */
+    .gallery-controls { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+    #thumbs {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+      gap: 8px;
+    }
+    .thumb {
+      position: relative;
+      border: 1px solid var(--border);
+      background: #0b0e14;
+      border-radius: 8px;
+      overflow: hidden;
+      height: 96px;
+      cursor: pointer;
+    }
+    .thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      filter: saturate(1);
+      transition: transform .15s ease, filter .15s ease, opacity .2s ease;
+    }
+    .thumb:hover img { transform: scale(1.02); filter: saturate(1.15); }
+    .thumb .name {
+      position: absolute; left: 4px; right: 4px; bottom: 4px;
+      font-size: 10px; color: #dfe6f3; background: rgba(0,0,0,0.45);
+      padding: 2px 4px; border-radius: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand" id="brand-title">slAIdshow | Lokale Speech-to-Image Pipeline</div>
+    <div class="toolbar">
+      <span class="status" id="status">Verbinde…</span>
+      <select id="lang-select" class="lang" title="Language">
+        <option value="de">Deutsch</option>
+        <option value="en">English</option>
+      </select>
+      <button id="btn-fullscreen" type="button" title="Vollbild">
+        <span id="fs-icon-enter">⤢</span>
+        <span id="fs-icon-exit" style="display:none;">⤡</span>
+        <span id="fs-label">Vollbild</span>
+      </button>
+      <button id="btn-open-dir" type="button" title="Bilder-Ordner öffnen" class="right">Ordner</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="grid">
+      <section class="card">
+        <h3 id="title-viewer">Bildanzeige</h3>
+        <div class="body">
+          <div id="image-viewer">
+            <img id="current-image" src="" alt="Generiertes Bild" />
+            <div class="caption" id="img-caption">Kein Bild</div>
+          </div>
+          <div class="row" style="margin-top:10px;">
+            <!-- NEW: Low-End toggle (only addition) -->
+            <label class="toggle" id="lowend-toggle-wrap" title="Low-End-Modus: Latenz-optimierte Transkription für schwächere CPUs">
+              <input type="checkbox" id="toggle-lowend" />
+              <span>Low-End</span>
+            </label>
+            <!-- END NEW -->
+
+            <button id="btn-start" class="btn-ok">Aufnahme starten</button>
+            <button id="btn-stop" class="btn-danger">Stop</button>
+
+            <!-- NEW: optional, minimal status pill -->
+            <span class="pill" id="lowend-pill" style="display:none;">Low-End: off</span>
+            <!-- END NEW -->
+
+            <span class="pill" id="ollama-pill">Ollama: ?</span>
+            <span class="pill" id="poll-pill">Images: ?</span>
+            <span class="pill" id="sr-pill">SR: ?</span>
+            <span class="pill" id="size-pill">Size: ?</span>
+          </div>
+
+          <!-- Galerie -->
+          <section class="card" style="margin-top:12px;">
+            <h3 id="title-gallery">Galerie</h3>
+            <div class="body">
+              <div class="gallery-controls">
+                <button id="btn-refresh-gallery" title="Neu laden">Neu laden</button>
+                <span class="subtle" id="gallery-hint"></span>
+              </div>
+              <div id="thumbs" aria-live="polite"></div>
+            </div>
+          </section>
+          <!-- ENDE Galerie -->
+        </div>
+      </section>
+
+      <aside class="card">
+        <h3 id="title-controls">Steuerung & Logs</h3>
+        <div class="body">
+          <div class="row" style="margin-bottom:8px;">
+            <label for="backend-select" style="min-width:120px;" id="label-backend">Image-Backend</label>
+            <select id="backend-select" title="Image-Backend wählen">
+              <option value="comfyui-local">ComfyUI (lokal)</option>
+              <option value="comfyui-remote">ComfyUI (remote)</option>
+              <option value="pollinations">Pollinations (Cloud)</option>
+            </select>
+            <button id="btn-apply-backend">Anwenden</button>
+            <span id="backend-warn" class="warn" style="display:none;"></span>
+          </div>
+
+          <div id="remote-config" class="remote-block hidden">
+            <div class="remote-head">
+              <div class="title"><strong id="remote-title">ComfyUI (cloudflared)</strong><span id="remote-subtitle" class="subtle"></span></div>
+              <div class="actions">
+                <button id="btn-bridge-pull" title="Load from PULL_URL">PULL-URL</button>
+              </div>
+            </div>
+
+            <div class="remote-grid">
+              <div>
+                <label for="remote-host" class="subtle" id="label-remote-host">Remote Host</label>
+                <input id="remote-host" type="text" placeholder="abcdef.trycloudflare.com" />
+              </div>
+              <div>
+                <label for="remote-port" class="subtle" id="label-remote-port">Port</label>
+                <input id="remote-port" type="number" min="1" max="65535" value="443" />
+              </div>
+              <div>
+                <label for="remote-scheme" class="subtle" id="label-remote-scheme">Scheme</label>
+                <select id="remote-scheme">
+                  <option value="https" selected>https</option>
+                  <option value="http">http</option>
+                </select>
+              </div>
+              <div>
+                <button id="btn-remote-test" title="Test /history auf Remote">Test</button>
+              </div>
+            </div>
+            <div id="remote-test-status" class="subtle" style="margin-top:6px;"></div>
+            <div id="bridge-status" class="bridge-status" style="margin-top:6px;"></div>
+          </div>
+
+          <div id="workflow-block" style="display:none;">
+            <div class="row" style="margin-bottom:8px;">
+              <label for="workflow-select" style="min-width:120px;" id="label-workflow">Workflow</label>
+              <select id="workflow-select" title="ComfyUI workflow (*.json)"></select>
+              <button id="btn-apply-workflow" title="Apply selected workflow">Übernehmen</button>
+              <span id="wf-warn" class="warn" style="display:none;"></span>
+            </div>
+            <div class="row" style="margin-bottom:8px;">
+              <details style="width:100%;">
+                <summary>Workflow preview</summary>
+                <pre id="workflow-preview" class="log mono" style="max-height:180px; overflow:auto;"></pre>
+              </details>
+            </div>
+          </div>
+
+          <div class="row" style="margin-bottom:8px;">
+            <label for="width-input" style="min-width:120px;" id="label-width">Breite</label>
+            <input id="width-input" type="number" min="64" max="2048" step="64" placeholder="z.B. 768" />
+            <label for="height-input" style="min-width:60px;" id="label-height">Höhe</label>
+            <input id="height-input" type="number" min="64" max="2048" step="64" placeholder="z.B. 768" />
+            <button id="btn-apply-size" title="Größe übernehmen">Übernehmen</button>
+          </div>
+
+          <div id="style-block" style="margin-bottom:10px; border-top:1px dashed var(--border); padding-top:10px;">
+            <div class="row" style="margin-bottom:6px;">
+              <strong id="style-title">Style Controls</strong>
+              <span class="subtle">·</span>
+              <button id="btn-style-deactivate" title="Deactivate all styles"><span id="style-deactivate-label">Deactivate all styles</span></button>
+            </div>
+
+            <div class="inline-input-line" style="margin-bottom:8px;">
+              <input id="style-text" type="text" placeholder="Style prompt (e.g., cinematic lighting, watercolor, matte, 35mm, pastel colors)" />
+              <button id="btn-apply-style-text" title="Apply style text"><span id="style-apply-label">Übernehmen</span></button>
+            </div>
+
+            <div class="row" style="margin-bottom:8px;">
+              <label style="min-width:120px;" id="style-ref-label">Reference</label>
+              <input id="ref-file" type="file" accept="image/*" />
+            </div>
+            <div class="inline-input-line" style="margin-bottom:8px;">
+              <input id="ref-url" type="url" placeholder="https://example.com/your-image.jpg (optional alternative to file upload)" />
+              <button id="btn-load-url" title="Load URL as reference"><span id="style-load-url-label">Laden</span></button>
+            </div>
+
+            <div class="row" style="margin-bottom:8px; align-items: center;">
+              <label style="display:flex; align-items:center; gap:8px;">
+                <input id="toggle-vision" type="checkbox" checked />
+                <span id="style-toggle-vision">Use Ollama vision</span>
+              </label>
+              <span id="vision-hint" class="subtle" style="display:none; margin-left:8px;"></span>
+            </div>
+
+            <div class="log mono" id="style-log" style="max-height:120px;"></div>
+          </div>
+
+          <div class="row" style="margin-bottom:6px;">
+            <strong id="prompt_ui_title">Bild Prompt</strong>
+          </div>
+
+          <div class="inline-input-line" style="margin-bottom:8px;">
+            <input id="plan-input" type="text" placeholder="Text prompt to generate an image" />
+            <!-- Existing direct generate -->
+            <button id="btn-direct">Direct Generate</button>
+          </div>
+
+          <div class="inline-input-line" style="margin-bottom:8%;">
+            <input id="neg-input" type="text" placeholder="Negative Prompt (z.B. low quality, blurry, extra fingers)">
+            <button id="btn-apply-neg" title="Apply negative prompt">Übernehmen</button>
+          </div>
+
+          <div class="row" style="margin-bottom:8px;">
+            <!-- "Send to Ollama" (left) ... and Direct live toggle (right next to it) -->
+            <button id="btn-plan">Senden</button>
+            <label class="toggle right" title="Bypass text LLM; use raw Whisper transcripts">
+              <input type="checkbox" id="toggle-direct-live" />
+              <span id="label-direct-live">Direct live</span>
+            </label>
+          </div>
+
+          <div>
+            <strong id="label-last-prompt">Letzter Prompt</strong>
+            <div class="log" id="prompt-log"></div>
+          </div>
+          <div style="margin-top:10px;">
+            <strong id="label-transcripts">Transkripte</strong>
+            <div class="log" id="transcript-log"></div>
+          </div>
+          <div style="margin-top:10px;">
+            <strong id="label-status">Status</strong>
+            <div class="log" id="status-log"></div>
+            <div class="row" style="margin-top:8px;">
+              <button id="btn-shutdown" class="btn-danger" title="Server beenden">Server beenden</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- Galerie war hier vorher als eigenständige Card; wurde in die linke Card verschoben -->
+  </main>
+
+  <script>
+    // ---------- i18n dictionary ----------
+    const I18N = {
+      de: {
+        brand: "slAIdshow | Lokale Speech-to-Image Pipeline",
+        status_connecting: "Verbinde…",
+        status_connected: "Verbunden",
+        status_ready: "Bereit",
+        status_fullscreen_on: "Vollbild aktiv",
+        status_fullscreen_off: "Bereit",
+        title_viewer: "Bildanzeige",
+        title_controls: "Steuerung & Logs",
+        caption_none: "Kein Bild",
+        fs_enter: "Vollbild",
+        fs_exit: "Verkleinern",
+        btn_open_dir: "Ordner",
+        btn_start: "Aufnahme starten",
+        btn_stop: "Stop",
+        btn_plan: "An Ollama senden",
+        btn_direct: "Direkt generieren",
+        btn_apply_backend: "Anwenden",
+        btn_apply_size: "Übernehmen",
+        btn_apply_neg: "Übernehmen",
+        btn_apply_workflow: "Übernehmen",
+        label_backend: "Image-Backend",
+        label_width: "Breite",
+        label_height: "Höhe",
+        label_workflow: "Workflow",
+        prompt_ui_title: "Bild Prompt",
+        ph_plan: "Text eingeben → Prompt erzeugen und Bild generieren",
+        ph_neg: "Negative Prompt (z.B. low quality, blurry, extra fingers)",
+        label_last_prompt: "Letzter Prompt",
+        label_transcripts: "Transkripte",
+        label_status: "Status",
+        shutdown: "Server beenden",
+        reconnect: "Server verbinden",
+        reconnecting: "Verbinde…",
+        confirm_shutdown: "Server wirklich beenden? Die Seite verliert die Verbindung.",
+        server_offline: "Server offline – bitte Server starten",
+        sse_connecting: "SSE: Verbinde…",
+        sse_connected: "SSE verbunden",
+        sse_disconnected: "SSE getrennt",
+        manual_connect_start: "Manueller Verbindungsversuch gestartet",
+        manual_connect_ok: "Server erreichbar – starte SSE",
+        start_ok: "Aufnahme läuft",
+        start_fail: "Start fehlgeschlagen",
+        stop_ok: "Gestoppt",
+        stop_fail: "Stop fehlgeschlagen",
+        config_error: "Konfig-Fehler",
+        prompt_created: "Prompt erzeugt",
+        shutdown_in_progress: "Server wird beendet…",
+        shutdown_failed: "Shutdown fehlgeschlagen",
+        shutdown_error: "Shutdown-Fehler",
+        backend_warn_cloud_blocked: "Cloud-Backends sind in der Server-Konfiguration deaktiviert.",
+        backend_warn_missing_secret: "Pollinations-Secret fehlt auf dem Server.",
+        backend_switched_ok: "Backend umgeschaltet.",
+        backend_switch_failed: "Umschalten fehlgeschlagen.",
+        size_applied_ok: "Größe übernommen.",
+        size_applied_fail: "Größe konnte nicht übernommen werden。",
+        neg_applied_ok: "Negativer Prompt gespeichert.",
+        neg_applied_fail: "Negativer Prompt konnte nicht gespeichert werden。",
+        wf_applied_ok: "Workflow übernommen.",
+        wf_applied_fail: "Workflow-Übernahme fehlgeschlagen。",
+        wf_list_fail: "Workflows konnten nicht geladen werden。",
+        style_ui_title: "Stil-Steuerung",
+        style_ui_deactivate: "Alle Stile deaktivieren",
+        style_ui_deactivate_title: "Alle Stile deaktivieren",
+        style_ui_text_ph: "Stil-Text (z. B. filmische Beleuchtung, Aquarell, matt, 35mm, Pastellfarben)",
+        style_ui_apply: "Übernehmen",
+        style_ui_apply_title: "Stil-Text anwenden",
+        style_ui_ref_label: "Referenz",
+        style_ui_ref_url_ph: "https://example.com/dein-bild.jpg (Alternative zum Datei-Upload)",
+        style_ui_load_url: "Laden",
+        style_ui_load_url_title: "URL als Referenz laden",
+        style_ui_toggle_vision: "Ollama Vision verwenden",
+        style_ui_vision_hint_off: "Lokale Stilfeatures sind generisch; für bildspezifische Styles bitte Vision aktivieren",
+        remote_title_cloudflared: "ComfyUI (cloudflared)",
+        remote_subtitle: "· öffentlich erreichbarer Tunnel-Host",
+        remote_label_host: "Remote Host",
+        remote_label_port: "Port",
+        remote_label_scheme: "Scheme",
+        remote_btn_test: "Test",
+        remote_probe_ok: "Remote erreichbar.",
+        remote_probe_fail: "Probe fehlgeschlagen.",
+        remote_missing_host: "Bitte Remote Host eingeben.",
+        remote_probing: "Teste /history …",
+        bridge_applied: "Übernommen",
+        bridge_apply_failed: "Übernahme fehlgeschlagen",
+        pull_btn_short: "PULL-URL",
+        pull_fetching: "Hole PULL_URL …",
+        pull_ok: "Remote angewendet",
+        pull_fail: "PULL_URL fehlgeschlagen",
+        direct_live_label: "Direkt live",
+        direct_live_title: "LLM-Optimierung umgehen; rohe Whisper-Transkripte verwenden",
+        direct_live_on_hint: "Direktmodus aktiv: Rohtranskripte (ohne LLM)",
+        title_gallery: "Galerie",
+        btn_gallery_refresh: "Neu laden",
+        gallery_hint: "Klicke auf ein Miniaturbild, um es anzuzeigen.",
+      },
+      en: {
+        brand: "slAIdshow | Local Speech-to-Image Pipeline",
+        status_connecting: "Connecting…",
+        status_connected: "Connected",
+        status_ready: "Ready",
+        status_fullscreen_on: "Fullscreen active",
+        status_fullscreen_off: "Ready",
+        title_viewer: "Image Viewer",
+        title_controls: "Controls & Logs",
+        caption_none: "No image",
+        fs_enter: "Fullscreen",
+        fs_exit: "Exit",
+        btn_open_dir: "Folder",
+        btn_start: "Start Recording",
+        btn_stop: "Stop",
+        btn_plan: "Send to Ollama",
+        btn_direct: "Direct Generate",
+        btn_apply_backend: "Apply",
+        btn_apply_size: "Apply",
+        btn_apply_neg: "Apply",
+        btn_apply_workflow: "Apply",
+        label_backend: "Image backend",
+        label_width: "Width",
+        label_height: "Height",
+        label_workflow: "Workflow",
+        prompt_ui_title: "Image prompt",
+        ph_plan: "Enter text → create prompt and generate image",
+        ph_neg: "Negative prompt (e.g., low quality, blurry, extra fingers)",
+        label_last_prompt: "Last Prompt",
+        label_transcripts: "Transcripts",
+        label_status: "Status",
+        shutdown: "Shut down server",
+        reconnect: "Connect to server",
+        reconnecting: "Connecting…",
+        confirm_shutdown: "Really shut down the server? This page will lose the connection.",
+        server_offline: "Server offline — please start the server",
+        sse_connecting: "SSE: Connecting…",
+        sse_connected: "SSE connected",
+        sse_disconnected: "SSE disconnected",
+        manual_connect_start: "Manual reconnect started",
+        manual_connect_ok: "Server reachable — starting SSE",
+        start_ok: "Recording running",
+        start_fail: "Start failed",
+        stop_ok: "Stopped",
+        stop_fail: "Stop failed",
+        config_error: "Config error",
+        prompt_created: "Prompt created",
+        shutdown_in_progress: "Server is shutting down…",
+        shutdown_failed: "Shutdown failed",
+        shutdown_error: "Shutdown error",
+        backend_warn_cloud_blocked: "Cloud backends are disabled in server settings.",
+        backend_warn_missing_secret: "Pollinations secret is missing on the server.",
+        backend_switched_ok: "Backend switched.",
+        backend_switch_failed: "Switch failed.",
+        size_applied_ok: "Size applied.",
+        size_applied_fail: "Failed to apply size。",
+        neg_applied_ok: "Negative prompt saved.",
+        neg_applied_fail: "Failed to save negative prompt。",
+        wf_applied_ok: "Workflow applied.",
+        wf_applied_fail: "Failed to apply workflow。",
+        wf_list_fail: "Failed to load workflows。",
+        style_ui_title: "Style Controls",
+        style_ui_deactivate: "Deactivate all styles",
+        style_ui_deactivate_title: "Deactivate all styles",
+        style_ui_text_ph: "Style prompt (e.g., cinematic lighting, watercolor, matte, 35mm, pastel colors)",
+        style_ui_apply: "Apply",
+        style_ui_apply_title: "Apply style text",
+        style_ui_ref_label: "Reference",
+        style_ui_ref_url_ph: "https://example.com/your-image.jpg (optional alternative to file upload)",
+        style_ui_load_url: "Load",
+        style_ui_load_url_title: "Load URL as reference",
+        style_ui_toggle_vision: "Use Ollama vision",
+        style_ui_vision_hint_off: "Local style features are generic; enable Vision for image-specific styles",
+        remote_title_cloudflared: "ComfyUI (cloudflared)",
+        remote_subtitle: "· publicly accessible tunnel host",
+        remote_label_host: "Remote Host",
+        remote_label_port: "Port",
+        remote_label_scheme: "Scheme",
+        remote_btn_test: "Test",
+        remote_probe_ok: "Remote reachable.",
+        remote_probe_fail: "Probe failed.",
+        remote_missing_host: "Please enter a remote host.",
+        remote_probing: "Probing /history ...",
+        bridge_applied: "Applied",
+        bridge_apply_failed: "Apply failed",
+        pull_btn_short: "PULL-URL",
+        pull_fetching: "Fetching PULL_URL …",
+        pull_ok: "Remote applied",
+        pull_fail: "PULL_URL failed",
+        direct_live_label: "Direct live",
+        direct_live_title: "Bypass text LLM; use raw Whisper transcripts",
+        direct_live_on_hint: "Direct mode active: raw transcripts (no LLM)",
+        title_gallery: "Gallery",
+        btn_gallery_refresh: "Refresh",
+        gallery_hint: "Click a thumbnail to view it.",
+      }
+    };
+
+    // ---------- Language state ----------
+    const langSelect = document.getElementById('lang-select');
+    let LANG = localStorage.getItem('ui_lang') || 'de';
+    langSelect.value = LANG;
+    document.documentElement.lang = LANG;
+    function t(key) { return I18N[LANG][key] || key; }
+
+    function applyI18N() {
+      document.getElementById('brand-title').textContent = t('brand');
+      document.getElementById('title-viewer').textContent = t('title_viewer');
+      document.getElementById('title-controls').textContent = t('title_controls');
+      document.getElementById('img-caption').textContent = t('caption_none');
+      document.getElementById('fs-label').textContent = t('fs_enter');
+      document.getElementById('btn-open-dir').textContent = t('btn_open_dir');
+      document.getElementById('btn-open-dir').title = t('btn_open_dir');
+      document.getElementById('btn-start').textContent = t('btn_start');
+      document.getElementById('btn-stop').textContent = t('btn_stop');
+      document.getElementById('btn-plan').textContent = t('btn_plan');
+      document.getElementById('btn-direct').textContent = t('btn_direct');
+      document.getElementById('btn-apply-backend').textContent = t('btn_apply_backend');
+      document.getElementById('btn-apply-size').textContent = t('btn_apply_size');
+      document.getElementById('btn-apply-neg').textContent = t('btn_apply_neg');
+      const wfBtn = document.getElementById('btn-apply-workflow');
+      if (wfBtn) wfBtn.textContent = t('btn_apply_workflow');
+
+      document.getElementById('label-last-prompt').textContent = t('label_last_prompt');
+      document.getElementById('label-transcripts').textContent = t('label_transcripts');
+      document.getElementById('label-status').textContent = t('label_status');
+      document.getElementById('label-backend').textContent = t('label_backend');
+      document.getElementById('label-width').textContent = t('label_width');
+      document.getElementById('label-height').textContent = t('label_height');
+      document.getElementById('label-workflow').textContent = t('label_workflow');
+
+      document.getElementById('plan-input').placeholder = t('ph_plan');
+      document.getElementById('neg-input').placeholder = t('ph_neg');
+
+      const styleTitle = document.getElementById('style-title');
+      if (styleTitle) styleTitle.textContent = t('style_ui_title');
+      const styleDeactivate = document.getElementById('style-deactivate-label');
+      if (styleDeactivate) styleDeactivate.textContent = t('style_ui_deactivate');
+      const btnStyleDeactivate = document.getElementById('btn-style-deactivate');
+      if (btnStyleDeactivate) btnStyleDeactivate.title = t('style_ui_deactivate_title');
+      const styleText = document.getElementById('style-text');
+      if (styleText) styleText.placeholder = t('style_ui_text_ph');
+      const styleApplyLabel = document.getElementById('style-apply-label');
+      if (styleApplyLabel) styleApplyLabel.textContent = t('style_ui_apply');
+      const btnApplyStyleText = document.getElementById('btn-apply-style-text');
+      if (btnApplyStyleText) btnApplyStyleText.title = t('style_ui_apply_title');
+      const styleRefLabel = document.getElementById('style-ref-label');
+      if (styleRefLabel) styleRefLabel.textContent = t('style_ui_ref_label');
+      const refUrl = document.getElementById('ref-url');
+      if (refUrl) refUrl.placeholder = t('style_ui_ref_url_ph');
+      const styleLoadUrlLabel = document.getElementById('style-load-url-label');
+      if (styleLoadUrlLabel) styleLoadUrlLabel.textContent = t('style_ui_load_url');
+
+      const styleToggleVision = document.getElementById('style-toggle-vision');
+      if (styleToggleVision) styleToggleVision.textContent = t('style_ui_toggle_vision');
+      const visionHint = document.getElementById('vision-hint');
+      if (visionHint) visionHint.textContent = t('style_ui_vision_hint_off');
+
+      const remoteTitle = document.getElementById('remote-title');
+      if (remoteTitle) remoteTitle.textContent = t('remote_title_cloudflared');
+      const remoteSubtitle = document.getElementById('remote-subtitle');
+      if (remoteSubtitle) remoteSubtitle.textContent = t('remote_subtitle');
+      const labelRemoteHost = document.getElementById('label-remote-host');
+      if (labelRemoteHost) labelRemoteHost.textContent = t('remote_label_host');
+      const labelRemotePort = document.getElementById('label-remote-port');
+      if (labelRemotePort) labelRemotePort.textContent = t('remote_label_port');
+      const labelRemoteScheme = document.getElementById('label-remote-scheme');
+      if (labelRemoteScheme) labelRemoteScheme.textContent = t('remote_label_scheme');
+      const btnRemoteTest = document.getElementById('btn-remote-test');
+      if (btnRemoteTest) btnRemoteTest.textContent = t('remote_btn_test');
+
+      const btnPull = document.getElementById('btn-bridge-pull');
+      if (btnPull) { btnPull.textContent = t('pull_btn_short'); btnPull.title = t('pull_btn_short'); }
+
+      const lblDirect = document.getElementById('label-direct-live');
+      if (lblDirect) lblDirect.textContent = t('direct_live_label');
+      const toggleDirect = document.getElementById('toggle-direct-live');
+      if (toggleDirect && toggleDirect.parentElement) {
+        toggleDirect.parentElement.title = t('direct_live_title');
+      }
+
+      // Gallery i18n
+      const titleGallery = document.getElementById('title-gallery');
+      if (titleGallery) titleGallery.textContent = t('title_gallery');
+      const btnGallery = document.getElementById('btn-refresh-gallery');
+      if (btnGallery) btnGallery.textContent = t('btn_gallery_refresh');
+      const galHint = document.getElementById('gallery-hint');
+      if (galHint) galHint.textContent = t('gallery_hint');
+
+      const statusEl = document.getElementById('status');
+      if (statusEl.dataset.state === 'connecting') statusEl.textContent = t('status_connecting');
+    }
+
+
+      const langSelectEl = document.getElementById('lang-select');
+      langSelectEl.addEventListener('change', () => {
+        LANG = langSelectEl.value;
+        localStorage.setItem('ui_lang', LANG);
+        document.documentElement.lang = LANG;
+        applyI18N();
+        syncVisionHint();
+        syncDirectLiveHint();
+
+        // Post the transcription hint based on current UI language
+        fetch('/api/settings/transcription_hint', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hint: LANG }) // 'de' | 'en'
+        })
+        .then(r => r.json())
+        .then(j => {
+          console.log('[settings] transcription_hint set', j);
+          try { log(statusLog, `[settings] input_locale_hint -> ${j.input_locale_hint || 'none'}`); } catch {}
+        })
+        .catch(err => console.warn('failed to set transcription_hint', err));
+      });
+
+    // ---------- Utility ----------
+    const $ = (s) => document.querySelector(s);
+    const statusEl = $('#status');
+    const promptLog = $('#prompt-log');
+    const transcriptLog = $('#transcript-log');
+    const statusLog = $('#status-log');
+    const styleLog = $('#style-log');
+    const img = $('#current-image');
+    const caption = $('#img-caption');
+    const viewer = $('#image-viewer');
+
+    const backendSelect = $('#backend-select');
+    const backendWarn = $('#backend-warn');
+    const btnApplyBackend = $('#btn-apply-backend');
+
+    const remoteBlock = $('#remote-config');
+    const remoteHost = $('#remote-host');
+    const remotePort = $('#remote-port');
+    const remoteScheme = $('#remote-scheme');
+    const btnRemoteTest = $('#btn-remote-test');
+    const remoteTestStatus = $('#remote-test-status');
+
+    const btnBridgePull = document.getElementById('btn-bridge-pull');
+    const bridgeStatus = document.getElementById('bridge-status');
+
+    const workflowBlock = document.getElementById('workflow-block');
+    const workflowSelect = $('#workflow-select');
+    const workflowPreview = $('#workflow-preview');
+    const wfWarn = $('#wf-warn');
+    const btnApplyWorkflow = $('#btn-apply-workflow');
+
+    const widthInput = $('#width-input');
+    const heightInput = $('#height-input');
+    const btnApplySize = $('#btn-apply-size');
+    const sizePill = $('#size-pill');
+
+    const styleTextInput = $('#style-text');
+    const btnApplyStyleText = $('#btn-apply-style-text');
+    const btnStyleDeactivate = $('#btn-style-deactivate');
+    const refFileInput = $('#ref-file');
+    const refUrlInput = $('#ref-url');
+    const btnLoadUrl = $('#btn-load-url');
+    const toggleVision = $('#toggle-vision');
+    const visionHintEl = document.getElementById('vision-hint');
+
+    const toggleDirectLive = document.getElementById('toggle-direct-live');
+    const labelDirectLive = document.getElementById('label-direct-live');
+
+    // NEW: Low-End elements
+    const toggleLowEnd = document.getElementById('toggle-lowend');
+    const lowendPill = document.getElementById('lowend-pill');
+
+    // Gallery elements
+    const thumbsEl = document.getElementById('thumbs');
+    const btnRefreshGallery = document.getElementById('btn-refresh-gallery');
+
+    let LAST_STYLE_POSITIVE = null;
+
+    function log(el, msg) {
+      const ts = new Date().toLocaleTimeString();
+      el.textContent = `[${ts}] ${msg}\n` + el.textContent;
+      if (el.textContent.length > 20000) el.textContent = el.textContent.slice(0, 20000);
+    }
+    function appendStatusLog(message) {
+      try {
+        log(statusLog, message);
+      } catch (e) {
+        console.log('[UI]', message);
+      }
+    }
+
+    function clampSize(v) {
+      const n = Math.round(Number(v) || 0);
+      return Math.max(64, Math.min(2048, n));
+    }
+    function updateSizePill() {
+      const w = Number(widthInput.value) || '?';
+      const h = Number(heightInput.value) || '?';
+      sizePill.textContent = `Size: ${w}×${h}`;
+    }
+
+    statusEl.dataset.state = 'connecting';
+    statusEl.textContent = t('status_connecting');
+
+    img.addEventListener('load', () => img.classList.add('loaded'));
+    function setImage(filenameRel, captionText) {
+      let url = filenameRel.startsWith('/static/') ? filenameRel : `/static/${filenameRel.replace(/^\/+/, '')}`;
+      url += (url.includes('?') ? '&' : '?') + 't=' + Date.now();
+      img.classList.remove('loaded');
+      img.src = url;
+      caption.textContent = captionText || filenameRel;
+    }
+
+    // ---------- Fullscreen ----------
+    const btnFS = $('#btn-fullscreen');
+    const iconEnter = $('#fs-icon-enter');
+    const iconExit = $('#fs-icon-exit');
+    const fsLabel = $('#fs-label');
+
+    function isInFullscreenFor(el) { return document.fullscreenElement === el; }
+    async function enterFullscreen(el) { try { if (!document.fullscreenElement) await el.requestFullscreen(); else if (document.fullscreenElement !== el) { await document.exitFullscreen(); await el.requestFullscreen(); } } catch (e) { console.warn('enterFullscreen failed', e); } }
+    async function exitFullscreen() { try { if (document.fullscreenElement) await document.exitFullscreen(); } catch (e) { console.warn('exitFullscreen failed', e); } }
+    async function toggleFullscreenFor(el) { isInFullscreenFor(el) ? await exitFullscreen() : await enterFullscreen(el); }
+    function syncFullscreenUI() {
+      const active = isInFullscreenFor(viewer);
+      iconEnter.style.display = active ? 'none' : '';
+      iconExit.style.display = active ? '' : 'none';
+      fsLabel.textContent = active ? t('fs_exit') : t('fs_enter');
+      statusEl.textContent = active ? t('status_fullscreen_on') : t('status_fullscreen_off');
+    }
+    btnFS.addEventListener('click', () => toggleFullscreenFor(viewer));
+    img.addEventListener('dblclick', () => toggleFullscreenFor(viewer));
+    document.addEventListener('fullscreenchange', syncFullscreenUI);
+
+    // ---------- SSE robust connect ----------
+    let sse = null;
+    let backoffMs = 1000;
+    let reconnectTimer = null;
+    let connecting = false;
+    let wantAutoReconnect = true;
+
+    function closeSSE(reason = 'closeSSE') {
+      try { if (sse) sse.close(); } catch {}
+      sse = null;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      console.debug('[SSE]', reason, '→ connection closed');
+    }
+    function scheduleReconnect() {
+      if (!wantAutoReconnect) return;
+      if (reconnectTimer) return;
+      const delay = backoffMs;
+      log(statusLog, `SSE-Reconnect in ${Math.round(delay/1000)}s`);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectSSE();
+      }, delay);
+      backoffMs = Math.min(backoffMs * 2, 15000);
+    }
+
+    let sizeSyncTimer = null;
+    function scheduleSizeSync() {
+      if (sizeSyncTimer) clearTimeout(sizeSyncTimer);
+      sizeSyncTimer = setTimeout(async () => {
+        const size = currentSizePayload();
+        try {
+          const r = await fetch('/api/settings/image_size', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(size)
+          });
+          log(statusLog, `size sync: ${size.width}×${size.height} (${r.status})`);
+        } catch (e) {
+          log(statusLog, `size sync error: ${e}`);
+        }
+      }, 400);
+    }
+
+    async function connectSSE() {
+      if (connecting) return;
+      connecting = true;
+      closeSSE('before-connect');
+      statusEl.dataset.state = 'connecting';
+      statusEl.textContent = t('status_connecting');
+      log(statusLog, t('sse_connecting'));
+      console.debug('[SSE] connecting to /events');
+
+      try { sse = new EventSource('/events'); }
+      catch (e) { console.debug('[SSE] EventSource ctor error:', e); connecting = false; scheduleReconnect(); return; }
+
+      sse.onopen = () => {
+        console.debug('[SSE] open');
+        connecting = false;
+        wantAutoReconnect = true;
+        backoffMs = 1000;
+        statusEl.dataset.state = 'connected';
+        statusEl.textContent = t('status_connected');
+        setShutdownMode(true);
+        log(statusLog, t('sse_connected'));
+      };
+
+      sse.onerror = (err) => {
+        console.debug('[SSE] error:', err);
+        connecting = false;
+        statusEl.dataset.state = 'disconnected';
+        statusEl.textContent = t('sse_disconnected');
+        log(statusLog, t('sse_disconnected'));
+        closeSSE('onerror');
+        scheduleReconnect();
+      };
+
+      sse.addEventListener('status', (ev) => { if (ev?.data) { statusEl.textContent = ev.data; log(statusLog, ev.data); } });
+      sse.addEventListener('transcript', (ev) => { if (ev?.data) log(transcriptLog, ev.data); });
+      sse.addEventListener('llm_prompt', (ev) => {
+        if (ev?.data) {
+          log(promptLog, ev.data);
+          caption.textContent = ev.data;
+          scheduleSizeSync();
+        }
+      });
+      sse.addEventListener('image', (ev) => {
+        const rel = (ev?.data || '').trim();
+        if (rel) {
+          setImage(rel, caption.textContent || rel);
+          // Insert/refresh thumbnail on new image
+          prependThumb({name: rel.replace(/^\/?static\//, ''), url: rel, modified: Date.now()/1000});
+        }
+      });
+      // Reload gallery automatically when backend signals updates
+      sse.addEventListener('gallery:updated', (ev) => {
+        try {
+          const payload = JSON.parse(ev?.data || '{}');
+        } catch {}
+        loadGallery(50);
+      });
+    }
+    connectSSE();
+
+    // ---------- Health helpers ----------
+    async function isServerUp() {
+      try {
+        const r = await fetch('/status', { cache: 'no-store' });
+        if (!r.ok) return false;
+        const j = await r.json();
+        return !!j.ok;
+      } catch { return false; }
+    }
+    async function manualReconnect() {
+      wantAutoReconnect = false;
+      closeSSE('manual-reconnect');
+      statusEl.dataset.state = 'connecting';
+      statusEl.textContent = t('status_connecting');
+      log(statusLog, t('manual_connect_start'));
+      let delay = 1000;
+      while (true) {
+        const up = await isServerUp();
+        if (up) {
+          log(statusLog, t('manual_connect_ok'));
+          wantAutoReconnect = true;
+          connectSSE();
+          return;
+        }
+        await new Promise(res => setTimeout(res, delay));
+        delay = Math.min(delay * 2, 15000);
+      }
+    }
+
+    // ---------- Shutdown/Connect button ----------
+    const btnShutdown = document.getElementById('btn-shutdown');
+    function setShutdownMode(connected) {
+      if (connected) {
+        btnShutdown.dataset.mode = 'shutdown';
+        btnShutdown.textContent = t('shutdown');
+        btnShutdown.title = t('shutdown');
+        btnShutdown.classList.add('btn-danger');
+      } else {
+        btnShutdown.dataset.mode = 'reconnect';
+        btnShutdown.textContent = t('reconnect');
+        btnShutdown.title = t('reconnect');
+        btnShutdown.classList.remove('btn-danger');
+      }
+    }
+    setShutdownMode(true);
+
+    btnShutdown.addEventListener('click', async () => {
+      if (btnShutdown.dataset.mode === 'reconnect') {
+        btnShutdown.disabled = true;
+        const old = btnShutdown.textContent;
+        btnShutdown.textContent = t('reconnecting');
+        try {
+          const up = await isServerUp();
+          if (!up) {
+            log(statusLog, t('server_offline'));
+          } else {
+            await manualReconnect();
+          }
+        } finally {
+          if (btnShutdown.dataset.mode === 'reconnect' && btnShutdown.textContent === t('reconnecting')) {
+            btnShutdown.textContent = old;
+          }
+          btnShutdown.disabled = false;
+        }
+        return;
+      }
+
+      const confirmStop = confirm(t('confirm_shutdown'));
+      if (!confirmStop) return;
+      btnShutdown.disabled = true;
+      const oldTxt = btnShutdown.textContent;
+      btnShutdown.textContent = t('shutdown_in_progress');
+      try {
+        const r = await fetch('/shutdown', { method: 'POST' });
+        log(statusLog, `shutdown → ${r.status}`);
+        statusEl.textContent = r.ok ? t('shutdown_in_progress') : t('shutdown_failed');
+        setShutdownMode(false);
+        wantAutoReconnect = false;
+        closeSSE('after-shutdown');
+      } catch (e) {
+        log(statusLog, `shutdown error: ${e}`);
+        statusEl.textContent = t('shutdown_error');
+      } finally {
+        btnShutdown.disabled = false;
+        if (btnShutdown.dataset.mode !== 'shutdown') btnShutdown.textContent = t('reconnect');
+        else btnShutdown.textContent = oldTxt;
+      }
+    });
+
+    // ---------- Start/Stop ----------
+    $('#btn-start').addEventListener('click', async () => {
+      try {
+        const size = currentSizePayload();
+        await fetch('/api/settings/image_size', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(size)
+        });
+        log(statusLog, `pre-start size sync: ${size.width}×${size.height}`);
+      } catch (e) {
+        log(statusLog, `pre-start size sync error: ${e}`);
+      }
+      try {
+        const r = await fetch('/start', { method: 'POST' });
+        statusEl.textContent = r.ok ? t('start_ok') : t('start_fail');
+        log(statusLog, `start → ${r.status}`);
+      } catch (e) { log(statusLog, `start error: ${e}`); }
+    });
+
+    document.getElementById('btn-stop').addEventListener('click', async () => {
+      const btn = document.getElementById('btn-stop');
+      btn.disabled = true;
+      try {
+        const r = await fetch('/stop', { method: 'POST' });
+        if (r.ok) {
+          statusEl.textContent = t('stop_ok');
+          log(statusLog, `stop → ${r.status}`);
+        } else {
+          statusEl.textContent = t('stop_fail');
+          log(statusLog, `stop failed: HTTP ${r.status}`);
+        }
+      } catch (e) {
+        statusEl.textContent = t('stop_fail');
+        log(statusLog, `stop exception: ${e}`);
+      } finally {
+        setTimeout(() => { btn.disabled = false; }, 300);
+      }
+    });
+
+    function currentSizePayload() {
+      const w = clampSize(widthInput.value);
+      const h = clampSize(heightInput.value);
+      return { width: w, height: h };
+    }
+
+    // ---------- Style Engine ----------
+    const STYLE_STATE = {
+      reference_source: 'none',
+      reference_id: null,
+      reference_url: '',
+      style_text_prompt: '',
+      use_local_style_features: false,
+      use_ollama_vision: true,
+      deactivate_all_styles: false,
+    };
+
+    function loadStyleState() {
+      try {
+        const raw = localStorage.getItem('style_state_v1');
+        if (raw) Object.assign(STYLE_STATE, JSON.parse(raw) || {});
+      } catch {}
+      if (STYLE_STATE.style_text_prompt) styleTextInput.value = STYLE_STATE.style_text_prompt;
+      if (STYLE_STATE.reference_source === 'url' && STYLE_STATE.reference_url) {
+        refUrlInput.value = STYLE_STATE.reference_url;
+      }
+      toggleVision.checked = STYLE_STATE.use_ollama_vision === true;
+      syncVisionHint();
+    }
+    function saveStyleState() { localStorage.setItem('style_state_v1', JSON.stringify(STYLE_STATE)); }
+
+    async function styleBuild(contentPositiveForNow = null) {
+      const payload = {
+        content_positive: contentPositiveForNow || '',
+        style_text_prompt: STYLE_STATE.style_text_prompt || '',
+        reference_source: STYLE_STATE.reference_source || 'none',
+        reference_id: STYLE_STATE.reference_id || null,
+        reference_url: STYLE_STATE.reference_url || null,
+        use_local_style_features: false,
+        use_ollama_vision: !!STYLE_STATE.use_ollama_vision,
+        deactivate_all_styles: !!STYLE_STATE.deactivate_all_styles,
+      };
+      try {
+        const r = await fetch('/api/style/build', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j) throw new Error(`${r.status}`);
+        LAST_STYLE_POSITIVE = (j.style_positive || '').trim() || null;
+        if (j.warnings && Array.isArray(j.warnings)) for (const w of j.warnings) log(styleLog, `warn: ${w}`);
+        log(styleLog, `Style OK; style_positive="${(j.style_positive||'').slice(0,200)}"`);
+        if (j.descriptors_used?.length) log(styleLog, `descriptors: ${j.descriptors_used.join(', ')}`);
+        if (j.vision_text_used) log(styleLog, `vision: ${j.vision_text_used}`);
+        if (j.reference_id) {
+          STYLE_STATE.reference_id = j.reference_id;
+          STYLE_STATE.reference_source = 'local_file';
+          saveStyleState();
+        }
+        return j;
+      } catch (e) {
+        log(styleLog, `Style build failed: ${e}`);
+        return null;
+      }
+    }
+
+    async function uploadReferenceFile(file) {
+      const fd = new FormData();
+      fd.append('file', file, file.name || 'reference.png');
+      try {
+        const r = await fetch('/api/style/upload', { method: 'POST', body: fd });
+        const j = await r.json().catch(()=> ({}));
+        if (r.ok && j?.reference_id) {
+          STYLE_STATE.reference_id = j.reference_id;
+          STYLE_STATE.reference_source = 'local_file';
+          saveStyleState();
+          log(styleLog, `Referenz hochgeladen (${j.reference_id})`);
+          return j;
+        }
+        throw new Error(j?.detail || j?.error || `HTTP ${r.status}`);
+      } catch (e) {
+        log(styleLog, `Upload fehlgeschlagen: ${e}`);
+        return null;
+      }
+    }
+
+    async function saveReferenceFromUrl(url) {
+      try {
+        const r = await fetch('/api/style/save_url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
+        });
+        const j = await r.json().catch(()=> ({}));
+        if (r.ok && j?.reference_id) {
+          STYLE_STATE.reference_id = j.reference_id;
+          STYLE_STATE.reference_source = 'local_file';
+          STYLE_STATE.reference_url = url;
+          saveStyleState();
+          log(styleLog, `Referenz von URL geladen (${j.reference_id})`);
+          return j;
+        }
+        throw new Error(j?.detail || j?.error || `HTTP ${r.status}`);
+      } catch (e) {
+        log(styleLog, `URL laden fehlgeschlagen: ${e}`);
+        return null;
+      }
+    }
+
+    async function resetAllStylesServer() {
+      try { await fetch('/api/style/reset', { method: 'POST' }); }
+      catch (e) { log(styleLog, `reset(server) failed: ${e}`); }
+    }
+
+    btnApplyStyleText.addEventListener('click', async () => {
+      STYLE_STATE.style_text_prompt = styleTextInput.value.trim();
+      saveStyleState();
+      log(styleLog, 'Style-Text übernommen.');
+      await styleBuild($('#plan-input').value.trim() || '');
+    });
+    refFileInput.addEventListener('change', async (ev) => {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      const up = await uploadReferenceFile(f);
+      if (up) await styleBuild($('#plan-input').value.trim() || '');
+    });
+    btnLoadUrl.addEventListener('click', async () => {
+      const url = (refUrlInput.value || '').trim();
+      if (!url) return;
+      STYLE_STATE.reference_source = 'url';
+      STYLE_STATE.reference_url = url;
+      saveStyleState();
+      const saved = await saveReferenceFromUrl(url);
+      if (saved) await styleBuild($('#plan-input').value.trim() || '');
+    });
+
+    function syncVisionHint() {
+      if (!visionHintEl) return;
+      if (toggleVision.checked) visionHintEl.style.display = 'none';
+      else { visionHintEl.textContent = t('style_ui_vision_hint_off'); visionHintEl.style.display = ''; }
+    }
+    toggleVision.addEventListener('change', async () => {
+      STYLE_STATE.use_ollama_vision = !!toggleVision.checked;
+      saveStyleState();
+      syncVisionHint();
+      await styleBuild($('#plan-input').value.trim() || '');
+    });
+    btnStyleDeactivate.addEventListener('click', async () => {
+      STYLE_STATE.deactivate_all_styles = false;
+      STYLE_STATE.style_text_prompt = '';
+      STYLE_STATE.reference_source = 'none';
+      STYLE_STATE.reference_id = null;
+      STYLE_STATE.reference_url = '';
+      STYLE_STATE.use_local_style_features = false;
+      STYLE_STATE.use_ollama_vision = false;
+      saveStyleState();
+
+      log(styleLog, 'Alle Styles deaktiviert.');
+
+      styleTextInput.value = '';
+      refUrlInput.value = '';
+      if (refFileInput) refFileInput.value = '';
+      toggleVision.checked = false;
+      syncVisionHint();
+
+      await resetAllStylesServer();
+      await styleBuild($('#plan-input').value.trim() || '');
+    });
+
+    // ---------- Plan ----------
+    $('#btn-plan').addEventListener('click', async () => {
+      const text = $('#plan-input').value.trim();
+      if (!text) return;
+      const btn = $('#btn-plan');
+      btn.disabled = true;
+      try {
+        const sb = await styleBuild(text);
+        if (sb && typeof sb.style_positive === 'string') {
+          LAST_STYLE_POSITIVE = sb.style_positive.trim() || null;
+        }
+        const size = currentSizePayload();
+        const body = { text, tags: [], width: size.width, height: size.height, style_positive: LAST_STYLE_POSITIVE };
+        const r = await fetch('/api/plan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const j = await r.json().catch(() => ({}));
+        if (r.ok && j.prompt) { log(promptLog, j.prompt); statusEl.textContent = t('prompt_created'); }
+        else { log(statusLog, `plan failed: ${j.detail || j.error || r.status}`); }
+      } catch (e) { log(statusLog, `plan exception: ${e}`); }
+      finally { btn.disabled = false; }
+    });
+
+    // ---------- Direct Generate ----------
+    document.getElementById('btn-direct').addEventListener('click', async () => {
+      const prompt = document.getElementById('plan-input').value.trim();
+      const negative = document.getElementById('neg-input').value.trim();
+      if (!prompt) return;
+      const btn = document.getElementById('btn-direct');
+      btn.disabled = true;
+      const size = currentSizePayload();
+      try {
+        const sb = await styleBuild(prompt);
+        if (sb && typeof sb.style_positive === 'string') {
+          LAST_STYLE_POSITIVE = sb.style_positive.trim() || null;
+        }
+        const r = await fetch('/api/image/direct', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt,
+            negative_prompt: negative || null,
+            width: size.width,
+            height: size.height,
+            style_positive: LAST_STYLE_POSITIVE
+          })
+        });
+        const j = await r.json().catch(() => ({}));
+        if (r.ok && j.rel) {
+          setImage(j.rel, prompt);
+          log(statusLog, `direct image: ${j.rel}`);
+          log(promptLog, prompt);
+          // also insert thumb
+          const bustRel = j.rel + (j.rel.includes('?') ? '&' : '?') + 't=' + Date.now();
+          prependThumb({name: j.rel.replace(/^\/?static\//, ''), url: bustRel, modified: Date.now()/1000});
+        } else {
+          log(statusLog, `direct failed: ${j.detail || j.error || r.status}`);
+        }
+      } catch (e) {
+        log(statusLog, `direct exception: ${e}`);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ---------- Negative prompt apply ----------
+    document.getElementById('btn-apply-neg').addEventListener('click', async () => {
+      const txt = document.getElementById('neg-input').value.trim();
+      try {
+        const r = await fetch('/api/settings/negative_prompt', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ negative_prompt: txt })
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        statusEl.textContent = t('neg_applied_ok');
+        log(statusLog, `negative prompt updated`);
+      } catch (e) {
+        statusEl.textContent = t('neg_applied_fail');
+        log(statusLog, `negative prompt update error: ${e}`);
+      }
+    });
+
+    // ---------- Cloud allow helper ----------
+    async function ensureCloudAllowed() {
+      try {
+        const r = await fetch('/api/settings/image_allow_cloud', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ allow: true })
+        });
+        return r.ok;
+      } catch { return false; }
+    }
+
+    // ---------- Backend switch ----------
+    backendSelect.addEventListener('change', () => {
+      const val = backendSelect.value;
+      remoteBlock.classList.toggle('hidden', val !== 'comfyui-remote');
+    });
+
+    async function applyFromPullEnv() {
+      bridgeStatus.textContent = t('pull_fetching');
+      try { await ensureCloudAllowed(); } catch {}
+      try {
+        const rGet = await fetch('/api/settings/pull_url', { cache: 'no-store' });
+        const jGet = await rGet.json().catch(()=> ({}));
+        if (!rGet.ok || !jGet?.pull_url) {
+          bridgeStatus.textContent = `${t('pull_fail')}: missing PULL_URL on server`;
+          return null;
+        }
+      } catch {}
+      try {
+        const r = await fetch('/api/bridge/apply_from_pull', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        const j = await r.json().catch(()=> ({}));
+        if (!r.ok || !j?.applied) {
+          const reason = j?.error || j?.detail || `HTTP ${r.status}`;
+          bridgeStatus.textContent = `${t('pull_fail')}: ${reason}`;
+          return null;
+        }
+        if (j.host) remoteHost.value = j.host;
+        if (j.port) remotePort.value = String(j.port);
+        if (j.scheme) remoteScheme.value = j.scheme;
+
+        backendSelect.value = 'comfyui-remote';
+        remoteBlock.classList.toggle('hidden', false);
+
+        await refreshConfig().catch(()=>{});
+        bridgeStatus.textContent = `${t('pull_ok')}: ${j.url || j.host}`;
+        return j;
+      } catch (e) {
+        bridgeStatus.textContent = `${t('pull_fail')}: ${e}`;
+        return null;
+      }
+    }
+
+    btnApplyBackend.addEventListener('click', async () => {
+      const sel = backendSelect.value;
+      backendWarn.style.display = 'none';
+      btnApplyBackend.disabled = true;
+      try {
+        if (sel === 'pollinations') {
+          const ok = await ensureCloudAllowed();
+          if (!ok) log(statusLog, 'Could not enable cloud.');
+          const r1 = await fetch('/api/settings/image_backend', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ backend: 'pollinations' })
+          });
+          const j1 = await r1.json().catch(()=> ({}));
+          if (!r1.ok || !j1?.ok) {
+            const err = j1?.error || `${r1.status}`;
+            log(statusLog, `${t('backend_switch_failed')}: ${err}`);
+            if (j1?.reason === 'cloud_blocked') { backendWarn.textContent = t('backend_warn_cloud_blocked'); backendWarn.style.display=''; }
+            else if (j1?.reason === 'missing_secret') { backendWarn.textContent = t('backend_warn_missing_secret'); backendWarn.style.display=''; }
+          } else {
+            log(statusLog, t('backend_switched_ok'));
+          }
+        } else if (sel === 'comfyui-local') {
+          await fetch('/api/settings/image_backend', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ backend: 'comfyui' })
+          });
+          await fetch("/api/settings/image_allow_cloud", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ allow: true })
+          });
+          await fetch('/api/settings/comfy_mode', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'local' })
+          });
+          log(statusLog, t('backend_switched_ok'));
+        } else if (sel === 'comfyui-remote') {
+          const hostExisting = (remoteHost.value || '').trim();
+          if (!hostExisting) {
+            const applied = await applyFromPullEnv();
+            if (!applied) {
+              backendWarn.textContent = t('remote_missing_host');
+              backendWarn.style.display = '';
+              btnApplyBackend.disabled = false;
+              return;
+            }
+            log(statusLog, t('backend_switched_ok'));
+            await refreshConfig().catch(()=>{});
+            btnApplyBackend.disabled = false;
+            return;
+          }
+
+          const host = hostExisting;
+          const port = parseInt(remotePort.value || '443', 10);
+          const scheme = (remoteScheme.value || 'https').toLowerCase();
+
+          await fetch("/api/settings/image_allow_cloud", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ allow: true })
+          });
+          await fetch('/api/settings/image_backend', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ backend: 'comfyui' })
+          });
+          const rRemote = await fetch('/api/settings/comfy_remote', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host, port, scheme })
+          });
+          if (!rRemote.ok) {
+            const txt = await rRemote.text().catch(()=> '');
+            log(statusLog, `setting comfy_remote failed: HTTP ${rRemote.status} ${txt}`);
+          }
+          const rMode = await fetch('/api/settings/comfy_mode', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'remote' })
+          });
+          if (!rMode.ok) {
+            const txt = await rMode.text().catch(()=> '');
+            log(statusLog, `${t('backend_switch_failed')}: HTTP ${rMode.status} ${txt}`);
+          } else {
+            log(statusLog, t('backend_switched_ok'));
+          }
+        }
+        await refreshConfig();
+        if (workflowBlock.style.display !== 'none') await refreshWorkflowList();
+        else {
+          workflowSelect.innerHTML = '';
+          workflowPreview.textContent = '';
+          wfWarn.style.display = 'none';
+        }
+      } catch (e) {
+        log(statusLog, `${t('backend_switch_failed')}: ${e}`);
+      } finally {
+        btnApplyBackend.disabled = false;
+      }
+    });
+
+    // ---------- Remote probe ----------
+    btnRemoteTest.addEventListener('click', async () => {
+      const host = (remoteHost.value || '').trim();
+      const port = parseInt(remotePort.value || '443', 10);
+      const scheme = (remoteScheme.value || 'https').toLowerCase();
+      if (!host) { remoteTestStatus.textContent = t('remote_missing_host'); return; }
+      remoteTestStatus.textContent = t('remote_probing');
+      try {
+        const url = `/api/settings/comfy_remote_probe?host=${encodeURIComponent(host)}&port=${encodeURIComponent(port)}&scheme=${encodeURIComponent(scheme)}`;
+        const r = await fetch(url);
+        const j = await r.json().catch(()=> ({}));
+        if (r.ok && (j.ok === true || j.status === 'ok')) {
+          remoteTestStatus.textContent = t('remote_probe_ok');
+        } else {
+          remoteTestStatus.textContent = t('remote_probe_fail');
+        }
+      } catch (e) {
+        remoteTestStatus.textContent = `${t('remote_probe_fail')}: ${e}`;
+      }
+    });
+
+    // ---------- Size apply ----------
+    btnApplySize.addEventListener('click', async () => {
+      const size = currentSizePayload();
+      widthInput.value = size.width;
+      heightInput.value = size.height;
+      updateSizePill();
+
+      try {
+        const r = await fetch('/api/settings/image_size', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(size)
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        statusEl.textContent = t('size_applied_ok');
+        log(statusLog, `size applied(server): ${size.width}×${size.height}`);
+      } catch (e) {
+        statusEl.textContent = t('size_applied_fail');
+        log(statusLog, `size apply(server) error: ${e}`);
+      }
+    });
+
+    // ---------- Workflow switching ----------
+    async function listWorkflowsFromServer() {
+      try {
+        const r = await fetch('/api/workflows', { cache: 'no-store' });
+        if (r.ok) {
+          const j = await r.json();
+          if (j && Array.isArray(j.items)) return j.items;
+        }
+      } catch {}
+      return null;
+    }
+    async function listWorkflowsByIndexJson() {
+      try {
+        const r = await fetch('/workflows/index.json', { cache: 'no-store' });
+        if (!r.ok) return [];
+        const j = await r.json();
+        if (Array.isArray(j)) {
+          return j.map(x => (typeof x === 'string' ? { name: x.replace(/\.json$/,''), filename: x } : x))
+        } else if (j && Array.isArray(j.items)) {
+          return j.items;
+        }
+      } catch {}
+      return [];
+    }
+    async function refreshWorkflowList() {
+      if (workflowBlock.style.display === 'none') {
+        workflowSelect.innerHTML = '';
+        workflowPreview.textContent = '';
+        wfWarn.style.display = 'none';
+        return;
+      }
+      wfWarn.style.display = 'none';
+      let items = await listWorkflowsFromServer();
+      if (!items) items = await listWorkflowsByIndexJson();
+      if (!items || items.length === 0) {
+        wfWarn.textContent = t('wf_list_fail');
+        wfWarn.style.display = '';
+        workflowSelect.innerHTML = '';
+        workflowPreview.textContent = '';
+        return;
+      }
+      workflowSelect.innerHTML = '';
+      const stored = localStorage.getItem('active_workflow') || '';
+      let foundStored = false;
+      for (const it of items) {
+        const fn = String(it.filename || '').replace(/[^A-Za-z0-9._-]/g, '');
+        if (!fn.endsWith('.json')) continue;
+        const name = it.name || fn.replace(/\.json$/,'');
+        const opt = document.createElement('option');
+        opt.value = fn;
+        opt.textContent = name;
+        if (stored && stored === fn) { opt.selected = true; foundStored = true; }
+        workflowSelect.appendChild(opt);
+      }
+      if (!foundStored && workflowSelect.options.length > 0) workflowSelect.selectedIndex = 0;
+      const cur = workflowSelect.value;
+      if (cur) await loadWorkflowPreview(cur);
+    }
+
+    async function loadWorkflowPreview(filename) {
+      workflowPreview.textContent = '';
+      if (!filename || !/^[A-Za-z0-9._-]+$/.test(filename) || !filename.endsWith('.json')) return;
+      try {
+        const r = await fetch(`/workflows/${filename}`, { cache: 'no-store' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const txt = await r.text();
+        try {
+          const obj = JSON.parse(txt);
+          workflowPreview.textContent = JSON.stringify(obj, null, 2);
+        } catch {
+          workflowPreview.textContent = txt;
+        }
+      } catch (e) {
+        workflowPreview.textContent = `Failed to load: ${e}`;
+      }
+    }
+
+    workflowSelect.addEventListener('change', async () => {
+      const v = workflowSelect.value;
+      localStorage.setItem('active_workflow', v);
+      await loadWorkflowPreview(v);
+    });
+
+    btnApplyWorkflow.addEventListener('click', async () => {
+      const filename = workflowSelect.value;
+      if (!filename) return;
+      btnApplyWorkflow.disabled = true;
+      try {
+        const r = await fetch('/api/settings/workflow', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename })
+        });
+        if (r.ok) {
+          statusEl.textContent = t('wf_applied_ok');
+          log(statusLog, `workflow applied: ${filename}`);
+          localStorage.setItem('active_workflow', filename);
+          await refreshConfig();
+        } else {
+          statusEl.textContent = t('wf_applied_fail');
+          const txt = await r.text().catch(()=> '');
+          log(statusLog, `workflow apply failed: HTTP ${r.status} ${txt}`);
+        }
+      } catch (e) {
+        statusEl.textContent = t('wf_applied_fail');
+        log(statusLog, `workflow apply exception: ${e}`);
+      } finally {
+        btnApplyWorkflow.disabled = false;
+      }
+    });
+
+    // ---------- Open dir hint ----------
+    document.getElementById('btn-open-dir').addEventListener('click', async () => {
+      try {
+        const r = await fetch('/open_dir');
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      } catch (e) {
+        alert('Could not open folder on the server machine. ' + e.message);
+      }
+    });
+
+    // ---------- Direct live toggle wiring ----------
+    async function setDirectLive(enabled) {
+      try {
+        const r = await fetch('/api/settings/direct_live', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled })
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        log(statusLog, `direct_live → ${enabled ? 'on' : 'off'}`);
+        syncDirectLiveHint();
+      } catch (e) {
+        log(statusLog, `direct_live update failed: ${e}`);
+        toggleDirectLive.checked = !enabled;
+        syncDirectLiveHint();
+      }
+    }
+    function syncDirectLiveHint() {
+      if (toggleDirectLive.checked) {
+        statusEl.textContent = t('direct_live_on_hint');
+      } else {
+        if (!statusEl.dataset.state || statusEl.dataset.state === 'connecting') {
+          statusEl.textContent = t('status_ready');
+        }
+      }
+    }
+
+    // ---------- NEW: Low-End toggle wiring (additive only) ----------
+    function syncLowEndUI(enabled) {
+      if (!lowendPill) return;
+      lowendPill.style.display = '';
+      if (enabled) {
+        lowendPill.textContent = 'Low-End: on';
+      } else {
+        lowendPill.textContent = 'Low-End: off';
+      }
+    }
+    // Debounced toggle for Low-End mode with verification GET and config refresh
+    async function setLowEndMode(enabled) {
+      const checkbox = document.getElementById('toggle-lowend');
+      const pill = document.getElementById('lowend-pill');
+      const prevChecked = checkbox ? checkbox.checked : false;
+
+      // Prevent double clicks while request in flight
+      if (checkbox) checkbox.disabled = true;
+
+      try {
+        // POST desired state
+        const res = await fetch('/api/settings/lowend_mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !!enabled }),
+        });
+
+        if (!res.ok) {
+          const msg = await res.text().catch(() => 'toggle failed');
+          throw new Error(`POST /api/settings/lowend_mode failed: ${msg}`);
+        }
+
+        // Verify with immediate GET
+        const verify = await fetch('/api/settings/lowend_mode', { method: 'GET' });
+        if (!verify.ok) {
+          const msg = await verify.text().catch(() => 'verification failed');
+          throw new Error(`GET /api/settings/lowend_mode failed: ${msg}`);
+        }
+        const data = await verify.json();
+
+        // Update UI from server truth
+        if (checkbox) checkbox.checked = !!data.enabled;
+        if (pill) {
+          pill.classList.toggle('on', !!data.enabled);
+          pill.classList.toggle('off', !data.enabled);
+          pill.textContent = data.enabled ? 'Low-End ON' : 'Low-End OFF';
+        }
+
+        // Log and refresh global config so all status pills reflect new backend
+        appendStatusLog(`[LOWEND] Server confirmed enabled=${!!data.enabled}`);
+        await refreshConfig(); // assumes existing function that GETs /config and updates UI
+      } catch (err) {
+        // Rollback UI to previous state on error
+        if (checkbox) checkbox.checked = prevChecked;
+        if (pill) {
+          pill.classList.toggle('on', !!prevChecked);
+          pill.classList.toggle('off', !prevChecked);
+          pill.textContent = prevChecked ? 'Low-End ON' : 'Low-End OFF';
+        }
+        appendStatusLog(`[LOWEND][ERROR] ${err && err.message ? err.message : err}`);
+      } finally {
+        if (checkbox) checkbox.disabled = false;
+      }
+    }
+
+    // Ensure initial UI matches server and refresh full config afterward
+    async function fetchCurrentLowEnd() {
+      const checkbox = document.getElementById('toggle-lowend');
+      const pill = document.getElementById('lowend-pill');
+      try {
+        const res = await fetch('/api/settings/lowend_mode', { method: 'GET' });
+        if (!res.ok) {
+          const msg = await res.text().catch(() => 'error');
+          throw new Error(`GET /api/settings/lowend_mode failed: ${msg}`);
+        }
+        const data = await res.json();
+        if (checkbox) checkbox.checked = !!data.enabled;
+        if (pill) {
+          pill.classList.toggle('on', !!data.enabled);
+          pill.classList.toggle('off', !data.enabled);
+          pill.textContent = data.enabled ? 'Low-End ON' : 'Low-End OFF';
+        }
+        appendStatusLog(`[LOWEND] Initial enabled=${!!data.enabled}`);
+        // Load full config so UI pills are in sync at startup
+        await refreshConfig();
+      } catch (err) {
+        appendStatusLog(`[LOWEND][ERROR] ${err && err.message ? err.message : err}`);
+      }
+    }
+
+    if (toggleLowEnd) {
+      toggleLowEnd.addEventListener('change', () => {
+        setLowEndMode(toggleLowEnd.checked);
+      });
+    }
+    // ---------- END NEW ----------
+
+    // ---------- Gallery: fetch + render ----------
+    async function loadGallery(limit = 50) {
+      if (!thumbsEl) return;
+      try {
+        const r = await fetch(`/api/images?limit=${encodeURIComponent(limit)}&t=${Date.now()}`, { cache: 'no-store' });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j?.items) {
+          log(statusLog, `gallery load failed: ${r.status}`);
+          return;
+        }
+        renderThumbs(j.items);
+      } catch (e) {
+        log(statusLog, `gallery load exception: ${e}`);
+      }
+    }
+
+    function renderThumbs(items) {
+      thumbsEl.innerHTML = '';
+      for (const it of items) {
+        appendThumb(it);
+      }
+    }
+
+    function appendThumb(it) {
+      const div = document.createElement('div');
+      div.className = 'thumb';
+      const imgEl = document.createElement('img');
+      const base = it.url || (`/static/${it.name}`);
+      const url = base + (base.includes('?') ? '&' : '?') + 't=' + Date.now();
+      imgEl.src = url;
+      imgEl.alt = it.name || 'image';
+      imgEl.loading = 'lazy';
+      imgEl.decoding = 'async';
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = it.name || '';
+      div.appendChild(imgEl);
+      div.appendChild(name);
+      div.addEventListener('click', () => {
+        setImage(url, caption.textContent || it.name);
+      });
+      thumbsEl.appendChild(div);
+    }
+
+    function prependThumb(it) {
+      if (!thumbsEl) return;
+      const div = document.createElement('div');
+      div.className = 'thumb';
+      const imgEl = document.createElement('img');
+      const base = it.url || (`/static/${it.name}`);
+      const url = base + (base.includes('?') ? '&' : '?') + 't=' + Date.now();
+      imgEl.src = url;
+      imgEl.alt = it.name || 'image';
+      imgEl.loading = 'lazy';
+      imgEl.decoding = 'async';
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = it.name || '';
+      div.appendChild(imgEl);
+      div.appendChild(name);
+      div.addEventListener('click', () => {
+        setImage(url, caption.textContent || it.name);
+      });
+      if (thumbsEl.firstChild) thumbsEl.insertBefore(div, thumbsEl.firstChild);
+      else thumbsEl.appendChild(div);
+    }
+
+    if (btnRefreshGallery) {
+      btnRefreshGallery.addEventListener('click', () => loadGallery(50));
+    }
+
+    // ---------- Initial config ----------
+    async function refreshConfig() {
+      try {
+        const r = await fetch('/config', { cache: 'no-store' });
+        if (!r.ok) throw new Error('config fetch failed');
+        const j = await r.json();
+
+        $('#ollama-pill').textContent = `Ollama: ${j?.ollama?.model || '?'}`;
+        $('#poll-pill').textContent = `Images: ${j?.image?.backend || '?'}`;
+        $('#sr-pill').textContent = `SR: ${j?.audio?.sample_rate || '?'}`;
+
+        const current = (j?.image?.backend || 'comfyui').toLowerCase();
+        const mode = (j?.image?.comfy?.mode || 'local').toLowerCase();
+        if (current === 'pollinations') backendSelect.value = 'pollinations';
+        else backendSelect.value = (mode === 'remote') ? 'comfyui-remote' : 'comfyui-local';
+
+        const rhost = j?.image?.comfy?.remote?.host || '';
+        const rport = j?.image?.comfy?.remote?.port ?? 443;
+        const rscheme = (j?.image?.comfy?.remote?.scheme || 'https').toLowerCase();
+        remoteHost.value = rhost || '';
+        remotePort.value = rport || 443;
+        remoteScheme.value = rscheme || 'https';
+        remoteBlock.classList.toggle('hidden', backendSelect.value !== 'comfyui-remote');
+
+        const w = Number(j?.image?.current_width ?? j?.image?.width_default ?? 512);
+        const h = Number(j?.image?.current_height ?? j?.image?.height_default ?? 512);
+        widthInput.value = w; heightInput.value = h; updateSizePill();
+
+        const neg = (j?.image?.negative_prompt || '').trim();
+        if (neg) document.getElementById('neg-input').value = neg;
+
+        const showWF = (current === 'comfyui') && !!(j?.image?.show_workflow_selector);
+        workflowBlock.style.display = showWF ? '' : 'none';
+
+        if (showWF) {
+          const activeWF = j?.image?.active_workflow || localStorage.getItem('active_workflow') || '';
+          if (activeWF) {
+            const opt = Array.from(workflowSelect.options).find(o => o.value === activeWF);
+            if (opt) { workflowSelect.value = activeWF; await loadWorkflowPreview(activeWF); }
+            localStorage.setItem('active_workflow', activeWF);
+          }
+        } else {
+          workflowSelect.innerHTML = '';
+          workflowPreview.textContent = '';
+          wfWarn.style.display = 'none';
+        }
+
+        if (j?.style) {
+          if (typeof j.style.use_ollama_vision === 'boolean') {
+            toggleVision.checked = j.style.use_ollama_vision;
+            STYLE_STATE.use_ollama_vision = j.style.use_ollama_vision;
+          } else {
+            toggleVision.checked = true;
+            STYLE_STATE.use_ollama_vision = true;
+          }
+          STYLE_STATE.use_local_style_features = false;
+          syncVisionHint();
+          saveStyleState();
+        }
+
+        // Server exposes direct_live as object {enabled}
+        const serverDirect = !!(j?.direct_live && j.direct_live.enabled === true);
+        const userInteracted = toggleDirectLive.dataset.userInteracted === '1';
+        if (serverDirect && !userInteracted) {
+          toggleDirectLive.checked = true;
+        } else if (!userInteracted) {
+          toggleDirectLive.checked = false;
+        }
+        syncDirectLiveHint();
+
+        if (statusEl.dataset.state !== 'connected') statusEl.textContent = t('status_ready');
+      } catch (e) {
+        log(statusLog, `config error: ${e}`);
+        statusEl.textContent = t('config_error');
+      }
+    }
+
+    // Wire the PULL_URL button
+    btnBridgePull.addEventListener('click', async () => {
+      await applyFromPullEnv();
+    });
+
+    // Toggle handler
+    toggleDirectLive.addEventListener('change', () => {
+      toggleDirectLive.dataset.userInteracted = '1';
+      setDirectLive(toggleDirectLive.checked);
+    });
+
+    // ---------- Init ----------
+    (async function init() {
+      applyI18N();
+      loadStyleState();
+      syncVisionHint();
+
+      // Force UI default OFF before hydrating from server
+      toggleDirectLive.checked = false;
+      toggleDirectLive.dataset.uiDefaultApplied = '1';
+      syncDirectLiveHint();
+
+      await refreshConfig();
+
+      function onSizeInputChange() { updateSizePill(); scheduleSizeSync(); }
+      widthInput.addEventListener('input', onSizeInputChange);
+      heightInput.addEventListener('input', onSizeInputChange);
+
+      if (document.getElementById('workflow-block').style.display !== 'none') {
+        await refreshWorkflowList();
+      }
+
+      // Initial gallery load
+      await loadGallery(50);
+
+      // NEW: initial low-end fetch (non-intrusive)
+      await fetchCurrentLowEnd();
+    })();
+  </script>
+
+  <div class="footer-hud" aria-label="Support & Kontakt">
+    <span>SUPPORT: <a href="https://buymeacoffee.com/betakontext" target="_blank" rel="noopener">buymeacoffee.com/betakontext</a></span>
+    <span>CONTACT: Christoph Medicus | <a href="mailto:dev@betakontext.de">dev@betakontext.de</a> | <a href="https://dev.betakontext.de" target="_blank" rel="noopener">dev.betakontext.de</a></span>
+  </div>
+
+
+<!-- RECORDING_PATCH_V1 --><!-- RECORDING_REPAIR_V2 -->
+<script>
+(()=>{const stop=document.getElementById('btn-stop');if(!stop)return;const save=document.createElement('button'), note=document.createElement('span');save.id='btn-save-recording';save.type='button';note.id='recording-save-status';note.style.marginLeft='8px';save.className=stop.className;stop.insertAdjacentElement('afterend',save);save.insertAdjacentElement('afterend',note);let busy=false,saving=false,lastGen=null,last=null,err='';
+function de(){let x=(document.getElementById('lang-select')||{}).value||document.documentElement.lang||localStorage.getItem('ui_lang')||localStorage.getItem('lang')||'en';return /^de/i.test(x)}function tx(){let g=de(),s=last||{};save.textContent=g?'Aufnahme speichern':'Save recording';let a=g?'Aufnahme':'Recording',t=`${a}: ${Number(s.seconds||0).toFixed(1)} s`;if(s.limit_reached)t+=g?' – RAM-Limit erreicht; STT läuft weiter.':' – RAM limit reached; STT continues.';if(s.saved)t+=` – ${(g?'gespeichert':'saved')}${s.filename?': '+s.filename:''}.`;else t+=g?' – RAM-Audio geht bei Neustart verloren.':' – RAM audio is lost on restart.';if(err)t+=' – '+err;note.textContent=t;save.disabled=!!(saving||!s.available||s.saved||s.saving||s.capture_active)}
+function message(j,code){let g=de(),e=(j&&j.error)||'network_error',id=j&&j.request_id;let m={recording_active:g?'Aufnahme läuft noch.':'Recording is still active.',save_in_progress:g?'Speichern läuft bereits.':'Save already in progress.',no_recording:g?'Keine Aufnahme verfügbar.':'No recording available.',save_failed:g?'Speichern fehlgeschlagen.':'Save failed.',network_error:g?'Netzwerkfehler.':'Network error.'}[e]||(g?'Speicherfehler':'Save error');return m+' ['+e+(code?' / '+code:'')+(id?' / '+id:'')+']'}
+async function poll(){if(busy)return;busy=true;try{let r=await fetch('/api/recording/status',{credentials:'same-origin'}),j=await r.json();if(r.ok){if(lastGen!==null&&j.generation!==lastGen)err='';lastGen=j.generation;last=j;tx()}}catch(_){err=message(null,0);tx()}finally{busy=false}}
+save.addEventListener('click',async()=>{if(saving)return;saving=true;err='';tx();try{let r=await fetch('/api/recording/save',{method:'POST',credentials:'same-origin'}),j;try{j=await r.json()}catch(_){j=null}if(!r.ok||!j||!j.success)err=message(j,r.status);else {last=Object.assign(last||{},j,{saved:true});err=''}}catch(_){err=message(null,0)}finally{saving=false;await poll();tx()}});document.addEventListener('change',tx);new MutationObserver(tx).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});window.addEventListener('storage',tx);poll();setInterval(poll,2000)})();
+</script>
+
+</body>
+</html>
+```

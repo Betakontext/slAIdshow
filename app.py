@@ -2,10 +2,70 @@
 from __future__ import annotations
 
 import asyncio
+
+# --- BEGIN injected: start capture uses AudioBufferWorker (parakeet opt-in) ---
+import os, asyncio
+_APP_ENABLE_PARAKEET = os.getenv("APP_ENABLE_PARAKEET", "") == "1"
+try:
+    _parakeet_adapter = None
+    if _APP_ENABLE_PARAKEET:
+        from transcription_backend import ParakeetAdapter  # type: ignore
+        _parakeet_adapter = ParakeetAdapter()
+        _parakeet_adapter.load()
+except Exception:
+    _parakeet_adapter = None
+
+# locate existing RealtimeTranscriber or similar transcribe function
+# Provide a wrapper callback to accept aggregated bytes from worker.
+async def _buffer_transcribe_cb(pcm_bytes: bytes, sr: int, finalize: bool = False):
+    """
+    Called by AudioBufferWorker with aggregated PCM bytes.
+    This wrapper chooses backend: Parakeet (if enabled and loaded and
+    conditions met) else original transcribe facility.
+    """
+    # Lazy import of the module's transcribe function to avoid circular imports.
+    try:
+        import transcription_backend as tb
+    except Exception:
+        tb = None
+
+    text = ""
+    try:
+        # Prefer parakeet if enabled and loaded and language heuristics suggest it
+        if _parakeet_adapter and getattr(_parakeet_adapter, "_loaded", False):
+            # heuristic: if configured to prefer english or detected language is en,
+            # try parakeet first (non-fatal on failure)
+            try:
+                lang_hint = os.getenv("APP_TRANSCRIBE_LANG_HINT", "")  # optional
+                if lang_hint.lower().startswith("en"):
+                    txt = await _parakeet_adapter.transcribe_bytes(pcm_bytes, sr)
+                    if txt:
+                        text = txt
+                        # hand over to existing backend for integration (if needed)
+                        if tb and hasattr(tb, "accept_transcript"):
+                            await tb.accept_transcript(text, source="parakeet")
+                        return
+            except Exception:
+                # parakeet failure is non-fatal; fall back
+                pass
+
+        # fallback to existing transcription pipeline
+        if tb and hasattr(tb, "transcribe_bytes"):
+            # transcribe_bytes should be an async function returning text
+            txt = tb.transcribe_bytes(pcm_bytes, sr, finalize=finalize)
+            if asyncio.iscoroutine(txt):
+                txt = await txt
+            text = txt or ""
+            # accept into backend structures if available
+            if tb and hasattr(tb, "accept_transcript"):
+                await tb.accept_transcript(text, source="buffered")
+    except Exception:
+        import traceback; traceback.print_exc()
+    return text
+# --- END injected ---
 import contextlib
 import inspect
 import json
-import os
 import re
 import time
 import traceback
@@ -308,8 +368,25 @@ WORKFLOWS_DIR = Path(os.getenv("WORKFLOWS_DIR", "workflows")).resolve()
 WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------- Ollama ----------
+def _resolve_ollama_host() -> str:
+    import socket
+    port = _env_int("APP_OLLAMA_PORT", 11434)
+    hosts = [_env_str("APP_OLLAMA_HOST", "127.0.0.1")]
+    fallbacks = _env_str("APP_OLLAMA_FALLBACK_HOSTS", "")
+    if fallbacks:
+        hosts.extend(h.strip() for h in fallbacks.split(",") if h.strip())
+    for host in hosts:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                if host != hosts[0]:
+                    print(f"[OLLAMA] fallback host: {host}:{port}")
+                return host
+        except (OSError, socket.timeout):
+            continue
+    print(f"[OLLAMA] no reachable host, using primary: {hosts[0]}")
+    return hosts[0]
 
-OLLAMA_HOST = _env_str("APP_OLLAMA_HOST", "127.0.0.1")
+OLLAMA_HOST = _resolve_ollama_host()
 OLLAMA_PORT = _env_int("APP_OLLAMA_PORT", 11434)
 OLLAMA_MODEL = _env_str("APP_OLLAMA_MODEL", "llama3.2:latest")
 OLLAMA_TEMPERATURE = _env_float("APP_OLLAMA_TEMPERATURE", 0.2)
@@ -329,12 +406,30 @@ OLLAMA_SYS_PROMPT = _env_str(
     "Du bist ein präziser Prompt-Designer für Bildgeneratoren. Erzeuge kurze, klare, fotografische oder illustrative Bild-Prompts, ohne Meta-Kommentare, in Deutsch.",
 )
 
+# --- NEW: Docker-vs-Native assert_local (only for diagnostics; do not restrict hosts here) ---
+import pathlib, socket, platform
+def _is_running_in_docker() -> bool:
+    try:
+        if os.path.exists("/.dockerenv"):
+            return True
+        txt = pathlib.Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="ignore")
+        low = txt.lower()
+        return ("docker" in low) or ("kubepods" in low) or ("containerd" in low)
+    except Exception:
+        return False
+
+def _assert_local_ctx() -> Dict[str, Any]:
+    return {
+        "docker": _is_running_in_docker(),
+        "hostname": socket.gethostname(),
+        "platform": platform.platform(),
+        "python_version": platform.python_version(),
+        "cwd": str(pathlib.Path.cwd()),
+    }
+
 def assert_local(host: str) -> None:
-    """
-    Hard safety: do not allow remote hosts for Ollama.
-    """
-    if host != "127.0.0.1":
-        raise AssertionError(f"Only localhost allowed, got {host}")
+    if host != "127.0.0.1" and host != "ollama" and not host.startswith("192.168.") and not host.startswith("10."):
+        raise ValueError(f"Non-local Ollama host: {host}")
 
 assert_local(OLLAMA_HOST)
 
@@ -388,7 +483,7 @@ class OllamaVisionSettings(BaseModel):
 class OllamaVisionState:
     enabled: bool = True
     mode: str = "local"
-    local_url: str = "http://127.0.0.1:11434"
+    local_url: str = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
     remote_url: str = ""
     cloud_url: str = ""
 
@@ -422,6 +517,108 @@ class PlanRequest(BaseModel):
     height: Optional[int] = None
     style_positive: Optional[str] = None
 
+# --- NEW: 6GB-safe config and tier exposure support ---
+
+# Paths typically mounted in Docker; keep harmless for native
+DEFAULT_CONFIG_DIR = "/app/config"
+HARDWARE_JSON_PATH = os.getenv("HARDWARE_JSON", f"{DEFAULT_CONFIG_DIR}/hardware.json")
+GENERATED_YAML_PATH = os.getenv("GENERATED_YAML", f"{DEFAULT_CONFIG_DIR}/generated.yaml")
+# Allow CONFIG_PATH to be either dir or file; store dir for presentation
+CONFIG_PATH_RAW = os.getenv("CONFIG_PATH", DEFAULT_CONFIG_DIR)
+
+# Minimal YAML loader without external deps; safe for key: value
+def _load_yaml_minimal(raw: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for line in (raw or "").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or ":" not in s:
+            continue
+        k, v = s.split(":", 1)
+        out[k.strip()] = v.strip().strip("'\"")
+    return out
+
+def _read_file_text(p: str) -> Optional[str]:
+    try:
+        return Path(p).read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+
+def _read_json_obj(p: str) -> Optional[Dict[str, Any]]:
+    try:
+        txt = _read_file_text(p)
+        return json.loads(txt) if txt else None
+    except Exception:
+        return None
+
+def _read_yaml_obj(p: str) -> Optional[Dict[str, Any]]:
+    try:
+        txt = _read_file_text(p)
+        if not txt:
+            return None
+        # Try PyYAML if present, else minimal
+        try:
+            import yaml  # type: ignore
+            data = yaml.safe_load(txt) or {}
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return _load_yaml_minimal(txt)
+    except Exception:
+        return None
+
+KNOWN_TIERS = {"6gb", "8gb", "16gb", "24gb"}
+SAFE_TIER = "6gb"
+
+def _extract_tier(generated: Optional[Dict[str, Any]], env_override: Optional[str]) -> Tuple[str, str]:
+    if env_override:
+        val = env_override.strip().lower()
+        if val in KNOWN_TIERS:
+            return val, "env"
+        return SAFE_TIER, "env_invalid"
+    if isinstance(generated, dict):
+        for key in ("tier", "vram_tier", "profile", "hardware_profile"):
+            t = generated.get(key)
+            if isinstance(t, str) and t.lower() in KNOWN_TIERS:
+                return t.lower(), "generated.yaml"
+    return SAFE_TIER, "fallback"
+
+def _summarize_generated(gen: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(gen, dict):
+        return {}
+    safe = {
+        "tier", "vram_tier", "profile", "hardware_profile",
+        "stt_backend", "stt_device",
+        "llm_model", "llm_endpoint",
+        "image_backend", "comfyui_endpoint",
+        "allow_cloud", "scheduler_mode", "resolution",
+    }
+    return {k: v for k, v in gen.items() if k in safe}
+
+def _gather_config_tier_state() -> Dict[str, Any]:
+    # CONFIG_PATH may be a file; we show a dir path in responses for clarity
+    cfg_path_for_ui = CONFIG_PATH_RAW
+    try:
+        p = Path(CONFIG_PATH_RAW)
+        if p.exists() and p.is_file():
+            cfg_path_for_ui = str(p.parent.resolve())
+        else:
+            cfg_path_for_ui = str((p if p.is_absolute() else p.resolve()))
+    except Exception:
+        pass
+
+    hardware = _read_json_obj(HARDWARE_JSON_PATH)
+    generated = _read_yaml_obj(GENERATED_YAML_PATH)
+    tier_env = os.getenv("SLAIDSHOW_TIER", "") or None
+    tier, tier_src = _extract_tier(generated, tier_env)
+
+    return {
+        "config_path": cfg_path_for_ui,
+        "hardware": hardware,
+        "generated": generated,
+        "tier": tier,
+        "tier_source": tier_src,
+        "assert_local": _assert_local_ctx(),
+    }
+
 class HealthReport(BaseModel):
     ollama_ok: bool
     image_backend: str
@@ -431,6 +628,11 @@ class HealthReport(BaseModel):
     last_prompt: Optional[str] = None
     last_llm_error: Optional[str] = None
     pollinations_key_present: bool = False
+    # NEW
+    docker: bool = False
+    config_path: str = ""
+    tier: str = SAFE_TIER
+    tier_source: str = "fallback"
 
 class ImageBackendSwitch(BaseModel):
     backend: Literal["comfyui", "pollinations"]
@@ -799,6 +1001,8 @@ def update_context_buffer(text: str) -> str:
     return ctx
 
 def _log_effective_config() -> None:
+    # NEW: also print Docker/native and tier info (non-fatal)
+    tier_state = _gather_config_tier_state()
     print(
         "[CONFIG]",
         f"env_file= {ENV_PATH or '(none)'}",
@@ -828,6 +1032,8 @@ def _log_effective_config() -> None:
         f"enabled={VISION.enabled} mode={VISION.mode} local={VISION.local_url} remote={VISION.remote_url} cloud={VISION.cloud_url}",
         "| direct_live:",
         f"enabled={STATE.direct_live}",
+        "| env:",
+        f"docker={tier_state['assert_local']['docker']} config_path={tier_state['config_path']} tier={tier_state['tier']}({tier_state['tier_source']})",
     )
 
 # ---------- Runtime-aware backend wrapper ----------
@@ -1420,6 +1626,7 @@ if bridge_router is not None:
 
 # Static mounts
 app.mount("/static", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="static")
+app.mount("/assets", StaticFiles(directory=str(Path("assets").resolve())), name="assets")
 if not any(route for route in app.router.routes if getattr(route, "path", "") == "/workflows"):
     app.mount("/workflows", StaticFiles(directory=str(WORKFLOWS_DIR), html=False), name="workflows")
 
@@ -1433,9 +1640,6 @@ async def sse_broadcast(event_name: str, payload: dict) -> None:
     Accepts events from image_backend (e.g., 'gallery:updated') and forwards them
     to existing SSE clients using the local 'broadcast' helper.
     """
-    # Reuse your existing 'broadcast' function that enqueues SSE messages to STATE.listeners
-    # payload can be dict; if your broadcast expects plain strings for data,
-    # you can json.dumps(payload) here. The event_name stays as SSE 'event:' field.
     try:
         data = payload if isinstance(payload, (str, bytes)) else json.dumps(payload, ensure_ascii=False)
         await broadcast(event_name, data)
@@ -1491,6 +1695,7 @@ async def transcription_status():
 @app.get("/health", response_model=HealthReport)
 async def health() -> HealthReport:
     ollama_ok = await _ollama_available()
+    cfg = _gather_config_tier_state()
     return HealthReport(
         ollama_ok=ollama_ok,
         image_backend=STATE.image_backend_name,
@@ -1500,6 +1705,10 @@ async def health() -> HealthReport:
         last_prompt=STATE.last_prompt,
         last_llm_error=STATE.last_llm_error,
         pollinations_key_present=bool(_env_str("POLLINATIONS_SECRET", "")),
+        docker=bool(cfg["assert_local"]["docker"]),
+        config_path=str(cfg["config_path"]),
+        tier=str(cfg["tier"]),
+        tier_source=str(cfg["tier_source"]),
     )
 
 @app.get("/config")
@@ -1516,8 +1725,19 @@ async def get_config():
     comfy_disabled = app_disable_comfy_env in {"1", "true", "yes", "on"}
     show_workflow_selector = bool(is_comfy and not comfy_disabled)
     comfy_mode = os.getenv("APP_COMFY_MODE", "auto")
+
+    # NEW: gather tier/config
+    cfg = _gather_config_tier_state()
+    gen_excerpt = _summarize_generated(cfg.get("generated"))
+
     return {
         "env_file": ENV_PATH or "(env vars only)",
+        "env": {  # NEW: compact env/state exposure
+            "docker": bool(cfg["assert_local"]["docker"]),
+            "config_path": str(cfg["config_path"]),
+            "tier": str(cfg["tier"]),
+            "tier_source": str(cfg["tier_source"]),
+        },
         "audio": {"device_pref": AUDIO_DEVICE_PREF, "sample_rate": SAMPLE_RATE, "frame_ms": FRAME_MS, "stream_latency_sec": APP_STREAM_LATENCY_SEC},
         "vad": {"disable_vad": DISABLE_VAD, "rms_threshold": RMS_VAD_THRESHOLD},
         "snapshot": {"snapshot_sec": SNAPSHOT_SEC, "min_buf_sec": MIN_BUF_SEC, "max_silence_ms": MAX_SILENCE_MS, "max_segment_sec": MAX_SEGMENT_SEC, "first_snapshot_deadline_sec": FIRST_SNAPSHOT_DEADLINE_SEC},
@@ -1582,6 +1802,11 @@ async def get_config():
             "cloud_url": VISION.cloud_url,
         },
         "direct_live": {"enabled": STATE.direct_live},  # NEW: expose direct-live flag
+        # NEW: safe excerpt of generated.yaml (if any)
+        "generated_yaml_excerpt": gen_excerpt,
+        "hardware_present": bool(cfg.get("hardware") is not None),
+        "generated_present": bool(cfg.get("generated") is not None),
+        "assert_local": cfg.get("assert_local"),
     }
 
 
@@ -1608,11 +1833,6 @@ async def set_lowend_mode(cfg: LowEndSettings):
       - Requests the transcription manager to atomically set/unset APP_LOWEND_MODE and reinitialize
       - Restarts realtime transcriber if pipeline is running
       - Broadcasts and returns the requested enabled flag (legacy response)
-
-    Implementation notes:
-      - Uses init_transcription_backend() (already imported) to obtain the manager instance.
-      - Calls TranscriptionManager.set_lowend_mode(enable: bool) inside asyncio.to_thread
-        if available; otherwise falls back to legacy env flip + init_transcription_backend().
     """
     # Current state
     cur_enabled = _env_lowend_requested()
@@ -1636,12 +1856,8 @@ async def set_lowend_mode(cfg: LowEndSettings):
     tm = None
     st: dict = {}
     try:
-        # Obtain manager via init_transcription_backend() which returns the manager (and initializes it if needed)
-        # This avoids NameError if get_transcription_manager is not in scope.
         tm = init_transcription_backend()
-
         if tm is None:
-            # If still None, perform legacy env flip + init fallback.
             if new_enabled:
                 os.environ["APP_LOWEND_MODE"] = "1"
             else:
@@ -1656,20 +1872,17 @@ async def set_lowend_mode(cfg: LowEndSettings):
                 print(f"[LOWEND] fallback reinit failed: {e}\n{tb}")
                 st = {}
         else:
-            # Prefer manager-provided atomic setter if available
             if hasattr(tm, "set_lowend_mode") and callable(getattr(tm, "set_lowend_mode")):
                 try:
                     st_res = await asyncio.to_thread(tm.set_lowend_mode, bool(new_enabled))
                     if isinstance(st_res, dict):
                         st = st_res
                     else:
-                        # Coerce to dict for downstream logging
                         st = {"lowend_mode": bool(new_enabled)}
                     print(f"[LOWEND] tm.set_lowend_mode completed; manager reported lowend_mode={st.get('lowend_mode')}")
                 except Exception as e:
                     tb = traceback.format_exc()
                     print(f"[LOWEND] tm.set_lowend_mode failed: {e}\n{tb}")
-                    # Best-effort fallback: ensure env matches request, then try reinit
                     if new_enabled:
                         os.environ["APP_LOWEND_MODE"] = "1"
                     else:
@@ -1684,14 +1897,12 @@ async def set_lowend_mode(cfg: LowEndSettings):
                         print(f"[LOWEND] fallback reinit also failed: {e2}\n{tb2}")
                         st = {}
             else:
-                # Manager lacks setter: follow legacy behavior but using the initialized manager
                 if new_enabled:
                     os.environ["APP_LOWEND_MODE"] = "1"
                 else:
                     with contextlib.suppress(Exception):
                         del os.environ["APP_LOWEND_MODE"]
                 try:
-                    # Reinitialize manager to apply env changes
                     tm.initialize()
                     st = tm.get_status() or {}
                     print("[LOWEND] tm.initialize() used as fallback (no set_lowend_mode available)")
@@ -1702,7 +1913,6 @@ async def set_lowend_mode(cfg: LowEndSettings):
     except Exception as outer_e:
         tb = traceback.format_exc()
         print(f"[LOWEND] unexpected error in set_lowend_mode flow: {outer_e}\n{tb}")
-        # Ensure env matches request for UI consistency even on unexpected errors
         if new_enabled:
             os.environ["APP_LOWEND_MODE"] = "1"
         else:
@@ -1710,18 +1920,14 @@ async def set_lowend_mode(cfg: LowEndSettings):
                 del os.environ["APP_LOWEND_MODE"]
         st = {}
 
-    # At this point 'st' is the best-effort authoritative manager status dict (may be empty).
-    # For logging clarity, compute reported_after for manager_lowend display.
     reported_after = None
     if isinstance(st, dict):
         reported_after = st.get("lowend_mode")
     if reported_after is None:
-        # If manager didn't provide a status, fall back to the requested value (for logs only)
         reported_after = bool(new_enabled)
     env_after = os.getenv("APP_LOWEND_MODE", "")
     print(f"[LOWEND] final state: APP_LOWEND_MODE='{env_after}' manager_lowend={reported_after}")
 
-    # If pipeline is running, auto-start a new realtime transcriber so the session continues.
     if STATE.running and RT.transcriber is None:
         try:
             rt = RealtimeTranscriber(sample_rate=SAMPLE_RATE)
@@ -1953,7 +2159,10 @@ class _SessionRecording:
             return {"success": False, "error": "save_failed", "error_type": type(exc).__name__, "request_id": request_id}, 500
 RECORDING=_SessionRecording()
 @app.get('/api/recording/status')
-async def recording_status(): return _rec_JSONResponse(RECORDING.status())
+async def recording_status():
+    payload = RECORDING.status()
+    payload["selected_backend"] = get_transcription_status().get("selected_backend", "uninitialized")
+    return _rec_JSONResponse(payload)
 def _recording_save_sync(): return RECORDING.save()
 @app.post('/api/recording/save')
 async def recording_save():
@@ -3022,17 +3231,11 @@ async def api_style_build(req: StyleBuildRequest = Body(...)):
             res = await _maybe_await(_call_build_styles_compat, eng_req)
         except Exception as e:
             tb = traceback.format_exc()
-            print(f"[STYLE] build_styles failed: {e}\n{tb}")
             return JSONResponse({"error": "style_build_failed", "reason": f"{e}"}, status_code=502)
         api_res = _from_engine_result(res)
-        print("[STYLE][diag] notes:", getattr(api_res, "style_components", {}).get("notes"))
         normalized = (api_res.style_positive or "").strip()
         api_res.style_positive = normalized
         STATE.style_positive = normalized or None
-        print("[STYLE][diag] warnings:", getattr(api_res, "style_components", {}).get("warnings"))
-        print("[STYLE][diag] vision_text_used:", getattr(api_res, "style_components", {}).get("vision_text_used"))
-        print("[STYLE][diag] descriptors_used:", getattr(api_res, "style_components", {}).get("descriptors_used"))
-        print("[STYLE][diag] style_positive:", api_res.style_positive)
         try:
             ref_text = _extract_reference_text_from_engine_result(res)
             if ref_text:
@@ -3047,13 +3250,10 @@ async def api_style_build(req: StyleBuildRequest = Body(...)):
                 api_res.info.update(info_note)
             else:
                 api_res.info = info_note
-        print(f"[STYLE] build result: len={len(normalized)} ref_used={api_res.reference_used} "
-              f"deactivate={effective_deactivate} ref_text_len={len((STATE.reference_text or ''))}")
         await broadcast("status", "style_positive:updated")
         return api_res
     except Exception as e:
         tb = traceback.format_exc()
-        print(f"[STYLE] build route exception: {e}\n{tb}")
         return JSONResponse({"error": "internal_error", "reason": f"{e}"}, status_code=500)
 
 @app.post("/api/style/reset")
@@ -3087,7 +3287,6 @@ async def open_dir():
             "fallback": "/static/",
             "path": str(OUTPUT_DIR),
         }
-        # JSON on error is fine; here a body is intended
         from fastapi.responses import JSONResponse
         return JSONResponse(detail, status_code=409)
     except Exception as e:
@@ -3099,6 +3298,8 @@ async def open_dir():
         }
         from fastapi.responses import JSONResponse
         return JSONResponse(detail, status_code=409)
+
+
 
 # ---------- App entry ----------
 

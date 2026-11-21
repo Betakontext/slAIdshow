@@ -56,10 +56,10 @@ Vorhanden beziehungsweise im Einsatz berichtet:
 
 - Anwendungseinstieg `app.py`.
 - Mikrofon, VAD und Transkription.
-- Whisper/Faster-Whisper.
+- Whisper/Faster-Whisper/Parakeet.
 - Ollama-Prompt-Erzeugung.
 - Lokale und entfernte ComfyUI-Bildgenerierung.
-- Pollinations als alternatives Bildbackend.
+- Pollinations als alternatives Bildbackend inkl. BYOP.
 - Galerie, Vollbild, Stilsteuerung und SSE.
 - Nativer CPU-/Lowend-Betrieb auf ThinkPad X260 und ThinkPad E14.
 
@@ -125,7 +125,7 @@ Daraus folgt:
 #### 3.3 Pollinations
 
 - Optionales Bildbackend mit ausdrücklicher Cloud-Freigabe.
-- Eigene Zugangsdaten und eigene Abrechnung nach dem verifizierten Pollinations-Verfahren.
+- Eigene Zugangsdaten und eigene Abrechnung nach dem verifizierten Pollinations-Verfahren -> Bring your own Pollen (BYOP)
 - Kein automatischer kostenpflichtiger Backendwechsel.
 - Kein Offline-Versprechen.
 - Lokale STT-/LLM-Verarbeitung bleibt möglich.
