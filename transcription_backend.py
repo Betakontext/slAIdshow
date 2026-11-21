@@ -686,7 +686,7 @@ class PyWhisperCppBackend(BaseTranscriptionBackend):
 
 class ParakeetBackend(BaseTranscriptionBackend):
     """Subprozess-Backend für parakeet.cpp (GGUF)."""
-
+    backend_name = "parakeet"
     def __init__(self, config: TranscriptionConfig, device: str, model_name: str) -> None:
         import subprocess as _sp
         self.device = device

@@ -2158,7 +2158,10 @@ class _SessionRecording:
             return {"success": False, "error": "save_failed", "error_type": type(exc).__name__, "request_id": request_id}, 500
 RECORDING=_SessionRecording()
 @app.get('/api/recording/status')
-async def recording_status(): return _rec_JSONResponse(RECORDING.status())
+async def recording_status():
+    payload = RECORDING.status()
+    payload["selected_backend"] = get_transcription_status().get("selected_backend", "uninitialized")
+    return _rec_JSONResponse(payload)
 def _recording_save_sync(): return RECORDING.save()
 @app.post('/api/recording/save')
 async def recording_save():
