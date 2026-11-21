@@ -368,8 +368,25 @@ WORKFLOWS_DIR = Path(os.getenv("WORKFLOWS_DIR", "workflows")).resolve()
 WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------- Ollama ----------
+def _resolve_ollama_host() -> str:
+    import socket
+    port = _env_int("APP_OLLAMA_PORT", 11434)
+    hosts = [_env_str("APP_OLLAMA_HOST", "127.0.0.1")]
+    fallbacks = _env_str("APP_OLLAMA_FALLBACK_HOSTS", "")
+    if fallbacks:
+        hosts.extend(h.strip() for h in fallbacks.split(",") if h.strip())
+    for host in hosts:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                if host != hosts[0]:
+                    print(f"[OLLAMA] fallback host: {host}:{port}")
+                return host
+        except (OSError, socket.timeout):
+            continue
+    print(f"[OLLAMA] no reachable host, using primary: {hosts[0]}")
+    return hosts[0]
 
-OLLAMA_HOST = _env_str("APP_OLLAMA_HOST", "127.0.0.1")
+OLLAMA_HOST = _resolve_ollama_host()
 OLLAMA_PORT = _env_int("APP_OLLAMA_PORT", 11434)
 OLLAMA_MODEL = _env_str("APP_OLLAMA_MODEL", "llama3.2:latest")
 OLLAMA_TEMPERATURE = _env_float("APP_OLLAMA_TEMPERATURE", 0.2)
@@ -411,11 +428,8 @@ def _assert_local_ctx() -> Dict[str, Any]:
     }
 
 def assert_local(host: str) -> None:
-    """
-    Hard safety: do not allow remote hosts for Ollama.
-    """
-    if host != "127.0.0.1" and host != "ollama":  # allow service host in Docker compose
-        raise AssertionError(f"Only localhost/service allowed, got {host}")
+    if host != "127.0.0.1" and host != "ollama" and not host.startswith("192.168.") and not host.startswith("10."):
+        raise ValueError(f"Non-local Ollama host: {host}")
 
 assert_local(OLLAMA_HOST)
 
@@ -469,7 +483,7 @@ class OllamaVisionSettings(BaseModel):
 class OllamaVisionState:
     enabled: bool = True
     mode: str = "local"
-    local_url: str = "http://127.0.0.1:11434"
+    local_url: str = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
     remote_url: str = ""
     cloud_url: str = ""
 

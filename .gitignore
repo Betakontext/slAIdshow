@@ -50,6 +50,10 @@ Desktop.ini
 /hardware.json
 /generated.yaml
 
+# Parakeet
+bin/parakeet-cli
+parakeet.cpp/
+
 # Local model weights and download caches
 # Models are installed by the downloader, not distributed through Git.
 /models/
@@ -108,7 +112,8 @@ pip-wheel-metadata/
 /comfyui_bridge00.py
 /transcription_backend00.py
 /web/index00.html
-sourcecode_snapshot.py
+/sourcecode_snapshot.py
+/Brave.md
 
 # Intentionally tracked:
 # - workflows/*.json: reproducible ComfyUI workflow definitions

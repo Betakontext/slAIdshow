@@ -685,79 +685,46 @@ class PyWhisperCppBackend(BaseTranscriptionBackend):
 # -----------------------
 
 class ParakeetBackend(BaseTranscriptionBackend):
-    """
-    Minimal Parakeet TDT backend adapter.
-    This assumes an optional 'parakeet' package that provides:
-      - load_model(name: str, device: str) -> object
-      - model.transcribe_float32(audio: np.ndarray, sample_rate: int, language: Optional[str]) -> str
-    This is a conservative adapter; if imports fail it should never crash initialization elsewhere.
-    """
-
-    backend_name = "parakeet"
+    """Subprozess-Backend für parakeet.cpp (GGUF)."""
 
     def __init__(self, config: TranscriptionConfig, device: str, model_name: str) -> None:
-        super().__init__(config)
-        try:
-            import parakeet  # type: ignore  # optional
-        except Exception as exc:
-            raise RuntimeError(f"Parakeet runtime not available: {exc}")
-
-        dev = device
-        if dev == "auto":
-            # 6GB-first: default to CPU unless explicitly set to cuda
-            dev = "cpu"
-
-        self.device = dev
+        import subprocess as _sp
+        self.device = device
         self.model_name = model_name
-
-        # Create models dir under /app/models by convention if adapter loads local weights
-        # Keep it minimal; rely on parakeet to manage cache if any
-        self.model = None
-        try:
-            if hasattr(parakeet, "load_model"):
-                # Hypothetical API. If different, adjust here with env flags later.
-                self.model = parakeet.load_model(self.model_name, device=self.device)
-            else:
-                raise RuntimeError("parakeet.load_model not found")
-        except Exception as exc:
-            raise RuntimeError(f"Parakeet model load failed: {exc}")
-
-        print(
-            "[TRANSCRIBE] Parakeet init: "
-            f"device={self.device} model={self.model_name} "
-            f"lang={self.config.language} temp={self.config.temperature:.2f} "
-            f"min_sec={self.config.min_seconds:.2f} min_peak={self.config.min_peak:.4f}"
-        )
+        self._subprocess = _sp
+        self.binary = os.getenv("APP_PARAKEET_BINARY", "./bin/parakeet-cli")
+        self.model_path = str(Path(model_name))  # oder absoluter Pfad
+        self.threads = int(os.getenv("APP_PARAKEET_THREADS", "4"))
+        # Sanity-Check: Binary vorhanden?
+        if not Path(self.binary).is_file():
+            raise FileNotFoundError(f"parakeet-cli not found: {self.binary}")
+        print(f"[TRANSCRIBE] parakeet init: binary={self.binary} model={self.model_path} threads={self.threads}")
 
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> str:
-        if self.model is None:
-            return ""
-        audio = _prepare_audio(
-            samples=samples,
-            sample_rate=sample_rate,
-            min_seconds=self.config.min_seconds,
-        )
-        if audio.size == 0:
-            return ""
-
-        # Language selection similar to faster-whisper
-        hint_lang = (os.getenv("APP_INPUT_LOCALE_HINT", "") or "").strip().lower() or None
-        eff_lang = (self.config.language or hint_lang or None)
-
+        import tempfile, wave
+        # 1. Audio → temp WAV
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
+            audio_int16 = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
+            with wave.open(tmp_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                wf.writeframes(audio_int16.tobytes())
         try:
-            # Hypothetical stable call; fallbacks if API differs
-            if hasattr(self.model, "transcribe_float32"):
-                txt = self.model.transcribe_float32(audio, sample_rate=16000, language=eff_lang)
-            elif hasattr(self.model, "transcribe"):
-                txt = self.model.transcribe(audio, sample_rate=16000, language=eff_lang)
-            else:
-                # bytes path as last resort
-                txt = self.model.transcribe(audio.astype(np.float32, copy=False).tobytes(), sample_rate=16000, language=eff_lang)
-        except Exception as exc:
-            print(f"[TRANSCRIBE] Parakeet transcribe failed: {exc}")
-            return ""
-
-        return clean_transcript(str(txt or "").strip())
+            # 2. Subprozess
+            result = self._subprocess.run(
+                [self.binary, "transcribe",
+                 "--model", self.model_path,
+                 "--input", tmp_path,
+                 "--threads", str(self.threads)],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"parakeet-cli failed: {result.stderr}")
+            return result.stdout.strip()
+        finally:
+            os.unlink(tmp_path)
 
 
 # -----------------------
@@ -1519,31 +1486,27 @@ class AudioBufferWorker:
             import traceback as _rt_tb; _rt_tb.print_exc()
 
 class ParakeetAdapter:
-    """
-    Minimal parakeet adapter. Not used by main flow; kept for future direct stream integrations.
-    """
+    """Adapter für RealtimeTranscriber – nutzt ParakeetBackend via subprocess."""
+
     def __init__(self):
-        self._loaded = False
-        self._model = None
+        self._backend = None
 
     def load(self):
-        try:
-            import parakeet  # pragma: no cover - optional dependency
-            self._loaded = True
-            if hasattr(parakeet, "load_model"):
-                self._model = parakeet.load_model("tdt_0.6b_v3")
-            else:
-                self._loaded = False
-        except Exception:
-            self._loaded = False
+        # ParakeetBackend aus dem Manager holen oder neu instantiieren
+        from transcription_backend import get_transcription_manager
+        mgr = get_transcription_manager()
+        self._backend = mgr._backend  # muss ParakeetBackend sein
+        if not isinstance(self._backend, ParakeetBackend):
+            raise RuntimeError("ParakeetAdapter: Backend is not ParakeetBackend")
 
     async def transcribe_bytes(self, pcm_bytes: bytes, sr: int) -> str:
-        if not self._loaded or self._model is None:
-            raise RuntimeError("Parakeet not loaded")
-        if hasattr(self._model, "transcribe"):
-            return self._model.transcribe(pcm_bytes, sample_rate=sr)
-        return ""
-# --- END injected ---
+        import asyncio
+        samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        loop = asyncio.get_event_loop()
+        # Subprozess ist blocking → in Thread offloaden
+        return await loop.run_in_executor(
+            None, self._backend.transcribe, samples, sr
+        )
 
 class RealtimeTranscriber:
     """
