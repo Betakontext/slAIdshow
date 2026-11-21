@@ -13,7 +13,7 @@ Whisper–Ollama–ComfyUI pipeline for AI live illustrations via a FastAPI brow
 
 Perfect for streamers, lecturers, and storytellers: turn live speech into compelling visuals in seconds.
 
-![slAIdshow logo](assets/slAIdshow-logo.svg)
+![slAIdshow logo](assets/slAIdshow_logo.svg)
 
 ---
 
