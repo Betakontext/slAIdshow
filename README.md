@@ -1,4 +1,4 @@
-![slAIdshow logo](assets/slAIdshow_logo.svg)
+<img src="assets/slAIdshow_logo.svg" width="500">
 
 ## Local AI Speech→Image Generator
 
