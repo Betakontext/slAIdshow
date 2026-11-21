@@ -1860,7 +1860,7 @@ class RealtimeTranscriber:
         })
         self._cur_utt = ""
         self._last_emitted_partial_norm = ""
-               self._last_partial_emit_ms = _now_ms()
+        self._last_partial_emit_ms = _now_ms()
 
     def _emit(self, evt: RealtimeEvent) -> None:
         for cb in list(self._subs):

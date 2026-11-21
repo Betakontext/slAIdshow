@@ -122,7 +122,10 @@ Generate config (GPU path)
 - Or force smaller profile: SLAIDSHOW_TIER=6gb python config_generator.py --hardware ... --output ...
 
 Run the app
-- uvicorn app:app --host 0.0.0.0 --port 8080
+
+    source .venv/bin/activate
+    uvicorn app:app --host 0.0.0.0 --port 8080
+
 - Open http://127.0.0.1:8080
 
 CPU / Remote image option
