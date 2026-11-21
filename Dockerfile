@@ -2,7 +2,7 @@
 
 ARG PYTHON_IMAGE=python:3.12-slim-bookworm
 
-# Build native dependencies without retaining compilers in the runtime image.
+# -------- Stage 1: dependencies (build venv) --------
 FROM ${PYTHON_IMAGE} AS dependencies
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -10,27 +10,40 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     CMAKE_BUILD_PARALLEL_LEVEL=2 \
     GGML_CUDA=OFF
 
+# System libs for building and for Python wheels that link to audio backends
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         build-essential \
         ca-certificates \
         cmake \
         git \
+        pkg-config \
+        # PortAudio/ALSA for sounddevice (mic runtime and import check)
         libasound2-dev \
         libportaudio2 \
         portaudio19-dev \
-        pkg-config \
+        # libsndfile for soundfile (file-fallback decode)
+        libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
+# Install Python deps
 COPY requirements.txt /tmp/requirements.txt
+RUN python -m pip install --upgrade pip \
+ && python -m pip install --requirement /tmp/requirements.txt \
+ && python -m pip check
 
-RUN python -m pip install --requirement /tmp/requirements.txt \
-    && python -m pip check
+# Sanity import check including pywhispercpp and soundfile
+RUN python - <<'PY'
+import fastapi, uvicorn, numpy, sounddevice, soundfile
+import pywhispercpp, faster_whisper
+print("Imports OK")
+PY
 
 
+# -------- Stage 2: runtime --------
 FROM ${PYTHON_IMAGE} AS runtime
 
 ENV PATH="/opt/venv/bin:${PATH}" \
@@ -52,27 +65,27 @@ ENV PATH="/opt/venv/bin:${PATH}" \
     OMP_NUM_THREADS=2 \
     OPENBLAS_NUM_THREADS=2
 
-# CUDA belongs to the separate Ollama and ComfyUI services.
-# PortAudio and ALSA support host audio devices passed through by Compose.
+# Runtime system libs: audio + BLAS/OpenMP
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         ca-certificates \
-        libasound2 \
-        libgomp1 \
-        libportaudio2 \
         libstdc++6 \
+        libgomp1 \
+        # audio stack for mic + file decoding
+        libasound2 \
+        libportaudio2 \
+        libsndfile1 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 slaidshow \
     && useradd --uid 10001 --gid slaidshow \
-        --create-home --shell /usr/sbin/nologin slaidshow
+         --create-home --shell /usr/sbin/nologin slaidshow
 
+# Bring venv from builder
 COPY --from=dependencies /opt/venv /opt/venv
 
 WORKDIR /app
 
-# Copy source without storing local secrets, environments or model assets
-# in image layers. A restrictive .dockerignore should additionally limit
-# the build context sent to the builder.
+# Copy source with a restrictive context; avoid models/secrets in layers
 RUN --mount=type=bind,source=.,target=/source,readonly \
     tar --create --file=- --directory=/source \
         --exclude='.git' \
@@ -94,21 +107,30 @@ RUN --mount=type=bind,source=.,target=/source,readonly \
         . \
     | tar --extract --file=- --directory=/app --no-same-owner
 
+# Verify entrypoint and critical imports (now within runtime image)
 RUN test -f /app/app.py \
-    && mkdir -p /app/config /app/models /app/recordings /app/outputs \
-    && chown -R slaidshow:slaidshow /app \
-    && python -c "import fastapi, uvicorn, sounddevice, faster_whisper"
+ && mkdir -p /app/config /app/models /app/recordings /app/outputs \
+ && chown -R slaidshow:slaidshow /app \
+ && python - <<'PY'
+import fastapi, uvicorn, numpy, sounddevice, soundfile
+import pywhispercpp, faster_whisper
+print("Runtime imports OK")
+PY
 
 USER slaidshow:slaidshow
 
 EXPOSE 8080
 
-# This checks the HTTP endpoint, not model availability or GPU readiness.
+# Simple HTTP health; does not verify model availability
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('APP_BIND_PORT', '8080') + '/health', timeout=8).close()"
+  CMD python - <<'PY' || exit 1
+import os, urllib.request
+port=os.environ.get('APP_BIND_PORT','8080')
+with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=8) as r:
+    pass
+print("healthy")
+PY
 
 STOPSIGNAL SIGTERM
 
-# One worker owns the microphone, show state and in-process scheduling.
-# Runtime overrides remain possible through the corresponding variables.
 CMD ["sh", "-c", "exec python -m uvicorn app:app --host \"${APP_BIND_HOST}\" --port \"${APP_BIND_PORT}\" --workers 1 --timeout-graceful-shutdown 30"]

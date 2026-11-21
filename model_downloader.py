@@ -1,5 +1,6 @@
 # model_downloader.py
-"""Validate download policy without fetching unapproved model artifacts.
+"""
+Validate download policy without fetching unapproved model artifacts.
 
 Schema version 1 permits only disabled downloads. Supporting real downloads
 requires an explicitly validated artifact contract and a schema extension.
@@ -39,27 +40,27 @@ def download_models(config: dict[str, Any]) -> dict[str, Any]:
         validated = validate_config(config)
     except (RuntimeConfigurationError, RecursionError) as exc:
         raise ModelDownloadError(
-            "Download-Konfiguration ist ungültig oder nicht freigegeben; "
-            "mit config_generator.py neu erzeugen."
+            "Download configuration is invalid or not approved; "
+            "regenerate with config_generator.py."
         ) from exc
 
     downloads = validated["downloads"]
 
     # Fail closed if a future schema enables downloads without implementing
     # verified artifacts, pinned sources, licenses, and atomic persistence here.
-    if downloads["enabled"] is not False:
+    if downloads.get("enabled") is not False:
         raise ModelDownloadError(
-            "Aktive Downloads werden von dieser Downloader-Version "
-            "nicht unterstützt. Es wurden keine Downloads gestartet."
+            "Active downloads are not supported by this downloader version. "
+            "No downloads were started."
         )
 
-    if downloads["artifacts"] != []:
+    if downloads.get("artifacts") not in ([], None):
         raise ModelDownloadError(
-            "Deaktivierte Downloads dürfen keine Artefakte enthalten."
+            "Disabled downloads must not specify any artifacts."
         )
 
     LOGGER.info(
-        "Downloads für Profil %s deaktiviert; keine Modelle geladen.",
+        "Downloads disabled for tier %s; no models were fetched.",
         validated["tier"],
     )
 
@@ -67,7 +68,7 @@ def download_models(config: dict[str, Any]) -> dict[str, Any]:
         "tier": validated["tier"],
         "downloads_enabled": False,
         "outcome": "skipped_by_policy",
-        "reason": downloads["reason"],
+        "reason": downloads.get("reason", "downloads_disabled_by_schema_v1"),
         "downloaded_artifacts": [],
         "model_presence_checked": False,
         "models_ready": False,
@@ -78,16 +79,16 @@ def main(argv: list[str] | None = None) -> int:
     """Load persisted configuration and report the enforced download policy."""
     parser = argparse.ArgumentParser(
         description=(
-            "Prüft die slAIdshow-Downloadrichtlinie. "
-            "Schema-Version 1 erlaubt keine Modell-Downloads."
+            "Validate the slAIdshow download policy. "
+            "Schema version 1 does not allow model downloads."
         )
     )
     parser.add_argument(
         "--config",
         type=Path,
         help=(
-            "YAML-Pfad; alternativ CONFIG_PATH "
-            "oder /app/config/generated.yaml."
+            "YAML path; alternatively use CONFIG_PATH "
+            "or /app/config/generated.yaml."
         ),
     )
     args = parser.parse_args(argv)
@@ -96,14 +97,14 @@ def main(argv: list[str] | None = None) -> int:
         configuration = load_config(args.config)
         result = download_models(configuration.as_dict())
     except (RuntimeConfigurationError, ModelDownloadError) as exc:
-        print(f"Fehler: {exc}", file=sys.stderr)
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
     print(
-        "Downloads sind gemäß Konfiguration deaktiviert. "
-        "Es wurden keine Netzwerkzugriffe oder Download-Befehle ausgeführt. "
-        "Modellverfügbarkeit und Show-Startfähigkeit sind nicht bestätigt.",
+        "Downloads are disabled per configuration. "
+        "No network access or download commands were executed. "
+        "Model availability and show readiness are not confirmed.",
         file=sys.stderr,
     )
 
@@ -114,4 +115,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

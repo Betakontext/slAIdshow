@@ -108,6 +108,7 @@ pip-wheel-metadata/
 /comfyui_bridge00.py
 /transcription_backend00.py
 /web/index00.html
+sourcecode_snapshot.py
 
 # Intentionally tracked:
 # - workflows/*.json: reproducible ComfyUI workflow definitions

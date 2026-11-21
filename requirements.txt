@@ -25,11 +25,12 @@ PyYAML>=6.0.2,<7
 # Preserve the NumPy version reported as working locally.
 numpy==2.5.0
 sounddevice==0.4.7
+# For file-based audio fallback (WAV/FLAC/OGG etc.) used by transcribe_file_for_fallback
+soundfile>=0.12,<1
 
 # Existing local transcription backends
 # CPU execution is the baseline for the 6 GB profile.
 # GPU execution requires a separately validated CUDA runtime.
-# Parakeet is not implemented by installing faster-whisper.
 pywhispercpp>=1.1.0,<2
 faster-whisper==1.2.1
 
@@ -63,5 +64,6 @@ wheel>=0.41,<1
 # Optional VAD remains disabled until explicitly integrated.
 # webrtcvad==2.0.10
 
-# Development tools such as pytest and ruff belong in a separate
-# development dependency manifest, not in the runtime image.
+# Notes:
+# - parakeet-cli (parakeet.cpp) wird nicht als Python-Paket installiert; falls genutzt, läuft es als externer Subprozess.
+# - Keine zusätzlichen Cloud-Abhängigkeiten im Runtime-Pfad.
