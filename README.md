@@ -1,4 +1,4 @@
-# slAIdshow · Local AI Speech→Image Generator
+![slAIdshow logo](assets/slAIdshow_logo.svg)## · Local AI Speech→Image Generator
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#license)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
@@ -13,7 +13,6 @@ Whisper–Ollama–ComfyUI pipeline for AI live illustrations via a FastAPI brow
 
 Perfect for streamers, lecturers, and storytellers: turn live speech into compelling visuals in seconds.
 
-![slAIdshow logo](assets/slAIdshow_logo.svg)
 
 ---
 
