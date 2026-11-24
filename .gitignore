@@ -42,6 +42,7 @@ Desktop.ini
 *.local.json
 *.local.yaml
 *.local.yml
+.pollinations_key
 
 # Generated hardware detection and runtime configuration
 /config/hardware.json

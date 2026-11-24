@@ -1298,6 +1298,10 @@
           prependThumb({name: j.rel.replace(/^\/?static\//, ''), url: bustRel, modified: Date.now()/1000});
         } else {
           log(statusLog, `direct failed: ${j.detail || j.error || r.status}`);
+          if (pollConnectStatus) {
+            pollConnectStatus.textContent = '';
+            btnPollConnect.disabled = false;
+          }
         }
       } catch (e) {
         log(statusLog, `direct exception: ${e}`);
@@ -1959,6 +1963,14 @@
           toggleDirectLive.checked = false;
         }
         syncDirectLiveHint();
+
+        try {
+          const pollStatus = await (await fetch('/api/pollinations/status')).json();
+          if (pollConnectStatus) {
+            pollConnectStatus.textContent = pollStatus.connected ? t('poll_connected') : '';
+            btnPollConnect.disabled = !pollStatus.connected;
+          }
+        } catch {}
 
         if (statusEl.dataset.state !== 'connected')
         statusEl.textContent = t('status_ready');

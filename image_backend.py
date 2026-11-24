@@ -559,6 +559,11 @@ class PollinationsBackend(ImageBackend):
                     return target
                 except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError, ValidationError) as e:
                     last_exc = e
+                    if isinstance(e, httpx.HTTPStatusError) and e.response.status_code in (401, 402, 429):
+                        from pollinations_auth import _invalidate
+                        _invalidate()
+                        print("[BYOP] key expired/revoked — invalidated, reconnect needed")
+                        break  # keinen Sinn mehr, weiter zu retryen
                     print(f"[POLLINATIONS V1] attempt={attempt} error={type(e).__name__}: {e}")
                     if attempt < 5:
                         await asyncio.sleep(delay)
@@ -603,6 +608,11 @@ class PollinationsBackend(ImageBackend):
                     return target
                 except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
                     last_exc = e
+                    if isinstance(e, httpx.HTTPStatusError) and e.response.status_code in (401, 402, 429):
+                        from pollinations_auth import _invalidate
+                        _invalidate()
+                        print("[BYOP] key expired/revoked — invalidated, reconnect needed")
+                        break
                     print(f"[POLLINATIONS GET] attempt={attempt} error={type(e).__name__}: {e}")
                     if attempt < 4:
                         await asyncio.sleep(delay)
