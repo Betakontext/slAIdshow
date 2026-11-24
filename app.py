@@ -74,6 +74,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 from utils.os_open import open_folder_os, OpenDirError
+from pollinations_auth import start_device_flow, poll_for_token, get_key
+import asyncio
 
 # ---------- Optional dotenv loading ----------
 
@@ -1711,6 +1713,8 @@ async def health() -> HealthReport:
         tier_source=str(cfg["tier_source"]),
     )
 
+
+
 @app.get("/config")
 async def get_config():
     wpath = WHISPER_MODEL_PATH
@@ -2346,7 +2350,7 @@ async def api_plan(req: PlanRequest):
             print(f"[OLLAMA] /api/plan error: {e}\n{tb}")
             return JSONResponse({"error": str(e)}, status_code=500)
 
-# ---------- Image: Direct (ComfyUI und Pollinations) ----------
+# ---------- Image: Direct (ComfyUI and Pollinations) ----------
 
 @app.post("/api/image/direct", response_model=ImageResponse)
 async def api_image_direct(req: DirectImageRequest):
@@ -2452,7 +2456,8 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
         return JSONResponse({"ok": False, "error": "not_allowed", "reason": "cloud_blocked"}, status_code=403)
     if target == "pollinations":
         secret = _env_str("POLLINATIONS_SECRET", "")
-        if not secret:
+        app_key = _env_str("POLLINATIONS_APP_KEY", "")
+        if not secret and not app_key:
             return JSONResponse({"ok": False, "error": "missing_secret", "reason": "missing_secret"}, status_code=400)
     try:
         cur_w, cur_h = STATE.image_width, STATE.image_height
@@ -2474,6 +2479,20 @@ async def api_switch_image_backend(req: ImageBackendSwitch):
         tb = traceback.format_exc()
         print(f"[BACKEND] switch error: {e}\n{tb}")
         return JSONResponse({"ok": False, "error": f"{e}"}, status_code=500)
+
+@app.post("/api/pollinations/connect")
+async def pollinations_connect():
+    """Frontend calls this → returns URL + code for the user to open."""
+    info = start_device_flow()
+    # Start background polling
+    asyncio.create_task(poll_for_token())
+    return info  # { verification_uri, user_code, expires_in }
+
+@app.get("/api/pollinations/status")
+async def pollinations_status():
+    """Frontend polls this to know when auth is done."""
+    key = get_key()
+    return {"connected": key is not None, "prefix": key[:3] if key else None}
 
 # ---------- NEW: Comfy mode switching, remote target, and debug ----------
 

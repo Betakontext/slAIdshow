@@ -250,6 +250,21 @@
             <span id="backend-warn" class="warn" style="display:none;"></span>
           </div>
 
+          <!-- BYOP: Pollinations Connect -->
+          <div id="poll-connect-block" class="remote-block hidden" style="margin-top:8px;">
+            <div class="row" style="margin-bottom:6px;">
+              <button id="btn-poll-connect" type="button">🔗 <span id="poll-connect-label">Pollinations verbinden</span></button>
+              <span id="poll-connect-status" class="subtle"></span>
+            </div>
+            <div id="poll-connect-prompt" class="hidden" style="font-size:13px; line-height:1.6;">
+              <span id="poll-open-url-text">Öffne diese URL und gib den Code ein:</span>
+              <br>
+              <a id="poll-connect-url" target="_blank" rel="noopener" style="color:var(--accent); word-break:break-all;"></a>
+              <br>
+              <strong id="poll-connect-code" style="font-size:16px; letter-spacing:2px;"></strong>
+            </div>
+          </div>
+
           <div id="remote-config" class="remote-block hidden">
             <div class="remote-head">
               <div class="title"><strong id="remote-title">ComfyUI (cloudflared)</strong><span id="remote-subtitle" class="subtle"></span></div>
@@ -481,6 +496,10 @@
         title_gallery: "Galerie",
         btn_gallery_refresh: "Neu laden",
         gallery_hint: "Klicke auf ein Miniaturbild, um es anzuzeigen.",
+        poll_connect: "Pollinations verbinden",
+        poll_connecting: "Warte auf Freigabe…",
+        poll_connected: "✅ Verbunden",
+        poll_open_url: "Öffne diese URL und gib den Code ein:",
       },
       en: {
         brand: "Local Speech-to-Image Pipeline",
@@ -577,6 +596,10 @@
         title_gallery: "Gallery",
         btn_gallery_refresh: "Refresh",
         gallery_hint: "Click a thumbnail to view it.",
+        poll_connect: "Connect Pollinations",
+        poll_connecting: "Waiting for approval…",
+        poll_connected: "✅ Connected",
+        poll_open_url: "Open this URL and enter the code:",
       }
     };
 
@@ -1455,6 +1478,59 @@
       }
     });
 
+    // ---------- BYOP: Pollinations Device Flow ----------
+    const pollConnectBlock = document.getElementById('poll-connect-block');
+    const btnPollConnect = document.getElementById('btn-poll-connect');
+    const pollConnectStatus = document.getElementById('poll-connect-status');
+    const pollConnectPrompt = document.getElementById('poll-connect-prompt');
+    const pollConnectUrl = document.getElementById('poll-connect-url');
+    const pollConnectCode = document.getElementById('poll-connect-code');
+    let pollPollTimer = null;
+
+    // Show/hide the connect block when backend = pollinations
+    function syncPollConnectVisibility() {
+      const show = backendSelect.value === 'pollinations';
+      pollConnectBlock.classList.toggle('hidden', !show);
+    }
+    // Hook into existing backend-select change handler
+    const _origBackendChange = backendSelect.onchange;
+    backendSelect.addEventListener('change', syncPollConnectVisibility);
+
+    // Also sync on initial config load
+    const _origRefreshConfig = refreshConfig;
+    // (simpler: call syncPollConnectVisibility at end of refreshConfig — add one line there)
+
+    btnPollConnect.addEventListener('click', async () => {
+      btnPollConnect.disabled = true;
+      pollConnectStatus.textContent = t('poll_connecting');
+      pollConnectPrompt.classList.remove('hidden');
+      try {
+        const r = await fetch('/api/pollinations/connect', { method: 'POST' });
+        const d = await r.json();
+        pollConnectUrl.href = d.verification_uri;
+        pollConnectUrl.textContent = d.verification_uri;
+        pollConnectCode.textContent = d.user_code;
+
+        // Poll status every 3s
+        pollPollTimer = setInterval(async () => {
+          try {
+            const s = await (await fetch('/api/pollinations/status')).json();
+            if (s.connected) {
+              clearInterval(pollPollTimer);
+              pollPollTimer = null;
+              pollConnectPrompt.classList.add('hidden');
+              pollConnectStatus.textContent = t('poll_connected');
+              btnPollConnect.disabled = false;
+              log(statusLog, 'Pollinations BYOP: verbunden');
+            }
+          } catch {}
+        }, 3000);
+      } catch (e) {
+        pollConnectStatus.textContent = `Fehler: ${e}`;
+        btnPollConnect.disabled = false;
+      }
+    });
+
     // ---------- Remote probe ----------
     btnRemoteTest.addEventListener('click', async () => {
       const host = (remoteHost.value || '').trim();
@@ -1884,7 +1960,9 @@
         }
         syncDirectLiveHint();
 
-        if (statusEl.dataset.state !== 'connected') statusEl.textContent = t('status_ready');
+        if (statusEl.dataset.state !== 'connected')
+        statusEl.textContent = t('status_ready');
+        syncPollConnectVisibility();
       } catch (e) {
         log(statusLog, `config error: ${e}`);
         statusEl.textContent = t('config_error');

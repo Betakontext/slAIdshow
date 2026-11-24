@@ -433,8 +433,9 @@ class PollinationsConfig(BaseModel):
     def require_cloud_enabled(self) -> None:
         if not self.allow_cloud:
             raise RuntimeError("Cloud image backend not allowed (set ALLOW_CLOUD_IMAGE_BACKEND=1 to enable)")
-        if not self.secret and self.use_v1:
-            raise RuntimeError("POLLINATIONS_SECRET missing in environment for v1 API")
+        from pollinations_auth import get_key
+        if not (self.secret or get_key()) and self.use_v1:
+            raise RuntimeError("POLLINATIONS_SECRET missing and BYOP not connected")
 
 
 def _size_from_wh(width: int, height: int) -> str:
@@ -513,8 +514,10 @@ class PollinationsBackend(ImageBackend):
     async def _fetch_v1(self, prompt: str, negative: str | None, width: int | None, height: int | None) -> Path:
         self.cfg.require_cloud_enabled()
         url = f"{self.cfg.api_base}/v1/images/generations"
+        from pollinations_auth import get_key
+        key = get_key() or self.cfg.secret
         headers = {
-            "Authorization": f"Bearer {self.cfg.secret}",
+            "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
         }
         w = width if (width and width > 0) else self.cfg.width
@@ -574,8 +577,9 @@ class PollinationsBackend(ImageBackend):
             self.cfg.api_base, injected_prompt, self.cfg.model, w, h, self.cfg.nologo, self.cfg.seed
         )
         params: dict[str, str] = {}
-        if self.cfg.secret:
-            params["key"] = self.cfg.secret
+        key = get_key() or self.cfg.secret
+        if key:
+            params["key"] = key
 
         print(
             f"[POLLINATIONS GET] url_base={self.cfg.api_base} model={self.cfg.model or 'flux'} "
