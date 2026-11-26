@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Christoph Medicus
+# SPDX-License-Identifier: MIT
+
 # test_pollinations_style_ref_auto_style.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations

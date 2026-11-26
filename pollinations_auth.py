@@ -1,4 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Christoph Medicus
+# SPDX-License-Identifier: MIT
+
 # pollinations_auth.py
+
 import os, time, json
 from pathlib import Path
 import requests

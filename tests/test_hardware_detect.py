@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Christoph Medicus
+# SPDX-License-Identifier: MIT
+
 # tests/test_harware_detect.py
 """Test NVIDIA discovery with mocked NVML and isolated filesystem writes."""
 

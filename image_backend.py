@@ -1,4 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Christoph Medicus
+# SPDX-License-Identifier: MIT
+
 # image_backend.py
+
 # Production-ready image backend layer for slAIdshow.
 # - ComfyUI local (same host or LAN with discovery)
 # - ComfyUI remote (cloudflared or any reachable host)

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Christoph Medicus
+# SPDX-License-Identifier: MIT
+
 # config_generator.py
 #
 # Generate local NVIDIA configuration from hardware.json with tier-specific

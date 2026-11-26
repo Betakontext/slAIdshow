@@ -1,4 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Christoph Medicus
+# SPDX-License-Identifier: MIT
+
 # /etc/systemd/system/comfyui.service
+
 [Unit]
 Description=ComfyUI (local)
 After=network-online.target

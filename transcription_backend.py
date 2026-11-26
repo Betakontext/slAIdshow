@@ -1,3 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Christoph Medicus
+# SPDX-License-Identifier: MIT
+
+# transscription_backend.py
+
 from __future__ import annotations
 
 import asyncio

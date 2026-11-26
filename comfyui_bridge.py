@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Christoph Medicus
+# SPDX-License-Identifier: MIT
+
 # comfyui_bridge.py
 
 from __future__ import annotations

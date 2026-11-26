@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Christoph Medicus
+# SPDX-License-Identifier: MIT
+
 # utils/os_open.py
 import os
 import platform

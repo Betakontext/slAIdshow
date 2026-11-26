@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Christoph Medicus
+# SPDX-License-Identifier: MIT
+
 # hardware_detect.py
 #
 # Discover one NVIDIA GPU via NVML and atomically persist its hardware profile

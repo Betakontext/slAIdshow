@@ -1,4 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Christoph Medicus
+# SPDX-License-Identifier: MIT
+
 # model_downloader.py
+
 """
 Validate download policy without fetching unapproved model artifacts.
 

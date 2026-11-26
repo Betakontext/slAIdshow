@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Christoph Medicus
+# SPDX-License-Identifier: MIT
+
 # tests/test_config_generator.py
 
 """Test configuration generation without GPU access or network calls."""

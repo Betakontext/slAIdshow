@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Christoph Medicus
+# SPDX-License-Identifier: MIT
+
 # style_features.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations

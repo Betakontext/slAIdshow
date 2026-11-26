@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Christoph Medicus
+# SPDX-License-Identifier: MIT
+
 # Docker Compose file for slAIdshow (complete, English comments)
 
 version: "3.9"

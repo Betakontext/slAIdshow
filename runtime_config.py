@@ -1,4 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Christoph Medicus
+# SPDX-License-Identifier: MIT
+
 # runtime_config.py
+
 """Load conservative generated configuration without initializing backends.
 
 This module has no import-time filesystem, GPU, or network side effects.
