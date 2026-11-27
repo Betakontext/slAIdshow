@@ -3,8 +3,6 @@
 
 # Docker Compose file for slAIdshow (complete, English comments)
 
-version: "3.9"
-
 name: slaidshow
 
 # Common defaults for environment variables
